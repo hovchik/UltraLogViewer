@@ -94,10 +94,14 @@ page), adds a Start menu shortcut, an optional desktop shortcut, "Open with Ultr
 .log/.txt/.gz files and on the right-click menu, an optional default .log association, and an
 uninstaller.
 
+On Windows, double-click **`build-installer.cmd`** in the repo root. It installs Inno Setup with
+winget if it is missing, publishes the app, builds the installer and opens `release/installer/`.
+It needs the [.NET 8 SDK](https://dotnet.microsoft.com/download). From a terminal:
+
 ```powershell
-winget install JRSoftware.InnoSetup                 # once
-pwsh scripts/build-installer.ps1                    # Avalonia app -> release/installer/
-pwsh scripts/build-installer.ps1 -App Electron      # same installer for the Electron app
+.\build-installer.cmd                               # Avalonia app -> release/installer/
+.\build-installer.cmd -App Electron                 # same installer for the Electron app
+.\build-installer.cmd -Version 1.0.0                # override the version
 ```
 
 The [Windows installer workflow](.github/workflows/installer.yml) builds it on every change to the
