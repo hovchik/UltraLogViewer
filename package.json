@@ -32,7 +32,7 @@
     "files": ["dist/**/*", "package.json"],
     "fileAssociations": [{ "ext": ["log", "txt", "gz"], "name": "Log file", "role": "Viewer" }],
     "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"] },
-    "win": { "target": ["nsis", "portable"] },
+    "win": { "target": ["nsis", "portable"], "icon": "dotnet/src/UltraLogViewer.Desktop/Assets/app.ico" },
     "linux": { "target": ["AppImage", "deb"], "category": "Development" }
   }
 }

@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Styling;
 using Avalonia.Threading;
@@ -68,6 +69,7 @@ public sealed class MainWindow : Window, ILogGridHost
     {
         _settings = settings;
         Title = "UltraLogViewer";
+        Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://UltraLogViewer/Assets/app.ico")));
         Width = 1380;
         Height = 860;
         MinWidth = 720;
