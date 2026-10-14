@@ -196,6 +196,33 @@ public static partial class Timestamps
         return DateTimeOffset.FromUnixTimeMilliseconds(ms).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
     }
 
+    /// <summary>Full date and time, local or UTC (UTC ends with Z).</summary>
+    public static string Format(long ms, bool utc)
+    {
+        if (!utc) return Format(ms);
+        return DateTimeOffset.FromUnixTimeMilliseconds(ms).ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) + "Z";
+    }
+
+    /// <summary>Time of day with milliseconds, local or UTC (UTC ends with Z).</summary>
+    public static string FormatTimeOfDay(long ms, bool utc)
+    {
+        var d = DateTimeOffset.FromUnixTimeMilliseconds(ms);
+        return utc ? d.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + "Z" : d.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>A duration with an explicit + for positive values ("+1.250 s", "-3m 02.000s", "0 ms").</summary>
+    public static string FormatSigned(long ms) => ms > 0 ? "+" + FormatDuration(ms) : FormatDuration(ms);
+
+    /// <summary>A short gap label for the gutter: "+850ms", "+32s", "+2m", "+3h", "+1d".</summary>
+    public static string FormatGap(long ms) => ms switch
+    {
+        < 1000 => $"+{ms}ms",
+        < 60_000 => $"+{ms / 1000}s",
+        < 3_600_000 => $"+{ms / 60_000}m",
+        < 86_400_000 => $"+{ms / 3_600_000}h",
+        _ => $"+{ms / 86_400_000}d",
+    };
+
     public static string FormatDuration(long ms)
     {
         var sign = ms < 0 ? "-" : "";

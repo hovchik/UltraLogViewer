@@ -63,8 +63,33 @@ function callEngine(method: string, args: unknown[]): Promise<unknown> {
 
 const send = (cmd: string, ...args: unknown[]) => win?.webContents.send('menu', cmd, ...args);
 
+/** The settings the View menu shows as check / radio items. */
+function viewMenuState(s: Record<string, unknown>) {
+  return {
+    tintRows: s.tintRows === true,
+    tokenColors: s.tokenColors !== false,
+    comfortable: s.density === 'comfortable',
+    wrap: s.wrap === true,
+    dockRight: s.detailDock === 'right',
+    timeMode: typeof s.timeMode === 'string' ? s.timeMode : 'original',
+    timeUtc: s.timeUtc === true,
+    gaps: (typeof s.gapMs === 'number' ? s.gapMs : 10000) > 0,
+  };
+}
+let menuState = '';
+
 function buildMenu() {
-  const recent = ((readSettings().recent as string[]) ?? []).slice(0, 10);
+  const settings = readSettings();
+  const recent = ((settings.recent as string[]) ?? []).slice(0, 10);
+  const v = viewMenuState(settings);
+  menuState = JSON.stringify(v);
+  const timeModes: [string, string][] = [
+    ['original', 'Time as written'],
+    ['full', 'Full date and time'],
+    ['time', 'Time of day'],
+    ['relative', 'Relative to selected row'],
+    ['delta', 'Delta from previous row'],
+  ];
   const isMac = process.platform === 'darwin';
   const template: Electron.MenuItemConstructorOptions[] = [
     ...(isMac ? [{ role: 'appMenu' as const }] : []),
@@ -103,6 +128,23 @@ function buildMenu() {
         { label: 'Timeline', accelerator: 'CmdOrCtrl+Shift+H', click: () => send('toggle-histogram') },
         { label: 'Details pane', accelerator: 'CmdOrCtrl+Shift+D', click: () => send('toggle-detail') },
         { label: 'Sidebar', accelerator: 'CmdOrCtrl+Shift+B', click: () => send('toggle-sidebar') },
+        { label: 'Details on the right', type: 'checkbox', checked: v.dockRight, click: () => send('toggle-dock') },
+        { type: 'separator' },
+        { label: 'Tint whole rows by level', type: 'checkbox', checked: v.tintRows, click: () => send('toggle-tint') },
+        { label: 'Colour tokens in messages', type: 'checkbox', checked: v.tokenColors, click: () => send('toggle-tokens') },
+        { label: 'Comfortable rows', type: 'checkbox', checked: v.comfortable, click: () => send('toggle-density') },
+        // The renderer handles Alt+Z itself (so it also works with the menu bar hidden).
+        { label: 'Wrap long messages', type: 'checkbox', checked: v.wrap, accelerator: 'Alt+Z', registerAccelerator: false, click: () => send('toggle-wrap') },
+        {
+          label: 'Time column',
+          submenu: [
+            ...timeModes.map(([mode, label]): Electron.MenuItemConstructorOptions => ({ label, type: 'radio', checked: v.timeMode === mode, click: () => send('time-mode', mode) })),
+            { type: 'separator' },
+            { label: 'Show in UTC', type: 'checkbox', checked: v.timeUtc, click: () => send('toggle-utc') },
+            { label: 'Mark gaps over 10 s', type: 'checkbox', checked: v.gaps, click: () => send('toggle-gaps') },
+          ],
+        },
+        { type: 'separator' },
         { label: 'Columns…', click: () => send('columns') },
         { label: 'Reopen with encoding…', click: () => send('encoding') },
         { label: 'Toggle dark mode', click: () => send('toggle-theme') },
@@ -184,7 +226,11 @@ if (!app.requestSingleInstanceLock()) {
     startWorker();
     ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, args));
     ipcMain.handle('settings:get', () => readSettings());
-    ipcMain.handle('settings:set', (_e, s: Record<string, unknown>) => writeSettings(s));
+    ipcMain.handle('settings:set', (_e, s: Record<string, unknown>) => {
+      writeSettings(s);
+      // keep the View menu's check marks in sync with the renderer
+      if (JSON.stringify(viewMenuState(s)) !== menuState) buildMenu();
+    });
     ipcMain.handle('recent:add', (_e, paths: string[]) => addRecent(paths));
     ipcMain.handle('dialog:open', async (_e, multi: boolean) => {
       const r = await dialog.showOpenDialog(win!, {

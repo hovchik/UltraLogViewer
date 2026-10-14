@@ -47,6 +47,8 @@ public sealed class DocumentTab : IDisposable
     public DateTime StatsTime { get; set; }
     /// <summary>Fields expanded in the Fields panel.</summary>
     public HashSet<string> ExpandedFields { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Keys of multi-line entries expanded inline in the grid.</summary>
+    public HashSet<string> ExpandedRows { get; } = [];
 
     public string Title => Paths.Length == 1 ? Path.GetFileName(Paths[0]) : $"{Path.GetFileName(Paths[0])} + {Paths.Length - 1}";
     public int SelectionStart => Math.Min(Anchor, Focus);

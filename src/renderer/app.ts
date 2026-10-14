@@ -6,7 +6,8 @@ import { DetailView } from './detail';
 import { Grid } from './grid';
 import { HistogramView } from './histogram';
 import { Sidebar } from './sidebar';
-import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, Settings, Tab, uid } from './state';
+import type { TimeMode } from '../core/timestamp';
+import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, Settings, Tab, uid, viewSettings } from './state';
 import { $, ask, contextMenu, debounce, esc, fmtBytes, fmtNum, h, MenuItem, modal, toast } from './util';
 
 let settings: Settings = {};
@@ -24,6 +25,7 @@ const saveSettings = debounce(() => void ulv().setSettings(settings as Record<st
 
 const grid = new Grid($('#grid'), {
   highlights: () => settings.highlights ?? [],
+  view: () => viewSettings(settings),
   columnWidth: (col) => (col.width === 0 ? 0 : settings.columnWidths?.[col.key] ?? col.width),
   hiddenColumns: () => settings.hiddenColumns ?? [],
   columns: (tab) => effectiveColumns(tab),
@@ -66,11 +68,14 @@ const sidebar = new Sidebar($('#sidebar'), {
 
 const detail = new DetailView(
   $('#detail'),
-  (height) => {
-    settings.detailHeight = height;
+  (size, dock) => {
+    if (dock === 'right') settings.detailWidth = size;
+    else settings.detailHeight = size;
     saveSettings();
   },
   (e, row, key) => fieldMenu(e, row, key),
+  () => viewSettings(settings).detailDock,
+  () => setView('detailDock', viewSettings(settings).detailDock === 'right' ? 'bottom' : 'right'),
 );
 
 const histogram = new HistogramView($('#histogram'), {
@@ -84,7 +89,12 @@ const histogram = new HistogramView($('#histogram'), {
     active.filter.timeTo = to;
     void applyFilter(active);
   },
-});
+  onResize: (height) => {
+    settings.histogramHeight = height;
+    saveSettings();
+    if (active) void refreshOverview(active);
+  },
+}, $('#hist-split'));
 
 // ---------------------------------------------------------------------- tabs
 
@@ -110,6 +120,7 @@ async function openPaths(paths: string[], merge: boolean) {
       topRow: 0,
       follow: false,
       formatId: '',
+      expanded: new Set(),
     };
     tabs.push(tab);
     activate(tab);
@@ -450,7 +461,7 @@ function headerMenu(e: MouseEvent, key: string | null) {
   const cols = effectiveColumns(t);
   const hidden = settings.hiddenColumns ?? [];
   const fmt = formatName(t);
-  const items: MenuItem[] = [];
+  const items: MenuItem[] = key === 'time' ? [...timeMenuItems(), 'sep'] : [];
   const col = cols.find((c) => c.key === key);
   if (col) {
     const visible = cols.filter((c) => !hidden.includes(c.key));
@@ -1012,11 +1023,57 @@ function renderToolbar() {
 
 type LayoutKey = 'showHistogram' | 'showDetail' | 'showSidebar';
 function applyLayout() {
+  const v = viewSettings(settings);
   $('#histogram').classList.toggle('hidden', settings.showHistogram === false);
+  $('#hist-split').classList.toggle('hidden', settings.showHistogram === false);
+  histogram.setHeight(v.histogramHeight);
   $('#detail').classList.toggle('hidden', settings.showDetail === false);
   $('#sidebar').classList.toggle('hidden', settings.showSidebar === false);
-  if (settings.detailHeight) $('#detail').style.height = `${settings.detailHeight}px`;
+  $('#work').classList.toggle('dock-right', v.detailDock === 'right');
+  $('#detail').style.height = settings.detailHeight ? `${settings.detailHeight}px` : '';
+  $('#detail').style.width = v.detailDock === 'right' ? `${v.detailWidth}px` : '';
   renderToolbar();
+}
+
+// ------------------------------------------------------------ view settings
+
+type ViewKey = 'tintRows' | 'tokenColors' | 'density' | 'wrap' | 'detailDock' | 'timeMode' | 'timeUtc' | 'gapMs';
+
+/** Changes a display setting, persists it and redraws what it affects. */
+function setView<K extends ViewKey>(key: K, value: Settings[K]) {
+  settings[key] = value;
+  saveSettings();
+  if (key === 'detailDock') {
+    applyLayout();
+    if (active) void updateDetail();
+    else detail.render(null, undefined);
+    return;
+  }
+  if (key === 'tintRows' || key === 'density' || key === 'wrap') {
+    grid.applyView();
+    if (active) grid.reveal(active.focus);
+    return;
+  }
+  grid.render();
+}
+
+const TIME_MODES: [TimeMode, string][] = [
+  ['original', 'Time as written'],
+  ['full', 'Full date and time'],
+  ['time', 'Time of day'],
+  ['relative', 'Relative to selected row'],
+  ['delta', 'Delta from previous row'],
+];
+
+/** The Time column items (header right-click and View > Time column). */
+function timeMenuItems(): MenuItem[] {
+  const v = viewSettings(settings);
+  return [
+    ...TIME_MODES.map(([mode, label]): MenuItem => ({ label, checked: v.timeMode === mode, action: () => setView('timeMode', mode) })),
+    'sep',
+    { label: 'Show in UTC', checked: v.timeUtc, action: () => setView('timeUtc', !v.timeUtc) },
+    { label: 'Mark gaps over 10 s', checked: v.gapMs > 0, action: () => setView('gapMs', v.gapMs > 0 ? 0 : 10000) },
+  ];
 }
 
 function toggleLayout(key: LayoutKey) {
@@ -1177,6 +1234,7 @@ async function reopen(t: Tab, encoding: string) {
   t.search.result = null;
   t.contextMode = false;
   t.fieldStats = null;
+  t.expanded = new Set();
   if (active === t) activate(t);
 }
 
@@ -1200,6 +1258,8 @@ function showHelp() {
     ['Ctrl+C', 'Copy selected entries'],
     ['Ctrl+E', 'Export the current view (.log, .csv, .jsonl)'],
     ['Ctrl+W, Ctrl+Tab', 'Close tab, next tab'],
+    ['Alt+Z', 'Wrap long messages'],
+    ['→ / ←', 'Expand / collapse a multi-line entry'],
     ['Timeline: click / drag', 'Jump to time / filter to a time range'],
   ];
   modal((box, close) => {
@@ -1270,6 +1330,23 @@ window.ulv.onMenu((cmd, ...args) => {
       return editColumns();
     case 'toggle-theme':
       return $('#btn-theme').click();
+    case 'toggle-tint':
+      return setView('tintRows', !viewSettings(settings).tintRows);
+    case 'toggle-tokens':
+      return setView('tokenColors', !viewSettings(settings).tokenColors);
+    case 'toggle-density':
+      return setView('density', viewSettings(settings).density === 'comfortable' ? 'compact' : 'comfortable');
+    case 'toggle-wrap':
+      return setView('wrap', !viewSettings(settings).wrap);
+    case 'toggle-dock':
+      return setView('detailDock', viewSettings(settings).detailDock === 'right' ? 'bottom' : 'right');
+    case 'time-mode':
+      if (TIME_MODES.some(([m]) => m === args[0])) setView('timeMode', args[0] as TimeMode);
+      return;
+    case 'toggle-utc':
+      return setView('timeUtc', !viewSettings(settings).timeUtc);
+    case 'toggle-gaps':
+      return setView('gapMs', viewSettings(settings).gapMs > 0 ? 0 : 10000);
     case 'help':
       return showHelp();
   }
@@ -1290,6 +1367,9 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === 'F1') {
     e.preventDefault();
     showHelp();
+  } else if (e.altKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyZ' || e.key === 'z' || e.key === 'Z')) {
+    e.preventDefault();
+    setView('wrap', !viewSettings(settings).wrap);
   }
 });
 
@@ -1320,6 +1400,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 async function init() {
   settings = (await ulv().getSettings()) as Settings;
   settings.highlights ??= DEFAULT_HIGHLIGHTS.map((r) => ({ ...r }));
+  grid.applyView(false);
   applyTheme();
   applyLayout();
   renderFormatOptions();

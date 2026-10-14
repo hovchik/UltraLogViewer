@@ -18,6 +18,7 @@ public sealed class HistogramView : Control
     private (long From, long To)? _viewport;
     private double? _dragStart;
     private double _dragEnd;
+    private int _hover = -1;
 
     /// <summary>Raised with the time under a click.</summary>
     public event Action<long>? Jump;
@@ -28,6 +29,7 @@ public sealed class HistogramView : Control
     public HistogramView()
     {
         Height = 64;
+        MinHeight = 40;
         ClipToBounds = true;
         Cursor = new Cursor(StandardCursorType.Cross);
         ActualThemeVariantChanged += (_, _) => InvalidateVisual();
@@ -113,10 +115,19 @@ public sealed class HistogramView : Control
         var bucketLabel = new FormattedText($"{Timestamps.FormatDuration(d.BucketMs)} / bar", CultureInfo.InvariantCulture, FlowDirection.LeftToRight, Typeface.Default, 10, p.Fg3);
         ctx.DrawText(bucketLabel, new Point(Bounds.Width * 0.75 - bucketLabel.Width / 2, Bounds.Height - AxisHeight));
 
+        if (_hover >= 0 && _hover < d.Counts.Length && _dragStart is null)
+            ctx.FillRectangle(new ImmutableSolidColorBrush(((ISolidColorBrush)p.Fg).Color, 0.12), new Rect(_hover * bw, 0, Math.Max(1, bw), Bounds.Height - AxisHeight));
         if (_viewport is { } vp)
         {
             var x1 = Math.Max(0, XOf(vp.From));
             var x2 = Math.Min(Bounds.Width, Math.Max(x1 + 2, XOf(vp.To)));
+            if (x2 - x1 < Bounds.Width * 0.9)
+            {
+                // dim what is outside the rows on screen
+                var dim = new ImmutableSolidColorBrush(((ISolidColorBrush)p.Bg).Color, 0.35);
+                ctx.FillRectangle(dim, new Rect(0, 0, x1, Bounds.Height - AxisHeight));
+                ctx.FillRectangle(dim, new Rect(x2, 0, Math.Max(0, Bounds.Width - x2), Bounds.Height - AxisHeight));
+            }
             ctx.DrawRectangle(null, new Pen(p.Fg2, 1), new Rect(x1 + 0.5, 0.5, Math.Max(1, x2 - x1 - 1), Bounds.Height - AxisHeight - 1));
         }
         if (_dragStart is double ds)
@@ -145,12 +156,45 @@ public sealed class HistogramView : Control
             _dragEnd = Math.Clamp(x, 0, Bounds.Width);
             InvalidateVisual();
         }
-        if (_data is { } d && Bounds.Width > 0)
+        if (_data is { Counts.Length: > 0 } d && Bounds.Width > 0)
         {
             var i = Math.Clamp((int)(x / BarWidth), 0, d.Counts.Length - 1);
-            var (o, w, er) = d.Counts[i];
-            ToolTip.SetTip(this, $"{Timestamps.Format(d.Start + i * d.BucketMs)}\n{o + w + er:N0} entries · {w:N0} warnings · {er:N0} errors");
+            if (i != _hover)
+            {
+                _hover = i;
+                ToolTip.SetTip(this, Tip(d, i));
+                InvalidateVisual();
+            }
         }
+    }
+
+    protected override void OnPointerExited(PointerEventArgs e)
+    {
+        base.OnPointerExited(e);
+        _hover = -1;
+        InvalidateVisual();
+    }
+
+    /// <summary>Bucket time range, entry count, and warnings/errors when there are any.</summary>
+    public static string Tip(Histogram d, int i)
+    {
+        var from = d.Start + i * d.BucketMs;
+        var to = from + d.BucketMs;
+        var a = DateTimeOffset.FromUnixTimeMilliseconds(from).ToLocalTime();
+        var b = DateTimeOffset.FromUnixTimeMilliseconds(to).ToLocalTime();
+        var multiDay = d.Counts.Length * d.BucketMs > 86_400_000L || a.Date != b.Date;
+        var fmt = multiDay ? "yyyy-MM-dd HH:mm:ss" : "HH:mm:ss";
+        var (o, w, er) = d.Counts[i];
+        var lines = new List<string>
+        {
+            $"{a.ToString(fmt, CultureInfo.InvariantCulture)} – {b.ToString(fmt, CultureInfo.InvariantCulture)}",
+            $"{o + w + er:N0} {(o + w + er == 1 ? "entry" : "entries")}",
+        };
+        var parts = new List<string>();
+        if (w > 0) parts.Add($"{w:N0} {(w == 1 ? "warning" : "warnings")}");
+        if (er > 0) parts.Add($"{er:N0} {(er == 1 ? "error" : "errors")}");
+        if (parts.Count > 0) lines.Add(string.Join(" · ", parts));
+        return string.Join("\n", lines);
     }
 
     protected override void OnPointerReleased(PointerReleasedEventArgs e)

@@ -1,3 +1,4 @@
+import type { TimeMode } from '../core/timestamp';
 import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, SearchResult, TextPattern } from '../core/types';
 
 export interface HighlightRule extends TextPattern {
@@ -44,7 +45,56 @@ export interface Settings {
   columnOrder?: Record<string, string[]>;
   /** Quick-filter queries, most recent first. */
   queryHistory?: string[];
+  /** Tint whole rows by level (the pre-phase-2 look) instead of a level stripe in the gutter. */
+  tintRows?: boolean;
+  /** Colour dates, numbers, ids, URLs… in the message column. */
+  tokenColors?: boolean;
+  density?: 'compact' | 'comfortable';
+  /** Soft-wrap the message column (up to 8 lines). */
+  wrap?: boolean;
+  detailDock?: 'bottom' | 'right';
+  detailWidth?: number;
+  timeMode?: TimeMode;
+  timeUtc?: boolean;
+  /** Mark time gaps of at least this many ms between consecutive rows (0 = off). */
+  gapMs?: number;
+  histogramHeight?: number;
 }
+
+/** Display settings with their defaults resolved. */
+export interface ViewSettings {
+  tintRows: boolean;
+  tokenColors: boolean;
+  density: 'compact' | 'comfortable';
+  wrap: boolean;
+  detailDock: 'bottom' | 'right';
+  detailWidth: number;
+  timeMode: TimeMode;
+  timeUtc: boolean;
+  gapMs: number;
+  histogramHeight: number;
+}
+
+export function viewSettings(s: Settings): ViewSettings {
+  return {
+    tintRows: s.tintRows ?? false,
+    tokenColors: s.tokenColors ?? true,
+    density: s.density ?? 'compact',
+    wrap: s.wrap ?? false,
+    detailDock: s.detailDock ?? 'bottom',
+    detailWidth: Math.max(200, s.detailWidth ?? 420),
+    timeMode: s.timeMode ?? 'original',
+    timeUtc: s.timeUtc ?? false,
+    gapMs: s.gapMs ?? 10000,
+    histogramHeight: Math.max(40, Math.min(240, s.histogramHeight ?? 64)),
+  };
+}
+
+/** Row height and font size per density; continuation/wrapped lines use round(fontSize * 1.4). */
+export const DENSITY = {
+  compact: { rowH: 20, fontSize: 12.5 },
+  comfortable: { rowH: 26, fontSize: 13.5 },
+} as const;
 
 export interface Tab {
   id: number;
@@ -71,6 +121,8 @@ export interface Tab {
   statsAt?: number;
   /** Fields expanded in the sidebar's Fields section. */
   expandedFields?: Set<string>;
+  /** Keys of multi-line entries expanded inline in the grid. */
+  expanded: Set<string>;
 }
 
 export const defaultFilter = (): FilterSpec => ({ levels: [true, true, true, true, true, true, true], rules: [], query: '', context: 0 });

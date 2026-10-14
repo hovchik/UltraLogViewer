@@ -1,4 +1,5 @@
-// Bottom pane: the selected entry in full, with parsed fields and pretty-printed JSON/XML.
+// Details pane (docked at the bottom or on the right): the selected entry in full, with parsed
+// fields and pretty-printed JSON/XML.
 
 import type { RowData } from '../core/types';
 import { formatDuration, formatTime } from '../core/timestamp';
@@ -8,10 +9,18 @@ import { esc, h, prettyEntry, toast } from './util';
 export class DetailView {
   constructor(
     private el: HTMLElement,
-    private onResize: (height: number) => void,
+    /** Called after a drag with the new height (bottom dock) or width (right dock). */
+    private onResize: (size: number, dock: 'bottom' | 'right') => void,
     /** Right-click on a parsed field row. */
     private onFieldMenu: (e: MouseEvent, row: RowData, key: string) => void,
+    private dock: () => 'bottom' | 'right',
+    private onToggleDock: () => void,
   ) {}
+
+  private dockButton() {
+    const right = this.dock() === 'right';
+    return h('button', { class: 'mini dock-btn', title: right ? 'Dock bottom' : 'Dock right', onclick: () => this.onToggleDock() }, '⇆');
+  }
 
   render(tab: Tab | null, row: RowData | undefined, selectionEnd?: RowData) {
     this.el.innerHTML = '';
@@ -19,7 +28,7 @@ export class DetailView {
     resizer.addEventListener('mousedown', (e) => this.startResize(e));
     this.el.append(resizer);
     if (!tab || !row) {
-      this.el.append(h('div', { class: 'placeholder' }, 'Select a row to see the full entry.'));
+      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), h('div', { class: 'placeholder' }, 'Select a row to see the full entry.'));
       return;
     }
     const src = tab.info.sources[row.source];
@@ -37,6 +46,7 @@ export class DetailView {
     bar.append(
       h('span', { class: 'sp' }),
       h('button', { class: 'mini', onclick: () => navigator.clipboard.writeText(row.text).then(() => toast('Entry copied')) }, 'Copy entry'),
+      this.dockButton(),
     );
     const fields = h('div', { class: 'fields' });
     const table = h('table');
@@ -64,16 +74,24 @@ export class DetailView {
 
   private startResize(e: MouseEvent) {
     e.preventDefault();
+    const dock = this.dock();
+    const startX = e.clientX;
     const startY = e.clientY;
     const startH = this.el.offsetHeight;
+    const startW = this.el.offsetWidth;
     const move = (ev: MouseEvent) => {
-      const hgt = Math.max(80, Math.min(window.innerHeight * 0.7, startH - (ev.clientY - startY)));
-      this.el.style.height = `${hgt}px`;
+      if (dock === 'right') {
+        const w = Math.max(200, Math.min(window.innerWidth * 0.8, startW - (ev.clientX - startX)));
+        this.el.style.width = `${w}px`;
+      } else {
+        const hgt = Math.max(80, Math.min(window.innerHeight * 0.7, startH - (ev.clientY - startY)));
+        this.el.style.height = `${hgt}px`;
+      }
     };
     const up = () => {
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
-      this.onResize(this.el.offsetHeight);
+      this.onResize(dock === 'right' ? this.el.offsetWidth : this.el.offsetHeight, dock);
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);

@@ -307,6 +307,99 @@ public sealed class UiTests : IDisposable
         w.Close();
     }
 
+    [AvaloniaFact]
+    public async Task Display_refresh_wraps_expands_and_formats_time()
+    {
+        var sb = new StringBuilder();
+        var t0 = new DateTime(2024, 3, 1, 10, 0, 0);
+        for (var i = 0; i < 60; i++)
+        {
+            var t = t0.AddSeconds(i * 2 + (i >= 20 ? 30 : 0)).ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+            var msg = (i % 6) switch
+            {
+                0 => $"GET https://shop.example.com/api/orders/{i}?expand=items status=200 took {i * 3}ms from 10.0.4.{i}:51234",
+                1 => $"user=alice order={i} total=19.99 paid=true id=9f1c2e7a-1b2c-4d5e-8f90-1234567890ab",
+                2 => $"Wrote snapshot to /var/lib/shop/snapshots/{i}.bin in 1.5s (\"compact\" mode)",
+                3 => "Cache refresh finished; " + string.Join(" ", Enumerable.Range(0, 40).Select(k => $"region{k}=ok")),
+                4 => $"Retrying payment {i}: attempt 2 of 5, backoff 250ms",
+                _ => $"Handled request {i} at 2024-03-01T10:00:{i % 60:00}Z",
+            };
+            var level = i % 9 == 8 ? "ERROR" : i % 5 == 4 ? "WARN " : i % 7 == 3 ? "DEBUG" : "INFO ";
+            sb.Append($"{t} [main] {level} com.shop.Api - {msg}\n");
+            if (i == 8) sb.Append("java.lang.IllegalStateException: order 8 was already paid\n\tat com.shop.PaymentService.charge(PaymentService.java:41)\n\tat com.shop.Api.handle(Api.java:120)\n");
+        }
+        var path = Path.Combine(_dir, "display.log");
+        File.WriteAllText(path, sb.ToString());
+        var (w, settings) = NewWindow();
+        Assert.False(settings.TintRows);
+        Assert.True(settings.TokenColors);
+        var tab = await Open(w, path);
+        var grid = w.GridForTest;
+        await Until(() => grid.GetCached(30) is not null && grid.LayoutForTest.Count > 20);
+        Assert.Equal(20, grid.RowHeight);
+        Assert.Equal(64, w.HistogramForTest.Bounds.Height, 0.5);
+        Screenshot(w, "display-stripe-tokens.png");
+
+        // inline expand of the multi-line entry with → and ←
+        w.LogView.Focus();
+        grid.Select(8);
+        var key = grid.GetCached(8)!.Key;
+        w.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
+        Assert.Contains(key, tab.ExpandedRows);
+        await Until(() => grid.LayoutForTest.Any(b => b.Row == 8 && b.H > 40));
+        w.KeyPressQwerty(PhysicalKey.ArrowLeft, RawInputModifiers.None);
+        Assert.Empty(tab.ExpandedRows);
+        await Until(() => grid.LayoutForTest.Single(b => b.Row == 8).H == 20);
+
+        // soft wrap with Alt+Z: the long message spans several lines
+        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Alt);
+        Assert.True(settings.Wrap);
+        w.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
+        await Until(() => grid.LayoutForTest.Any(b => b.Row == 3 && b.H > 30));
+        Assert.Equal(20, grid.LayoutForTest.Single(b => b.Row == 4).H);
+        Screenshot(w, "display-wrap-expand.png");
+        w.KeyPressQwerty(PhysicalKey.Z, RawInputModifiers.Alt);
+        Assert.False(settings.Wrap);
+
+        // time column modes
+        w.SetDisplayForTest(s => s.TimeMode = "delta");
+        Assert.Equal("", grid.TimeTextForTest(0));
+        Assert.Equal("+2.000 s", grid.TimeTextForTest(1));
+        Assert.Equal("+32.000 s", grid.TimeTextForTest(20));
+        w.SetDisplayForTest(s => s.TimeMode = "relative");
+        Assert.Equal("0 ms", grid.TimeTextForTest(8));
+        Assert.Equal("-16.000 s", grid.TimeTextForTest(0));
+        w.SetDisplayForTest(s => { s.TimeMode = "time"; s.TimeUtc = false; });
+        Assert.Equal("10:00:02.000", grid.TimeTextForTest(1));
+        w.SetDisplayForTest(s => s.TimeMode = "original");
+        Assert.Equal("2024-03-01 10:00:02.000", grid.TimeTextForTest(1));
+
+        // comfortable density, delta time, details docked on the right
+        w.SetDisplayForTest(s => { s.Density = "comfortable"; s.TimeMode = "delta"; });
+        Assert.Equal(26, grid.RowHeight);
+        var before = grid.Bounds.Width;
+        w.SetDetailDockForTest(true);
+        Assert.Equal("right", settings.DetailDock);
+        await Until(() => grid.Bounds.Width < before - 300);
+        Screenshot(w, "details-right.png");
+        w.SetDetailDockForTest(false);
+        await Until(() => Math.Abs(grid.Bounds.Width - before) < 1);
+        w.Close();
+    }
+
+    [Fact]
+    public void Histogram_tooltip_names_the_bucket_and_counts()
+    {
+        var start = new DateTimeOffset(2024, 3, 1, 10, 0, 0, TimeSpan.Zero).ToUnixTimeMilliseconds();
+        var h = new Histogram(start, 60_000, [(5, 0, 0), (10, 2, 1)]);
+        var local = DateTimeOffset.FromUnixTimeMilliseconds(start + 60_000).ToLocalTime();
+        var tip = Controls.HistogramView.Tip(h, 1).Split('\n');
+        Assert.Equal($"{local:HH:mm:ss} – {local.AddMinutes(1):HH:mm:ss}", tip[0]);
+        Assert.Equal("13 entries", tip[1]);
+        Assert.Equal("2 warnings · 1 error", tip[2]);
+        Assert.Equal(2, Controls.HistogramView.Tip(h, 0).Split('\n').Length);
+    }
+
     [Fact]
     public void Pretty_prints_embedded_json_and_xml()
     {
