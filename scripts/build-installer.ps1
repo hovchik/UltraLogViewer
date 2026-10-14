@@ -26,7 +26,9 @@ param(
   # Reuse the existing publish output instead of building the app again.
   [switch]$SkipBuild,
   # Path to ISCC.exe; found automatically when omitted.
-  [string]$Iscc = $env:ISCC
+  [string]$Iscc = $env:ISCC,
+  # Install Inno Setup with winget when it is missing (used by build-installer.cmd).
+  [switch]$InstallTools
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,13 +51,23 @@ function Find-Iscc {
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
   )
   foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+  if ($InstallTools -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Write-Host 'Inno Setup 6 not found; installing it with winget...' -ForegroundColor Yellow
+    Invoke-Native 'winget' @('install', '--id', 'JRSoftware.InnoSetup', '-e', '--silent', '--accept-package-agreements', '--accept-source-agreements')
+    foreach ($c in $candidates) { if ($c -and (Test-Path $c)) { return $c } }
+  }
   throw 'Inno Setup 6 not found. Install it with "winget install JRSoftware.InnoSetup" or pass -Iscc <path to ISCC.exe>.'
+}
+
+function Assert-Tool([string]$name, [string]$hint) {
+  if (-not (Get-Command $name -ErrorAction SilentlyContinue)) { throw "$name not found. $hint" }
 }
 
 if ($App -eq 'Avalonia') {
   $sourceDir = Join-Path $root 'release/avalonia-win-x64'
   if (-not $Version) { $Version = ([xml](Get-Content $project)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1 }
   if (-not $SkipBuild) {
+    Assert-Tool 'dotnet' 'Install the .NET 8 SDK: winget install Microsoft.DotNet.SDK.8'
     if (Test-Path $sourceDir) { Remove-Item $sourceDir -Recurse -Force }
     Invoke-Native 'dotnet' @('publish', $project, '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
       '-p:DebugType=none', "-p:Version=$Version", '-o', $sourceDir)
@@ -64,6 +76,7 @@ if ($App -eq 'Avalonia') {
   $sourceDir = Join-Path $root 'release/win-unpacked'
   if (-not $Version) { $Version = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version }
   if (-not $SkipBuild) {
+    Assert-Tool 'npm' 'Install Node.js: winget install OpenJS.NodeJS.LTS'
     Push-Location $root
     try { Invoke-Native 'npm' @('run', 'dist:win-dir') } finally { Pop-Location }
   }
