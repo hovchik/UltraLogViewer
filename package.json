@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:e2e": "npm run build && node e2e/smoke.mjs",
     "gen:sample": "node scripts/gen-sample.mjs",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "dist:win-dir": "npm run build && electron-builder --win dir --x64"
   },
   "devDependencies": {
     "@types/node": "22.18.0",
@@ -27,6 +28,7 @@
   },
   "build": {
     "appId": "com.ultralogviewer.app",
+    "directories": { "output": "release" },
     "files": ["dist/**/*", "package.json"],
     "fileAssociations": [{ "ext": ["log", "txt", "gz"], "name": "Log file", "role": "Viewer" }],
     "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"] },
