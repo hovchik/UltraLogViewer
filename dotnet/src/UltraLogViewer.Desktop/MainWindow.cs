@@ -1380,6 +1380,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void ToggleHistogram(bool on)
     {
+        // no timeline to show: leave the preference alone for files that have timestamps
+        if (Timeless(_active))
+        {
+            _histBtn.IsChecked = _settings.ShowHistogram;
+            return;
+        }
         SaveHistogramSize();
         _settings.ShowHistogram = on;
         _histBtn.IsChecked = on;

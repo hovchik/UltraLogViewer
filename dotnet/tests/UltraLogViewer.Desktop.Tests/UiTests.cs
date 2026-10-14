@@ -103,7 +103,7 @@ public sealed class UiTests : IDisposable
     [AvaloniaFact]
     public async Task Names_the_format_and_opens_plain_text_without_timestamps()
     {
-        var (w, _) = NewWindow();
+        var (w, settings) = NewWindow();
         await Open(w, Sample("app.log", 50));
         await Until(() => w.FormatStatusForTest == "Timestamped text · auto");
         Assert.Equal("Auto: Timestamped text", w.FormatPickerTextForTest);
@@ -122,6 +122,8 @@ public sealed class UiTests : IDisposable
         Assert.Contains("no known log layout", MainWindow.FormatSummary(tab)!.Value.Tip);
         Assert.False(w.HistogramForTest.IsVisible);
         Assert.False(w.TimelineButtonEnabledForTest);
+        w.ToggleHistogramForTest(false); // Ctrl+Shift+H does nothing without a timeline
+        Assert.True(settings.ShowHistogram);
         Screenshot(w, "plain-text.png");
 
         // choosing a format by hand is shown as such, and auto goes back to detection

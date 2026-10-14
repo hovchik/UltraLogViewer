@@ -379,6 +379,10 @@ await step('names the detected format and opens plain text without timestamps', 
   assert.equal((await win.locator('.grid-rows .r:has-text("could not copy") .c[data-col="level"]').innerText()).trim(), 'ERROR');
   await win.waitForSelector('#histogram.hidden', { state: 'attached' });
   assert.ok(await win.locator('#btn-hist').isDisabled());
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+H');
+  await win.waitForTimeout(200);
+  assert.ok(await win.locator('#btn-hist').evaluate((b) => b.classList.contains('on')), 'Ctrl+Shift+H must not turn the timeline preference off');
   assert.match(await win.locator('#sidebar').innerText(), /No timestamps in this file/);
   await shot('24-plain-text');
   await win.selectOption('#format', 'timestamped');

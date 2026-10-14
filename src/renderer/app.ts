@@ -1428,6 +1428,8 @@ function timeMenuItems(): MenuItem[] {
 }
 
 function toggleLayout(key: LayoutKey) {
+  // no timeline to show: leave the preference alone for files that have timestamps
+  if (key === 'showHistogram' && timeless(active)) return;
   settings[key] = settings[key] === false;
   saveSettings();
   applyLayout();
