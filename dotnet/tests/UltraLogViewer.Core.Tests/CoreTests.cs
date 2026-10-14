@@ -243,3 +243,54 @@ public class FileSourceTests
         Assert.Equal("logger:\"a b\"", Query.FieldToken("logger", "a b"));
     }
 }
+
+public class TokenizerTests
+{
+    private static List<(string, TokenKind)> T(string s) => Tokenizer.Tokenize(s).Select(t => (s.Substring(t.Start, t.Length), t.Kind)).ToList();
+
+    [Fact]
+    public void FindsKeysGuidsIpsAndDurations()
+    {
+        Assert.Equal(
+            [("user", TokenKind.Key), ("id", TokenKind.Key), ("550e8400-e29b-41d4-a716-446655440000", TokenKind.Guid), ("10.0.0.12:8080", TokenKind.Ip), ("35ms", TokenKind.Duration)],
+            T("user=bob id=550e8400-e29b-41d4-a716-446655440000 from 10.0.0.12:8080 took 35ms"));
+    }
+
+    [Fact]
+    public void UrlsPathsExceptionsAndLiterals()
+    {
+        Assert.Equal([("GET", TokenKind.Method), ("https://x.io/a?b=1", TokenKind.Url)], T("GET https://x.io/a?b=1, done"));
+        Assert.Equal([("/var/log/app.log", TokenKind.Path)], T("at /var/log/app.log"));
+        Assert.Equal([(@"C:\logs\app.log", TokenKind.Path)], T(@"open C:\logs\app.log failed"));
+        Assert.Equal([("java.lang.NullPointerException", TokenKind.Exception)], T("java.lang.NullPointerException"));
+        Assert.Equal([("42", TokenKind.Number), ("ok", TokenKind.Key), ("true", TokenKind.Keyword)], T("count 42 ok=true"));
+        Assert.Equal([("\"quoted text\"", TokenKind.String)], T("\"quoted text\""));
+        Assert.Equal([("2024-01-02T03:04:05.123Z", TokenKind.Date)], T("2024-01-02T03:04:05.123Z"));
+        Assert.Equal([("12:30:01.5", TokenKind.Date)], T("at 12:30:01.5"));
+        Assert.Empty(T("v1.2.3 don't"));
+    }
+
+    [Fact]
+    public void CapsTokenCountAndLength()
+    {
+        Assert.Equal(5, Tokenizer.Tokenize(string.Join(' ', Enumerable.Range(0, 50)), 5).Count);
+        var tokens = Tokenizer.Tokenize(new string('x', 2500) + " 42");
+        Assert.Empty(tokens);
+    }
+}
+
+public class TimeFormatTests
+{
+    [Fact]
+    public void FormatsModes()
+    {
+        var ms = new DateTimeOffset(2024, 5, 1, 10, 2, 3, 45, TimeSpan.Zero).ToUnixTimeMilliseconds();
+        Assert.Equal("2024-05-01 10:02:03.045Z", Timestamps.Format(ms, true));
+        Assert.Equal("10:02:03.045Z", Timestamps.FormatTimeOfDay(ms, true));
+        Assert.Equal(DateTimeOffset.FromUnixTimeMilliseconds(ms).ToLocalTime().ToString("HH:mm:ss.fff"), Timestamps.FormatTimeOfDay(ms, false));
+        Assert.Equal("+1.250 s", Timestamps.FormatSigned(1250));
+        Assert.Equal("-03m 02.000s", Timestamps.FormatSigned(-182000));
+        Assert.Equal("0 ms", Timestamps.FormatSigned(0));
+        Assert.Equal(["+850ms", "+32s", "+2m", "+3h", "+1d"], new[] { 850L, 32_000, 125_000, 3 * 3_600_000 + 5, 90_000_000 }.Select(Timestamps.FormatGap));
+    }
+}

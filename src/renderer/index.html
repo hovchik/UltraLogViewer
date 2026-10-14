@@ -45,19 +45,22 @@
         <aside id="sidebar" class="sidebar"></aside>
         <section class="center">
           <div id="histogram" class="histogram"><canvas></canvas><div class="hist-tip"></div></div>
+          <div id="hist-split" class="hsplit" title="Drag to resize the timeline"></div>
           <div id="ctx-banner" class="ctx-banner hidden">
             <span class="msg"></span>
             <button id="ctx-exit" class="mini">Back to filtered view (Esc)</button>
           </div>
-          <div id="grid" class="grid" tabindex="0">
-            <div class="grid-header"></div>
-            <div class="grid-body">
-              <div class="grid-scroll"><div class="grid-spacer"></div></div>
-              <div class="grid-rows"></div>
-              <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
+          <div id="work" class="work">
+            <div id="grid" class="grid" tabindex="0">
+              <div class="grid-header"></div>
+              <div class="grid-body">
+                <div class="grid-scroll"><div class="grid-spacer"></div></div>
+                <div class="grid-rows"></div>
+                <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
+              </div>
             </div>
+            <div id="detail" class="detail"></div>
           </div>
-          <div id="detail" class="detail"></div>
           <div id="empty" class="empty">
             <div class="empty-card">
               <h1>UltraLogViewer</h1>

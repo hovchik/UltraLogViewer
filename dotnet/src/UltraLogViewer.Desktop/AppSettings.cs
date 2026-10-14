@@ -52,6 +52,26 @@ public sealed class AppSettings
     /// <summary>Recently applied quick-filter queries, most recent first.</summary>
     public List<string> QueryHistory { get; set; } = [];
 
+    /// <summary>Old look: tint the whole row by level instead of a stripe and coloured level cell.</summary>
+    public bool TintRows { get; set; }
+    /// <summary>Colour dates, numbers, IPs, URLs, keys, ... in messages.</summary>
+    public bool TokenColors { get; set; } = true;
+    /// <summary>"compact" (20 px rows) or "comfortable" (26 px rows).</summary>
+    public string Density { get; set; } = "compact";
+    /// <summary>Wrap long messages over up to 8 lines.</summary>
+    public bool Wrap { get; set; }
+    /// <summary>"bottom" or "right".</summary>
+    public string DetailDock { get; set; } = "bottom";
+    public double DetailWidth { get; set; } = 420;
+    /// <summary>"original", "full", "time", "relative" or "delta".</summary>
+    public string TimeMode { get; set; } = "original";
+    public bool TimeUtc { get; set; }
+    /// <summary>Mark gaps between consecutive rows of at least this many milliseconds (0 = off).</summary>
+    public long GapMs { get; set; } = 10000;
+    public double HistogramHeight { get; set; } = 64;
+
+    [JsonIgnore] public bool Comfortable => Density == "comfortable";
+
     [JsonIgnore] public string? FilePath { get; set; }
 
     public static List<HighlightRule> DefaultHighlights() =>

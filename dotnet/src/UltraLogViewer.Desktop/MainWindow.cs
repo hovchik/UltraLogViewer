@@ -240,6 +240,13 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("_Sidebar", () => ToggleSidebar(!_settings.ShowSidebar)),
                         Item("Dark / light _theme", CycleTheme),
                         new Separator(),
+                        Check("Tint whole rows by level", () => _settings.TintRows, () => SetDisplay(() => _settings.TintRows = !_settings.TintRows)),
+                        Check("Colour tokens in messages", () => _settings.TokenColors, () => SetDisplay(() => _settings.TokenColors = !_settings.TokenColors)),
+                        Check("Comfortable rows", () => _settings.Comfortable, () => SetDisplay(() => _settings.Density = _settings.Comfortable ? "compact" : "comfortable")),
+                        Check("_Wrap long messages", () => _settings.Wrap, () => SetDisplay(() => _settings.Wrap = !_settings.Wrap), new KeyGesture(Key.Z, KeyModifiers.Alt)),
+                        Check("Details on the right", () => DockRight, () => SetDetailDock(!DockRight)),
+                        TimeMenu(new MenuItem { Header = "Time _column" }),
+                        new Separator(),
                         Item("Next tab", () => CycleTab(1), new KeyGesture(Key.Tab, KeyModifiers.Control)),
                     },
                 },
@@ -317,20 +324,32 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _detailSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Height = 5, Background = new SolidColorBrush(Color.Parse("#808080"), 0.25) };
 
         _contextBanner = BuildContextBanner();
-        _center = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto,Auto") };
-        _center.RowDefinitions[DetailRow].Height = new GridLength(_settings.DetailHeight);
-        _center.RowDefinitions[DetailRow].MinHeight = 0;
+        // timeline (resizable) | context banner | work area: the grid with the details pane docked bottom or right
+        _histSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Height = 4, Background = new SolidColorBrush(Color.Parse("#808080"), 0.25) };
+        _hist.Height = double.NaN;
+        _center = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*") };
+        _center.RowDefinitions[0].MinHeight = 0;
+        _center.RowDefinitions[0].MaxHeight = 240;
         Grid.SetRow(_hist, 0);
-        Grid.SetRow(_contextBanner, 1);
-        Grid.SetRow(_grid, 2);
-        Grid.SetRow(_detailSplitter, 3);
-        Grid.SetRow(detailPane, DetailRow);
+        Grid.SetRow(_histSplitter, 1);
+        Grid.SetRow(_work, 2);
         _center.Children.Add(_hist);
-        _center.Children.Add(_contextBanner);
-        _center.Children.Add(_grid);
-        _center.Children.Add(_detailSplitter);
-        _center.Children.Add(detailPane);
+        _center.Children.Add(_histSplitter);
+        _center.Children.Add(_work);
+        var gridHost = new DockPanel { Children = { _contextBanner, _grid } };
+        DockPanel.SetDock(_contextBanner, Dock.Top);
+        _work.Children.Add(gridHost);
+        _work.Children.Add(_detailSplitter);
+        _work.Children.Add(detailPane);
         _detailPane = detailPane;
+        // never let a saved pane size (from a bigger window) squeeze the grid out
+        _work.SizeChanged += (_, e) =>
+        {
+            _work.ColumnDefinitions[2].MaxWidth = Math.Max(200, e.NewSize.Width * 0.8);
+            _work.RowDefinitions[2].MaxHeight = Math.Max(80, e.NewSize.Height * 0.8);
+        };
+        ApplyHistogramSize();
+        ApplyDock();
         ToggleDetail(_settings.ShowDetail, save: false);
 
         _welcome = BuildWelcome();
@@ -438,7 +457,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
         Activate(null);
     }
 
-    private const int DetailRow = 4;
+    private readonly Grid _work = new() { RowDefinitions = new RowDefinitions("*,Auto,Auto"), ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto") };
+    private readonly GridSplitter _histSplitter;
+    private bool DockRight => _settings.DetailDock == "right";
     private readonly Control _detailPane;
     private readonly Control _sideBorder;
 
@@ -1268,23 +1289,87 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void ToggleHistogram(bool on)
     {
+        SaveHistogramSize();
         _settings.ShowHistogram = on;
         _histBtn.IsChecked = on;
         _hist.IsVisible = on;
+        ApplyHistogramSize();
         _settings.Save();
         if (on) Run(RefreshHistogramAsync);
     }
 
     private void ToggleDetail(bool on, bool save = true)
     {
-        if (!on && _detailPane.IsVisible) _settings.DetailHeight = Math.Max(80, _center.RowDefinitions[DetailRow].ActualHeight);
+        if (!on) SaveDetailSize();
         _settings.ShowDetail = on;
         _detailBtn.IsChecked = on;
         _detailPane.IsVisible = on;
         _detailSplitter.IsVisible = on;
-        _center.RowDefinitions[DetailRow].Height = on ? new GridLength(_settings.DetailHeight) : new GridLength(0);
+        ApplyDetailSize();
         if (save) _settings.Save();
         if (on) UpdateDetail();
+    }
+
+    /// <summary>Remembers the details pane's current height (bottom dock) or width (right dock).</summary>
+    private void SaveDetailSize()
+    {
+        if (!_detailPane.IsVisible) return;
+        if (DockRight)
+        {
+            if (_work.ColumnDefinitions[2].ActualWidth > 0) _settings.DetailWidth = Math.Max(200, _work.ColumnDefinitions[2].ActualWidth);
+        }
+        else if (_work.RowDefinitions[2].ActualHeight > 0) _settings.DetailHeight = Math.Max(80, _work.RowDefinitions[2].ActualHeight);
+    }
+
+    private void ApplyDetailSize()
+    {
+        var on = _settings.ShowDetail;
+        _work.RowDefinitions[2].Height = on && !DockRight ? new GridLength(_settings.DetailHeight) : new GridLength(0);
+        _work.ColumnDefinitions[2].Width = on && DockRight ? new GridLength(_settings.DetailWidth) : new GridLength(0);
+    }
+
+    /// <summary>Places the details pane under the grid or to its right.</summary>
+    private void ApplyDock()
+    {
+        var right = DockRight;
+        _detailSplitter.ResizeDirection = right ? GridResizeDirection.Columns : GridResizeDirection.Rows;
+        _detailSplitter.Width = right ? 5 : double.NaN;
+        _detailSplitter.Height = right ? double.NaN : 5;
+        Grid.SetRow(_detailSplitter, right ? 0 : 1);
+        Grid.SetColumn(_detailSplitter, right ? 1 : 0);
+        Grid.SetRowSpan(_detailSplitter, right ? 3 : 1);
+        Grid.SetColumnSpan(_detailSplitter, right ? 1 : 3);
+        Grid.SetRow(_detailPane, right ? 0 : 2);
+        Grid.SetColumn(_detailPane, right ? 2 : 0);
+        Grid.SetRowSpan(_detailPane, right ? 3 : 1);
+        Grid.SetColumnSpan(_detailPane, right ? 1 : 3);
+        _work.ColumnDefinitions[2].MinWidth = 0;
+        _work.RowDefinitions[2].MinHeight = 0;
+        ApplyDetailSize();
+    }
+
+    private void SetDetailDock(bool right)
+    {
+        if (right == DockRight) return;
+        SaveDetailSize();
+        _settings.DetailDock = right ? "right" : "bottom";
+        ApplyDock();
+        if (!_settings.ShowDetail) ToggleDetail(true, save: false);
+        _settings.Save();
+        _grid.LayoutChanged();
+    }
+
+    private void SaveHistogramSize()
+    {
+        if (_hist.IsVisible && _center.RowDefinitions[0].ActualHeight >= 40) _settings.HistogramHeight = Math.Clamp(_center.RowDefinitions[0].ActualHeight, 40, 240);
+    }
+
+    private void ApplyHistogramSize()
+    {
+        var on = _settings.ShowHistogram;
+        _center.RowDefinitions[0].Height = on ? new GridLength(Math.Clamp(_settings.HistogramHeight, 40, 240)) : new GridLength(0);
+        _center.RowDefinitions[0].MinHeight = on ? 40 : 0;
+        _histSplitter.IsVisible = on;
     }
 
     private void ToggleSidebar(bool on, bool save = true)
@@ -1320,7 +1405,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void SaveOnClose()
     {
-        if (_detailPane.IsVisible) _settings.DetailHeight = Math.Max(80, _center.RowDefinitions[DetailRow].ActualHeight);
+        SaveDetailSize();
+        SaveHistogramSize();
         _settings.Save();
         _tick.Stop();
         foreach (var t in _tabs) t.Dispose();
@@ -1384,6 +1470,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (_detail.Text is null or "") UpdateDetail();
     }
 
+
     public bool HandleKey(KeyEventArgs e)
     {
         if (e.KeyModifiers is not (KeyModifiers.None or KeyModifiers.Shift)) return false;
@@ -1437,6 +1524,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             case Key.Tab when ctrl: CycleTab(shift ? -1 : 1); break;
             case Key.H when ctrl && shift: ToggleHistogram(!_settings.ShowHistogram); break;
             case Key.D when ctrl && shift: ToggleDetail(!_settings.ShowDetail); break;
+            case Key.Z when e.KeyModifiers == KeyModifiers.Alt: SetDisplay(() => _settings.Wrap = !_settings.Wrap); break;
             case Key.F1: Run(() => Dialogs.Help(this)); break;
             case Key.F2: NextBookmark(shift ? -1 : 1); break;
             case Key.F3: Run(() => NextHit(shift ? -1 : 1)); break;

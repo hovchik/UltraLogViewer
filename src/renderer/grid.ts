@@ -3,16 +3,23 @@
 // the browser's maximum element height.
 
 import { compilePattern, matchRanges } from '../core/query';
+import { formatTimeCell, formatGap } from '../core/timestamp';
+import { tokenize } from '../core/tokenizer';
 import type { ColumnDef, RowData } from '../core/types';
 import { engine } from './api';
-import type { HighlightRule, Tab } from './state';
+import { DENSITY, HighlightRule, Tab, ViewSettings } from './state';
 import { esc } from './util';
 
 const MAX_PX = 8_000_000;
 const FETCH_MARGIN = 80;
+const GUTTER_W = 74;
+/** Continuation lines shown when a multi-line entry is expanded inline. */
+const MAX_EXPAND = 40;
 
 export interface GridHost {
   highlights(): HighlightRule[];
+  /** Display settings (density, wrap, tint, tokens, time mode, gaps). */
+  view(): ViewSettings;
   columnWidth(col: ColumnDef): number;
   hiddenColumns(): string[];
   /** Effective columns of a tab (format columns plus extra field columns, in the user's order). */
@@ -30,10 +37,10 @@ export interface GridHost {
   copyRows(from: number, to: number): void;
 }
 
-interface Span {
-  s: number;
-  e: number;
+/** Text styling layers, lowest first: tokens, then highlight rules, then search hits. */
+interface Layer {
   open: string;
+  close: string;
 }
 
 export class Grid {
@@ -51,7 +58,15 @@ export class Grid {
   private searchRe: RegExp | null = null;
   private hlCompiled: { rule: HighlightRule; re: RegExp }[] = [];
   private rowH = 20;
+  private lineH = 18;
   private gen = 0;
+  /** Measured pixel heights of rows from the last paints (variable-height mode only). */
+  private heights = new Map<number, number>();
+  /** Rows fully visible in the last paint. */
+  private lastFull = 0;
+  private relayout = false;
+  private bodyWidth = 0;
+  private focusTime: { tab: number; gen: number; row: number; time: number | null } | null = null;
 
   constructor(readonly root: HTMLElement, private host: GridHost) {
     this.header = root.querySelector('.grid-header')!;
@@ -77,10 +92,32 @@ export class Grid {
     this.rowsEl.addEventListener('contextmenu', (e) => this.onContextMenu(e));
     root.addEventListener('keydown', (e) => this.onKey(e));
     new ResizeObserver(() => {
+      if (this.body.clientWidth !== this.bodyWidth) {
+        this.bodyWidth = this.body.clientWidth;
+        this.heights.clear();
+      }
       this.syncScroll();
       this.render();
     }).observe(this.body);
-    this.rowH = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--row-h')) || 20;
+    this.applyView(false);
+  }
+
+  /** Applies density, wrap and tint settings (call after they change). */
+  applyView(redraw = true) {
+    const v = this.host.view();
+    const d = DENSITY[v.density] ?? DENSITY.compact;
+    this.rowH = d.rowH;
+    this.lineH = Math.round(d.fontSize * 1.4);
+    const st = document.documentElement.style;
+    st.setProperty('--row-h', `${this.rowH}px`);
+    st.setProperty('--font-size', `${d.fontSize}px`);
+    st.setProperty('--line-h', `${this.lineH}px`);
+    this.root.classList.toggle('wrap', v.wrap);
+    this.root.classList.toggle('tint', v.tintRows);
+    this.heights.clear();
+    if (!redraw) return;
+    this.syncScroll();
+    this.render();
   }
 
   // ---------------------------------------------------------------- state
@@ -88,6 +125,7 @@ export class Grid {
   setTab(tab: Tab | null) {
     this.tab = tab;
     this.cache.clear();
+    this.heights.clear();
     this.gen++;
     this.overviewLevels = [];
     this.renderHeader();
@@ -100,6 +138,7 @@ export class Grid {
   invalidate(keepCache = false) {
     if (!keepCache) {
       this.cache.clear();
+      this.heights.clear();
       this.gen++;
     }
     this.syncScroll();
@@ -136,12 +175,54 @@ export class Grid {
     return this.tab?.info.viewCount ?? 0;
   }
 
+  /** Rows that fit fully on screen (from the last paint when rows have different heights). */
   visibleRows() {
+    if (this.variable() && this.lastFull) return this.lastFull;
+    return this.fixedRows();
+  }
+
+  private fixedRows() {
     return Math.max(1, Math.floor(this.body.clientHeight / this.rowH));
   }
 
+  /** True when rows can be taller than one line (soft wrap, or entries expanded inline). */
+  private variable() {
+    return !!this.tab && (this.host.view().wrap || this.tab.expanded.size > 0);
+  }
+
   private maxTop() {
-    return Math.max(0, this.count - this.visibleRows());
+    return this.topForBottom(this.count - 1);
+  }
+
+  /** Height of the inline expansion of a row (0 when collapsed). */
+  private expansionHeight(row: RowData): number {
+    if (row.lineCount <= 1 || !this.tab?.expanded.has(row.key)) return 0;
+    const n = row.text.split('\n').length - 1;
+    if (n <= 0) return 0;
+    return (Math.min(n, MAX_EXPAND) + (n > MAX_EXPAND ? 1 : 0)) * this.lineH + 4;
+  }
+
+  /** Pixel height of a row: measured, or estimated (an uncached row counts as one compact line). */
+  private heightOf(r: number): number {
+    const m = this.heights.get(r);
+    if (m !== undefined) return m;
+    const row = this.cache.get(r);
+    return row ? this.rowH + this.expansionHeight(row) : this.rowH;
+  }
+
+  /** The top row that makes `last` the last fully visible row. */
+  private topForBottom(last: number): number {
+    if (last < 0) return 0;
+    if (!this.variable()) return Math.max(0, last - this.fixedRows() + 1);
+    const avail = this.body.clientHeight;
+    let used = 0;
+    let r = last;
+    while (r >= 0) {
+      used += this.heightOf(r);
+      if (used > avail) break;
+      r--;
+    }
+    return Math.max(0, Math.min(last, r + 1));
   }
 
   // --------------------------------------------------------------- header
@@ -189,6 +270,7 @@ export class Grid {
       const w = Math.max(30, startW + ev.clientX - startX);
       el.style.width = `${w}px`;
       this.host.setColumnWidth(col.key, w);
+      this.heights.clear();
       this.render();
     };
     const up = () => {
@@ -265,7 +347,7 @@ export class Grid {
     const vis = this.visibleRows();
     if (align === 'center') this.scrollTo(row - Math.floor(vis / 2));
     else if (row < t.topRow) this.scrollTo(row);
-    else if (row >= t.topRow + vis) this.scrollTo(row - vis + 1);
+    else if (row >= t.topRow + vis) this.scrollTo(this.topForBottom(row));
     else this.render();
   }
 
@@ -313,10 +395,13 @@ export class Grid {
       this.drawOverview();
       return;
     }
-    const vis = this.visibleRows() + 1;
+    const view = this.host.view();
+    const variable = this.variable();
+    const vh = this.body.clientHeight;
     const from = t.topRow;
-    const to = Math.min(this.count, from + vis);
-    void this.ensureRows(from, to);
+    const to = Math.min(this.count, from + Math.floor(vh / this.rowH) + 1);
+    // One row before the top for the delta / gap of the first visible row.
+    void this.ensureRows(Math.max(0, from - 1), to);
     const visible = this.cols();
     const cols = visible.map((c) => c.col);
     const widths = visible.map((c) => c.width);
@@ -324,6 +409,11 @@ export class Grid {
     const selHi = Math.max(t.anchor, t.focus);
     const hitRows = t.search.result?.rows;
     const curHit = hitRows && hitRows.length ? hitRows[t.search.current] : -1;
+    const hasTime = cols.some((c) => c.key === 'time');
+    const refTime = hasTime && view.timeMode === 'relative' ? this.focusRowTime() : null;
+    const gapMs = view.gapMs > 0 ? view.gapMs : 0;
+    const gutterFont = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size')) || 12.5;
+    let expandX = -1;
     let html = '';
     for (let r = from; r < to; r++) {
       const row = this.cache.get(r);
@@ -331,12 +421,21 @@ export class Grid {
         html += `<div class="r" data-row="${r}"><div class="g"></div></div>`;
         continue;
       }
+      const prev = r > 0 ? this.cache.get(r - 1) : undefined;
+      const prevTime = prev ? prev.time : null;
+      const selected = r >= selLo && r <= selHi;
+      const expanded = row.lineCount > 1 && t.expanded.has(row.key);
       const cls = ['r', `l${row.level}`];
       if (row.context) cls.push('ctx');
-      if (r >= selLo && r <= selHi) cls.push('sel');
+      if (selected) cls.push('sel');
       if (r === t.focus) cls.push('cur');
+      const tall = variable && (view.wrap || expanded);
+      if (tall) cls.push('var');
+      if (expanded) cls.push('open');
       const isHit = hitRows ? binaryHas(hitRows, r) : false;
       if (isHit) cls.push('hitrow');
+      const gap = gapMs && row.time !== null && prevTime !== null && row.time - prevTime >= gapMs ? row.time - prevTime : 0;
+      if (gap) cls.push('gap');
       let rowStyle = '';
       for (const { rule, re } of this.hlCompiled) {
         if (!rule.row) continue;
@@ -346,49 +445,169 @@ export class Grid {
           break;
         }
       }
+      // (a tinted Fatal row is white on red: token colours would be unreadable there)
+      const tokens = view.tokenColors && !selected && !row.context && !(view.tintRows && row.level === 6);
       const bm = t.bookmarks.has(row.key) ? '<i class="bmk"></i>' : '';
-      const more = row.lineCount > 1 ? `<span class="more">+${row.lineCount - 1}</span>` : '';
-      html += `<div class="${cls.join(' ')}" data-row="${r}"${rowStyle}><div class="g" title="Line ${row.line}${row.lineCount > 1 ? `–${row.line + row.lineCount - 1}` : ''}">${bm}${more}${row.line}</div>`;
+      const more = row.lineCount > 1 ? `<span class="more" title="${expanded ? 'Collapse (←)' : 'Expand (→)'}">+${row.lineCount - 1}</span>` : '';
+      let gapEl = '';
+      if (gap) {
+        const label = formatGap(gap);
+        // Monospace estimate: label (9.5 px) at x 2, then the badge and line number right-aligned.
+        const need = 2 + label.length * 9.5 * 0.6 + 4 + (row.lineCount > 1 ? (String(row.lineCount - 1).length + 1) * 6 + 3 : 0) + String(row.line).length * gutterFont * 0.6 + 6;
+        gapEl = need <= GUTTER_W ? `<span class="gapl">${esc(label)}</span>` : '';
+      }
+      html += `<div class="${cls.join(' ')}" data-row="${r}"${rowStyle}>${tall ? '<div class="ln">' : ''}<div class="g" title="Line ${row.line}${row.lineCount > 1 ? `–${row.line + row.lineCount - 1}` : ''}${gap ? ` · gap ${formatGap(gap)}` : ''}">${gapEl}${bm}${more}${row.line}</div>`;
       for (let i = 0; i < cols.length; i++) {
         const c = cols[i];
         let v: string;
         if (c.key === '__source') v = t.info.sources[row.source]?.displayName ?? '';
+        else if (c.key === 'time') v = formatTimeCell(view.timeMode, row.time, row.fields.time ?? '', { utc: view.timeUtc, ref: refTime, prev: r > 0 ? prevTime : null });
         else v = row.fields[c.key] ?? '';
-        if (c.key === 'message' || widths[i] === 0) {
+        const isMsg = c.key === 'message';
+        if (isMsg || widths[i] === 0) {
           const nl = v.indexOf('\n');
           if (nl >= 0) v = v.slice(0, nl);
         }
         if (v.length > 2000) v = v.slice(0, 2000) + '…';
         const w = widths[i];
         const style = w ? ` style="width:${w}px"` : '';
-        const cc = w ? 'c' : 'c flex';
-        const content = c.key === 'level' ? `<span class="lvtag">${esc(v)}</span>` : this.markup(v, r === curHit);
-        html += `<div class="${cc}${c.key === '__source' ? ' src' : ''}" data-col="${esc(c.key)}"${style}>${content}</div>`;
+        let cc = w ? 'c' : 'c flex';
+        if (isMsg) cc += ' msg';
+        if (c.key === '__source') cc += ' src';
+        let content = c.key === 'level' ? `<span class="lvtag">${esc(v)}</span>` : this.markup(v, r === curHit, isMsg && tokens);
+        if (isMsg && view.wrap) content = `<div class="wr">${content}</div>`;
+        html += `<div class="${cc}" data-col="${esc(c.key)}"${style}>${content}</div>`;
+      }
+      if (tall) html += '</div>';
+      if (expanded) {
+        if (expandX < 0) expandX = this.expandX();
+        html += this.expansion(row, expandX, tokens);
       }
       html += '</div>';
     }
     this.rowsEl.innerHTML = html;
+    if (variable) this.measure(vh);
+    else this.lastFull = 0;
     this.drawOverview();
   }
 
-  private markup(text: string, current: boolean): string {
-    if (!text || (!this.searchRe && !this.hlCompiled.length)) return esc(text);
-    const spans: Span[] = [];
-    if (this.searchRe) for (const [s, e] of matchRanges(this.searchRe, text, 200)) spans.push({ s, e, open: current ? '<mark class="cur">' : '<mark>' });
-    for (const { rule, re } of this.hlCompiled) {
+  /** Records row heights of the paint and keeps the top row in range (variable-height mode). */
+  private measure(vh: number) {
+    const t = this.tab!;
+    let full = 0;
+    for (const el of this.rowsEl.children as HTMLCollectionOf<HTMLElement>) {
+      const r = Number(el.dataset.row);
+      if (this.cache.has(r)) this.heights.set(r, el.offsetHeight);
+      if (el.offsetTop + el.offsetHeight <= vh + 0.5) full++;
+    }
+    this.lastFull = Math.max(1, full);
+    if (this.relayout) return;
+    const max = this.maxTop();
+    if ((t.follow && t.topRow !== max) || t.topRow > max) {
+      this.relayout = true;
+      try {
+        t.topRow = max;
+        this.syncScroll();
+        this.render();
+        this.host.onTopRowChange();
+      } finally {
+        this.relayout = false;
+      }
+    }
+  }
+
+  /** X of the message column (or the first column) where inline expansions start. */
+  private expandX(): number {
+    const h = (this.header.querySelector('.h[data-key="message"]') ?? this.header.querySelector('.h')) as HTMLElement | null;
+    return h ? h.offsetLeft : GUTTER_W;
+  }
+
+  /** Lines 2.. of a multi-line entry, shown under its row. */
+  private expansion(row: RowData, x: number, tokens: boolean): string {
+    const lines = row.text.split('\n').slice(1);
+    let html = `<div class="rx" style="margin-left:${x}px">`;
+    for (const raw of lines.slice(0, MAX_EXPAND)) {
+      const line = raw.length > 2000 ? raw.slice(0, 2000) + '…' : raw;
+      html += `<div class="rl">${line ? this.markup(line, false, tokens) : ' '}</div>`;
+    }
+    if (lines.length > MAX_EXPAND) html += `<div class="rl rx-more">… ${(lines.length - MAX_EXPAND).toLocaleString('en-US')} more lines</div>`;
+    return html + '</div>';
+  }
+
+  /** Time of the focused row, for the relative time mode (fetched when it is not cached). */
+  private focusRowTime(): number | null {
+    const t = this.tab!;
+    const row = this.cache.get(t.focus);
+    if (row) {
+      this.focusTime = { tab: t.id, gen: this.gen, row: t.focus, time: row.time };
+      return row.time;
+    }
+    const f = this.focusTime;
+    if (f && f.tab === t.id && f.gen === this.gen && f.row === t.focus) return f.time;
+    const want = { tab: t.id, gen: this.gen, row: t.focus };
+    void engine
+      .rows(t.id, t.focus, 1)
+      .then((rows) => {
+        if (this.tab !== t || this.gen !== want.gen || t.focus !== want.row) return;
+        this.focusTime = { ...want, time: rows[0]?.time ?? null };
+        this.render();
+      })
+      .catch(() => undefined);
+    return null;
+  }
+
+  /** Expands or collapses a multi-line entry inline. Returns false when the row has a single line. */
+  setExpanded(r: number, on: boolean): boolean {
+    const t = this.tab;
+    const row = this.cache.get(r);
+    if (!t || !row || row.lineCount <= 1) return false;
+    if (on === t.expanded.has(row.key)) return true;
+    if (on) t.expanded.add(row.key);
+    else t.expanded.delete(row.key);
+    this.heights.delete(r);
+    this.syncScroll();
+    this.render();
+    if (on && r >= t.topRow) {
+      // keep as much of the expansion on screen as possible
+      const top = this.topForBottom(r);
+      if (top > t.topRow && r >= t.topRow + this.visibleRows()) this.scrollTo(Math.min(r, top));
+    }
+    return true;
+  }
+
+  private markup(text: string, current: boolean, tokens = false): string {
+    if (!text) return '';
+    const hasHl = this.hlCompiled.some((h) => !h.rule.row);
+    if (!this.searchRe && !hasHl && !tokens) return esc(text);
+    const layers: Layer[] = [{ open: '', close: '' }];
+    const at = new Uint16Array(text.length);
+    let any = false;
+    const paint = (s: number, e: number, layer: Layer) => {
+      if (e <= s) return;
+      layers.push(layer);
+      at.fill(layers.length - 1, s, Math.min(e, text.length));
+      any = true;
+    };
+    if (tokens) for (const tk of tokenize(text)) paint(tk.start, tk.start + tk.length, { open: `<span class="tk-${tk.kind}">`, close: '</span>' });
+    // Earlier rules win over later ones, so paint them last.
+    for (let k = this.hlCompiled.length - 1; k >= 0; k--) {
+      const { rule, re } = this.hlCompiled[k];
       if (rule.row) continue;
-      for (const [s, e] of matchRanges(re, text, 100)) spans.push({ s, e, open: `<mark style="background:transparent;color:${rule.color};font-weight:600">` });
+      for (const [s, e] of matchRanges(re, text, 100)) paint(s, e, { open: `<mark style="background:transparent;color:${rule.color};font-weight:600">`, close: '</mark>' });
     }
-    if (!spans.length) return esc(text);
-    spans.sort((a, b) => a.s - b.s);
+    if (this.searchRe) for (const [s, e] of matchRanges(this.searchRe, text, 200)) paint(s, e, { open: current ? '<mark class="cur">' : '<mark>', close: '</mark>' });
+    if (!any) return esc(text);
     let out = '';
-    let pos = 0;
-    for (const sp of spans) {
-      if (sp.s < pos) continue; // overlapping: earlier (search) span wins
-      out += esc(text.slice(pos, sp.s)) + sp.open + esc(text.slice(sp.s, sp.e)) + '</mark>';
-      pos = sp.e;
+    let i = 0;
+    while (i < text.length) {
+      const id = at[i];
+      let j = i + 1;
+      while (j < text.length && at[j] === id) j++;
+      const l = layers[id];
+      out += l.open + esc(text.slice(i, j)) + l.close;
+      i = j;
     }
-    return out + esc(text.slice(pos));
+    return out;
   }
 
   // -------------------------------------------------------------- overview
@@ -482,6 +701,16 @@ export class Grid {
     // default focus handling would then move focus to <body>.
     e.preventDefault();
     this.root.focus();
+    if ((e.target as HTMLElement).closest('.more') && !e.shiftKey) {
+      // the "+N" badge expands / collapses the entry inline
+      const r = this.cache.get(row);
+      if (r) {
+        t.anchor = t.focus = row;
+        this.setExpanded(row, !t.expanded.has(r.key));
+        this.host.onSelectionChange();
+      }
+      return;
+    }
     if ((e.target as HTMLElement).closest('.g') && !e.shiftKey && e.detail === 1 && (e.target as HTMLElement).closest('.g')?.querySelector('.bmk')) {
       // clicking a bookmark marker removes it
       const r = this.cache.get(row);
@@ -559,6 +788,11 @@ export class Grid {
         break;
       case 'PageUp':
         this.select(t.focus - page, e.shiftKey);
+        break;
+      case 'ArrowRight':
+      case 'ArrowLeft':
+        if (mod || e.altKey || e.shiftKey) return;
+        this.setExpanded(t.focus, e.key === 'ArrowRight');
         break;
       case 'Home':
         this.select(0, e.shiftKey);

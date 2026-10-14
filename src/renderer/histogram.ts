@@ -1,12 +1,18 @@
-// Timeline strip: entry counts over time stacked by severity. Click jumps, drag sets a time filter.
+// Timeline strip: entry counts over time stacked by severity. Click jumps, drag sets a time filter,
+// hover shows a tooltip, the splitter below resizes it.
 
 import type { Histogram } from '../core/types';
-import { formatDuration, formatTime } from '../core/timestamp';
+import { formatDuration, formatTime, histogramTip } from '../core/timestamp';
 
 export interface HistogramHost {
   jumpToTime(t: number): void;
   setTimeRange(from: number, to: number): void;
+  /** The splitter was dragged; `height` is already clamped to 40..240. */
+  onResize(height: number): void;
 }
+
+export const HIST_MIN = 40;
+export const HIST_MAX = 240;
 
 export class HistogramView {
   private canvas: HTMLCanvasElement;
@@ -14,14 +20,40 @@ export class HistogramView {
   private data: Histogram | null = null;
   private drag: { x0: number; x1: number } | null = null;
   private viewport: [number, number] | null = null;
+  private hover = -1;
 
-  constructor(el: HTMLElement, private host: HistogramHost) {
+  constructor(private el: HTMLElement, private host: HistogramHost, splitter?: HTMLElement | null) {
     this.canvas = el.querySelector('canvas')!;
     this.tip = el.querySelector('.hist-tip')!;
     this.canvas.addEventListener('mousemove', (e) => this.onHover(e));
-    this.canvas.addEventListener('mouseleave', () => (this.tip.style.display = 'none'));
+    this.canvas.addEventListener('mouseleave', () => {
+      this.tip.style.display = 'none';
+      if (this.hover >= 0) {
+        this.hover = -1;
+        this.draw();
+      }
+    });
     this.canvas.addEventListener('mousedown', (e) => this.onDown(e));
+    splitter?.addEventListener('mousedown', (e) => this.startResize(e));
     new ResizeObserver(() => this.draw()).observe(el);
+  }
+
+  setHeight(px: number) {
+    this.el.style.height = `${Math.max(HIST_MIN, Math.min(HIST_MAX, px))}px`;
+  }
+
+  private startResize(e: MouseEvent) {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = this.el.offsetHeight;
+    const move = (ev: MouseEvent) => this.setHeight(startH + ev.clientY - startY);
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      this.host.onResize(this.el.offsetHeight);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
   }
 
   get bucketsWanted() {
@@ -30,6 +62,7 @@ export class HistogramView {
 
   set(data: Histogram | null) {
     this.data = data;
+    this.hover = -1;
     this.draw();
   }
 
@@ -95,6 +128,20 @@ export class HistogramView {
       ctx.fillStyle = css.getPropertyValue('--fg-2');
       ctx.globalAlpha = 0.15;
       ctx.fillRect(x0, top, Math.max(2, x1 - x0), ph);
+      // dim what is outside the viewport window when it covers less than 90% of the width
+      if (x1 - x0 < w * 0.9) {
+        ctx.fillStyle = css.getPropertyValue('--bg');
+        ctx.globalAlpha = 0.35;
+        if (x0 > 0) ctx.fillRect(0, top, x0, ph);
+        const right = Math.max(x1, x0 + 2);
+        if (right < w) ctx.fillRect(right, top, w - right, ph);
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (this.hover >= 0 && this.hover < d.counts.length) {
+      ctx.fillStyle = css.getPropertyValue('--fg');
+      ctx.globalAlpha = 0.12;
+      ctx.fillRect(this.hover * bw, 0, Math.max(1, bw), hgt);
       ctx.globalAlpha = 1;
     }
     if (this.drag) {
@@ -110,11 +157,15 @@ export class HistogramView {
     const d = this.data;
     if (!d || !d.counts.length) return;
     const x = e.offsetX;
-    const i = Math.min(d.counts.length - 1, Math.floor((x / this.canvas.clientWidth) * d.counts.length));
+    const i = Math.max(0, Math.min(d.counts.length - 1, Math.floor((x / this.canvas.clientWidth) * d.counts.length)));
     const b = d.counts[i];
     const t0 = d.start + i * d.bucketMs;
     this.tip.style.display = 'block';
-    this.tip.textContent = `${formatTime(t0)}  ·  ${b[0] + b[1] + b[2]} entries  ·  ${b[2]} errors  ·  ${b[1]} warnings`;
+    this.tip.textContent = histogramTip(t0, t0 + d.bucketMs, b);
+    if (i !== this.hover) {
+      this.hover = i;
+      this.draw();
+    }
     const tw = this.tip.offsetWidth;
     this.tip.style.left = `${Math.min(this.canvas.clientWidth - tw - 4, Math.max(4, x + 12))}px`;
   }

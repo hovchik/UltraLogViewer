@@ -10,6 +10,7 @@ namespace UltraLogViewer.Desktop;
 public sealed class Palette
 {
     public required IBrush Bg, Bg2, Bg3, Fg, Fg2, Fg3, Border, Accent, AccentBg, Sel, SelFg, RowAlt;
+    public required IBrush TkDate, TkNumber, TkId, TkPath, TkString, TkKey, TkError, TkWord;
     public required IBrush Trace, Debug, Info, Warn, WarnBg, Error, ErrorBg, Fatal, FatalBg, Hit, HitCur, Context, Bookmark;
 
     private static IBrush B(string hex) => new ImmutableSolidColorBrush(Color.Parse(hex));
@@ -21,6 +22,8 @@ public sealed class Palette
         Trace = B("#9AA1AD"), Debug = B("#6B7480"), Info = B("#1D2129"), Warn = B("#A35C00"), WarnBg = B("#FFF6E5"), Error = B("#C4251C"),
         ErrorBg = B("#FDECEA"), Fatal = B("#FFFFFF"), FatalBg = B("#B3261E"), Hit = B("#FFE066"), HitCur = B("#FF9F1C"), Context = B("#A0A6B0"),
         Bookmark = B("#2F6FDE"),
+        TkDate = B("#6B7480"), TkNumber = B("#0B7285"), TkId = B("#1971C2"), TkPath = B("#5F3DC4"), TkString = B("#2B8A3E"), TkKey = B("#862E9C"),
+        TkError = B("#C92A2A"), TkWord = B("#D9480F"),
     };
 
     public static readonly Palette Dark = new()
@@ -30,6 +33,8 @@ public sealed class Palette
         Trace = B("#636B77"), Debug = B("#8A929E"), Info = B("#D9DDE4"), Warn = B("#F0B04A"), WarnBg = B("#2F2615"), Error = B("#FF6B61"),
         ErrorBg = B("#3A1C1B"), Fatal = B("#FFFFFF"), FatalBg = B("#9C2A22"), Hit = B("#7A6514"), HitCur = B("#C46D00"), Context = B("#5C6470"),
         Bookmark = B("#5B93F0"),
+        TkDate = B("#8A929E"), TkNumber = B("#4FC1C9"), TkId = B("#6CA8F0"), TkPath = B("#A99BF5"), TkString = B("#8CD48F"), TkKey = B("#D08AE0"),
+        TkError = B("#FF7B72"), TkWord = B("#FFA94D"),
     };
 
     public static Palette For(ThemeVariant? v) => v == ThemeVariant.Dark ? Dark : Light;
@@ -50,6 +55,27 @@ public sealed class Palette
     {
         Level.Warn => WarnBg,
         Level.Error => ErrorBg,
+        Level.Fatal => FatalBg,
+        _ => null,
+    };
+
+    public IBrush Token(TokenKind k) => k switch
+    {
+        TokenKind.Date => TkDate,
+        TokenKind.Number or TokenKind.Duration => TkNumber,
+        TokenKind.Guid or TokenKind.Ip => TkId,
+        TokenKind.Url or TokenKind.Path => TkPath,
+        TokenKind.String => TkString,
+        TokenKind.Key => TkKey,
+        TokenKind.Exception => TkError,
+        _ => TkWord,
+    };
+
+    /// <summary>The level stripe colour, or null for levels that get no stripe.</summary>
+    public IBrush? LevelStripe(Level l) => l switch
+    {
+        Level.Warn => Warn,
+        Level.Error => Error,
         Level.Fatal => FatalBg,
         _ => null,
     };

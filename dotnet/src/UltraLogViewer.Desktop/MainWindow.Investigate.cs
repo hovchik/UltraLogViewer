@@ -96,6 +96,11 @@ public sealed partial class MainWindow
         if (_active is not { } tab) return;
         var menu = new ContextMenu { Placement = PlacementMode.Pointer };
         var cols = Columns(tab);
+        if (col?.Key == "time")
+        {
+            foreach (var c in TimeItems(live: false)) menu.Items.Add(c);
+            menu.Items.Add(new Separator());
+        }
         if (col is not null)
         {
             var i = cols.ToList().IndexOf(col);

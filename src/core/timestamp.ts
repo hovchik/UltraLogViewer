@@ -177,3 +177,72 @@ export function formatDuration(ms: number): string {
   const rest = `${String(mi).padStart(2, '0')}m ${String(sec).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}s`;
   return h ? `${sign}${h}h ${rest}` : `${sign}${rest}`;
 }
+
+// ------------------------------------------------------- display formatting
+
+export type TimeMode = 'original' | 'full' | 'time' | 'relative' | 'delta';
+
+const p2 = (n: number, w = 2) => String(n).padStart(w, '0');
+
+/** `yyyy-MM-dd HH:mm:ss.fff` (or `HH:mm:ss.fff` with `timeOnly`), local or UTC (UTC adds a trailing Z). */
+export function formatClock(ms: number, utc = false, timeOnly = false, millis = true): string {
+  const d = new Date(ms);
+  const [y, mo, da, h, mi, s, f] = utc
+    ? [d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds()]
+    : [d.getFullYear(), d.getMonth() + 1, d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds()];
+  const time = `${p2(h)}:${p2(mi)}:${p2(s)}${millis ? `.${p2(f, 3)}` : ''}`;
+  return `${timeOnly ? '' : `${y}-${p2(mo)}-${p2(da)} `}${time}${utc ? 'Z' : ''}`;
+}
+
+/** formatDuration with a leading `+` for positive values. */
+export function signedDuration(ms: number): string {
+  return ms > 0 ? `+${formatDuration(ms)}` : formatDuration(ms);
+}
+
+export interface TimeCellContext {
+  utc?: boolean;
+  /** Time of the focused row (relative mode). */
+  ref?: number | null;
+  /** Time of the previous row in the view (delta mode); undefined/null for the first row. */
+  prev?: number | null;
+}
+
+/** Text of the Time column for one row in the given mode. Rows without a parsed time keep the original text. */
+export function formatTimeCell(mode: TimeMode, time: number | null, original: string, ctx: TimeCellContext = {}): string {
+  if (time === null || mode === 'original') return original;
+  switch (mode) {
+    case 'full':
+      return formatClock(time, ctx.utc);
+    case 'time':
+      return formatClock(time, ctx.utc, true);
+    case 'relative':
+      return ctx.ref == null ? original : signedDuration(time - ctx.ref);
+    case 'delta':
+      return ctx.prev == null ? '' : signedDuration(time - ctx.prev);
+  }
+  return original;
+}
+
+/** Compact gap label for the gutter: `+850ms`, `+32s`, `+2m`, `+5h`, `+3d` (whole units, floored). */
+export function formatGap(ms: number): string {
+  const sign = ms < 0 ? '-' : '+';
+  ms = Math.abs(ms);
+  if (ms < 1000) return `${sign}${Math.floor(ms)}ms`;
+  if (ms < 60_000) return `${sign}${Math.floor(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${sign}${Math.floor(ms / 60_000)}m`;
+  if (ms < 86_400_000) return `${sign}${Math.floor(ms / 3_600_000)}h`;
+  return `${sign}${Math.floor(ms / 86_400_000)}d`;
+}
+
+/** Histogram bucket tooltip: time span, entry count, then warnings/errors (zero parts omitted). */
+export function histogramTip(start: number, end: number, counts: [number, number, number]): string {
+  const crossesDay = formatClock(start).slice(0, 10) !== formatClock(Math.max(start, end - 1)).slice(0, 10);
+  const span = `${formatClock(start, false, !crossesDay, false)} – ${formatClock(end, false, !crossesDay, false)}`;
+  const n = counts[0] + counts[1] + counts[2];
+  const lines = [span, `${n.toLocaleString('en-US')} ${n === 1 ? 'entry' : 'entries'}`];
+  const parts: string[] = [];
+  if (counts[1]) parts.push(`${counts[1].toLocaleString('en-US')} ${counts[1] === 1 ? 'warning' : 'warnings'}`);
+  if (counts[2]) parts.push(`${counts[2].toLocaleString('en-US')} ${counts[2] === 1 ? 'error' : 'errors'}`);
+  if (parts.length) lines.push(parts.join(' · '));
+  return lines.join('\n');
+}
