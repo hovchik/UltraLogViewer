@@ -85,6 +85,11 @@ kbd { font: 11px var(--mono); padding: 1px 5px; border: 1px solid var(--border);
 .hidden { display: none !important; }
 
 #app { display: grid; grid-template-rows: auto auto 1fr auto; height: 100vh; }
+/* explicit rows: the tab strip is display:none with no file open, and auto-placement would then shift the status bar into the 1fr track */
+.toolbar { grid-row: 1; }
+.tabs { grid-row: 2; }
+.main { grid-row: 3; }
+.status { grid-row: 4; }
 
 /* toolbar */
 .toolbar { display: flex; gap: 10px; align-items: center; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--bg-2); flex-wrap: wrap; }

@@ -369,5 +369,18 @@ await step('dark theme renders', async () => {
   await shot('07-dark');
 });
 
+await step('empty state fills the window with the status bar at the bottom', async () => {
+  while ((await win.locator('.tab .x').count()) > 0) await win.locator('.tab .x').first().click();
+  await win.waitForSelector('#empty:not(.hidden)');
+  const { bottom, height, main } = await win.evaluate(() => ({
+    bottom: document.querySelector('#status').getBoundingClientRect().bottom,
+    height: window.innerHeight,
+    main: document.querySelector('.main').getBoundingClientRect().height,
+  }));
+  assert.ok(Math.abs(bottom - height) <= 1, `status bar bottom ${bottom} != window height ${height}`);
+  assert.ok(main > height * 0.7, `main area only ${main}px of ${height}px`);
+  await shot('23-empty');
+});
+
 await app.close();
 console.log(`Screenshots in ${out}`);
