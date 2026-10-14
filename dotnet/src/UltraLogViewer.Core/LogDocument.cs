@@ -36,8 +36,17 @@ public sealed class LogDocument : IDisposable
     public bool Merged => _sources.Count > 1;
     public FilterSpec? Filter => _filter;
 
+    /// <summary>
+    /// "Show in context": every entry is shown, the current filter is kept (and stays up to date), and entries it
+    /// would hide come back with <see cref="RowData.IsContext"/> set so they can be drawn dimmed.
+    /// </summary>
+    public bool IgnoreFilter { get; set; }
+
+    /// <summary>The view that rows are read from: null means every base row.</summary>
+    private View? CurView => IgnoreFilter ? null : _view;
+
     public int BaseCount => _merge is { } m ? m.Ent.Length : _sources.Count > 0 ? _sources[0].EntryCount : 0;
-    public int ViewCount => _view is { } v ? v.Rows.Length : BaseCount;
+    public int ViewCount => CurView is { } v ? v.Rows.Length : BaseCount;
 
     private (int Src, int Entry) Ref(int baseRow, Merge? m) => m is null ? (0, baseRow) : (m.Src[baseRow], m.Ent[baseRow]);
     private static int BaseOf(int row, View? v) => v is null ? row : v.Rows[row];
@@ -162,8 +171,8 @@ public sealed class LogDocument : IDisposable
             _verdict = [];
             return true;
         }
-        var includes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Include).Select(r => (M: Query.Matcher(r.Pattern), r.Column)).ToArray();
-        var excludes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Exclude).Select(r => (M: Query.Matcher(r.Pattern), r.Column)).ToArray();
+        var includes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Include).Select(r => (M: Query.RuleMatcher(r), r.Column)).ToArray();
+        var excludes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Exclude).Select(r => (M: Query.RuleMatcher(r), r.Column)).ToArray();
         var query = string.IsNullOrWhiteSpace(spec.Query) ? null : Query.CompileQuery(spec.Query, spec.QueryCaseSensitive);
         var needsText = includes.Length > 0 || excludes.Length > 0 || query is not null;
         var bookmarks = spec.BookmarksOnly ? spec.Bookmarks : null;
@@ -292,7 +301,9 @@ public sealed class LogDocument : IDisposable
     public List<RowData> GetRows(int start, int count)
     {
         var m = _merge;
-        var v = _view;
+        var v = CurView;
+        // In "show in context" mode, entries the filter rejects are marked as context.
+        var hidden = IgnoreFilter && _view is not null ? _verdict : null;
         var viewCount = v?.Rows.Length ?? BaseCount;
         var end = Math.Min(viewCount, start + count);
         var rows = new List<RowData>(Math.Max(0, end - start));
@@ -328,12 +339,105 @@ public sealed class LogDocument : IDisposable
                     Time = t == Timestamps.None ? null : t,
                     Fields = src.Format.Parse(text),
                     Text = text,
-                    IsContext = v?.Context is { } c && c[r + i] == 1,
+                    IsContext = v?.Context is { } c ? c[r + i] == 1 : hidden is not null && !Passes(hidden, s, e),
                 });
             }
             r += len;
         }
         return rows;
+    }
+
+    private static bool Passes(List<Grow<byte>> verdict, int s, int e) => s < verdict.Count && e < verdict[s].Count && verdict[s][e] == 1;
+
+    // ------------------------------------------------------------- field stats
+
+    /// <summary>Fields never worth counting: every value differs.</summary>
+    private static readonly HashSet<string> UncountedFields = new(StringComparer.OrdinalIgnoreCase) { "message", "time" };
+
+    /// <summary>
+    /// Top values of every parsed field over the view rows. Views larger than <paramref name="maxRows"/> are sampled
+    /// in evenly spaced blocks, so the panel stays responsive on huge files.
+    /// </summary>
+    public Task<FieldStats> FieldStatsAsync(int maxRows = 100_000, int top = 10, CancellationToken ct = default) => Task.Run(() =>
+    {
+        const int Block = 1000;
+        const int DistinctCap = 5000;
+        var n = ViewCount;
+        var counts = new Dictionary<string, (Dictionary<string, int> Values, int Present, bool Capped)>(StringComparer.OrdinalIgnoreCase);
+        var order = new List<string>();
+        var scanned = 0;
+        void Count(List<RowData> rows)
+        {
+            foreach (var row in rows)
+            {
+                foreach (var (k, raw) in row.Fields)
+                {
+                    if (UncountedFields.Contains(k)) continue;
+                    var v = raw.Trim();
+                    if (v.Length == 0) continue;
+                    if (!counts.TryGetValue(k, out var c))
+                    {
+                        c = (new Dictionary<string, int>(), 0, false);
+                        order.Add(k);
+                    }
+                    c.Present++;
+                    // Multi-line or very long values are counted as present but not listed: a shortened value
+                    // could not be used as an exact filter.
+                    if (v.Length <= 200 && !v.Contains('\n'))
+                    {
+                        if (c.Values.TryGetValue(v, out var x)) c.Values[v] = x + 1;
+                        else
+                        {
+                            if (c.Values.Count >= DistinctCap)
+                            {
+                                PruneRare(c.Values, DistinctCap / 2);
+                                c.Capped = true;
+                            }
+                            c.Values[v] = 1;
+                        }
+                    }
+                    counts[k] = c;
+                }
+            }
+            scanned += rows.Count;
+        }
+        var sampled = n > maxRows;
+        if (!sampled)
+        {
+            for (var r = 0; r < n; r += 2000)
+            {
+                ct.ThrowIfCancellationRequested();
+                Count(GetRows(r, 2000));
+            }
+        }
+        else
+        {
+            var blocks = Math.Max(1, maxRows / Block);
+            var stride = (double)(n - Block) / Math.Max(1, blocks - 1);
+            for (var b = 0; b < blocks; b++)
+            {
+                ct.ThrowIfCancellationRequested();
+                Count(GetRows((int)(b * stride), Block));
+            }
+        }
+        var fields = order.Select(k =>
+        {
+            var c = counts[k];
+            var best = c.Values.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal).Take(top).Select(kv => (kv.Key, kv.Value)).ToList();
+            return new FieldStat(k, c.Present, c.Values.Count, c.Capped, best);
+        }).ToList();
+        return new FieldStats(scanned, n, sampled, fields);
+    }, ct);
+
+    /// <summary>
+    /// Makes room in a full value-count table by dropping the rarest values (count ≤ 1, then ≤ 2, …) until at most
+    /// <paramref name="keep"/> remain, so values that only become common later in the view can still reach the top list.
+    /// </summary>
+    private static void PruneRare(Dictionary<string, int> values, int keep)
+    {
+        for (var limit = 1; values.Count > keep; limit++)
+            foreach (var (k, n) in values.ToList())
+                if (n <= limit) values.Remove(k);
     }
 
     // ------------------------------------------------------------------- search
@@ -344,7 +448,7 @@ public sealed class LogDocument : IDisposable
         if (string.IsNullOrEmpty(p.Text)) return SearchResult.Empty;
         var match = Query.Matcher(p);
         var m = _merge;
-        var v = _view;
+        var v = CurView;
         var verdict = _verdict;
         var hits = _sources.Select(s => new bool[s.EntryCount]).ToArray();
         var total = _sources.Sum(s => (long)s.EntryCount);
@@ -406,18 +510,19 @@ public sealed class LogDocument : IDisposable
         var e = _sources[source].EntryForLine(Math.Max(0, line1 - 1));
         var m = _merge;
         if (m is not null && e >= m.BasePos[source].Length) return Math.Max(0, ViewCount - 1);
-        return RowForBase(BaseForEntry(source, e, m), _view);
+        return RowForBase(BaseForEntry(source, e, m), CurView);
     }
 
-    public int? RowForKey(string key)
+    /// <summary>View row of an entry; null if it is filtered out (or, with <paramref name="nearest"/>, the next row that isn't).</summary>
+    public int? RowForKey(string key, bool nearest = false)
     {
         if (!RowKeys.TryParse(key, out var s, out var e) || s >= _sources.Count || e >= _sources[s].EntryCount) return null;
         var m = _merge;
-        var v = _view;
+        var v = CurView;
         if (m is not null && e >= m.BasePos[s].Length) return null;
         var b = BaseForEntry(s, e, m);
         var row = RowForBase(b, v);
-        return v is null || (v.Rows.Length > row && v.Rows[row] == b) ? row : null;
+        return v is null || nearest || (v.Rows.Length > row && v.Rows[row] == b) ? row : null;
     }
 
     public string? KeyForLine(int source, int line1)
@@ -437,7 +542,7 @@ public sealed class LogDocument : IDisposable
     /// <summary>First view row at or after time t.</summary>
     public int RowForTime(long t)
     {
-        var v = _view;
+        var v = CurView;
         var m = _merge;
         var n = v?.Rows.Length ?? BaseCount;
         var r = Search.LowerBound(0, n, i =>
@@ -451,7 +556,7 @@ public sealed class LogDocument : IDisposable
     /// <summary>Next/previous view row (exclusive of <paramref name="from"/>): errors (level ≥ Error) or warnings (== Warn).</summary>
     public int? FindLevel(int from, int dir, Level level)
     {
-        var v = _view;
+        var v = CurView;
         var m = _merge;
         var n = v?.Rows.Length ?? BaseCount;
         for (var r = from + dir; r >= 0 && r < n; r += dir)
@@ -490,7 +595,7 @@ public sealed class LogDocument : IDisposable
     public byte[] Overview(int buckets)
     {
         buckets = Math.Max(1, buckets);
-        var v = _view;
+        var v = CurView;
         var m = _merge;
         var n = v?.Rows.Length ?? BaseCount;
         var output = new byte[buckets];
@@ -512,7 +617,7 @@ public sealed class LogDocument : IDisposable
 
     public Histogram? Histogram(int buckets)
     {
-        var v = _view;
+        var v = CurView;
         var m = _merge;
         var n = v?.Rows.Length ?? BaseCount;
         long lo = long.MaxValue, hi = long.MinValue;

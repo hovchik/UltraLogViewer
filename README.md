@@ -29,7 +29,11 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 **Finding things**
 - Search: plain text, whole word, match case or regex, with hit count, next/previous (`Enter`,
   `F3`, `n`), highlights in the rows and marks on the overview ruler.
-- Quick filter language: `timeout OR refused -retry logger:Db level:error "exact phrase" /regex/`.
+- Quick filter language: `timeout OR refused -retry logger:Db level:error http.status:500 thread:"worker 1" "exact phrase" /regex/`,
+  with suggestions as you type (field names, their most common values with counts, and recent queries).
+- Right-click any cell to show only that value, exclude it, highlight it, or add one of the entry's fields as a column.
+- Fields panel: the top 10 values of every parsed field with counts and bars (sampled on very large views);
+  click a value to show only it, right-click to exclude it, `+ column` to show the field in the grid.
 - Include/exclude filter rules (any column or a specific one), saved as presets.
 - Level filter with counts, time-range filter, "bookmarks only", and context lines around matches.
 - Highlight rules (text or whole row, any colour).
@@ -41,7 +45,11 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 - Merge several files into one timeline ordered by timestamp (drop them together, or
   `Ctrl+Shift+O`), with a Source column.
 - Bookmarks with notes, saved per file (`Ctrl+B`, `b`, double-click; `F2`/`Shift+F2` to jump).
-- Details pane with all parsed fields and pretty-printed JSON/XML.
+- Show in context (`c`): see every entry around the selected one with your filters kept, rows they hide dimmed;
+  `Esc` goes back to the filtered view at the same entry.
+- Details pane with all parsed fields (right-click one to filter by it) and pretty-printed JSON/XML.
+- JSON lines expose every property as a field (nested objects as `http.request.path`), so any property can be
+  filtered on or shown as a column. Columns can be moved (right-click the header).
 - Select a range to see the time between the first and last row.
 - Copy entries (`Ctrl+C`), export the current view as text, CSV or JSON lines (`Ctrl+E`).
 - Light and dark themes, recent files, drag and drop, command-line arguments.

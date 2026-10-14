@@ -207,6 +207,106 @@ public sealed class UiTests : IDisposable
         w.Close();
     }
 
+    [AvaloniaFact]
+    public async Task Value_filters_show_in_context_and_fields_panel()
+    {
+        var (w, settings) = NewWindow();
+        var tab = await Open(w, Sample("shop-service.log", 400));
+        await Until(() => tab.FieldStats is not null);
+        var logger = tab.FieldStats!.Get("logger")!;
+        Assert.Equal("com.shop.Api", logger.Top[0].Value);
+        Assert.Contains(tab.FieldStats.Fields, f => f.Key == "thread");
+
+        // "Only Logger = com.shop.Cache" from a cell or the Fields panel
+        w.AddValueRule("logger", "com.shop.Cache", RuleMode.Include);
+        await Until(() => tab.Info.ViewCount < 400 && tab.BusyProgress is null);
+        Assert.All(tab.Doc.GetRows(0, tab.Info.ViewCount), r => Assert.Equal("com.shop.Cache", r.Field("logger")));
+        var cacheCount = tab.Info.ViewCount;
+        Assert.True(tab.Filter.Rules.Single().Exact);
+        await Until(() => tab.FieldStats?.Get("logger")?.Top.Count == 1);
+
+        // show in context: every entry, filtered-out ones dimmed, same entry selected; Esc returns
+        w.LogView.Select(3);
+        var key = tab.Doc.GetRows(3, 1)[0].Key;
+        w.LogView.Focus();
+        w.KeyPressQwerty(PhysicalKey.C, RawInputModifiers.None);
+        await Until(() => tab.Doc.IgnoreFilter);
+        Assert.Equal(400, tab.Info.ViewCount);
+        Assert.Equal(key, tab.Doc.GetRows(tab.Focus, 1)[0].Key);
+        Assert.Contains(tab.Doc.GetRows(0, 20), r => r.IsContext);
+        w.ToggleHistogramForTest(false);
+        await Until(() => w.LogView.GetCached(tab.Focus) is not null);
+        tab.ExpandedFields.Add("thread");
+        w.RefreshSidebarForTest();
+        Screenshot(w, "show-in-context.png");
+        w.KeyPressQwerty(PhysicalKey.Escape, RawInputModifiers.None);
+        await Until(() => !tab.Doc.IgnoreFilter);
+        Assert.Equal(cacheCount, tab.Info.ViewCount);
+        Assert.Equal(key, tab.Doc.GetRows(tab.Focus, 1)[0].Key);
+
+        // a level value uses the level filter instead of a rule
+        tab.Filter.Rules.Clear();
+        w.AddValueRule("level", "ERROR", RuleMode.Include);
+        await Until(() => tab.Info.ViewCount == 400 / 13 && tab.BusyProgress is null);
+        Assert.Empty(tab.Filter.Rules);
+
+        // fields can become columns, and move
+        w.AddColumn("order");
+        Assert.Contains(w.Columns(tab), c => c.Key == "order");
+        Assert.Equal(["order"], settings.ExtraColumns[tab.Info.Sources[0].Format]);
+        w.RemoveColumn("order");
+        Assert.DoesNotContain(w.Columns(tab), c => c.Key == "order");
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Json_fields_become_columns_and_quick_filter_suggests_values()
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < 300; i++)
+            sb.Append($"{{\"@t\":\"2024-03-01T10:{i / 60:00}:{i % 60:00}Z\",\"@l\":\"{(i % 10 == 0 ? "Error" : "Information")}\",\"@m\":\"GET /api/{i % 3} took {i}ms\",\"RequestPath\":\"/api/{i % 3}\",\"StatusCode\":{(i % 10 == 0 ? 500 : 200)},\"http\":{{\"method\":\"GET\"}}}}\n");
+        var path = Path.Combine(_dir, "api.json");
+        File.WriteAllText(path, sb.ToString());
+        var (w, settings) = NewWindow();
+        var tab = await Open(w, path);
+        await Until(() => tab.FieldStats is not null);
+        Assert.Equal(("200", 270), tab.FieldStats!.Get("StatusCode")!.Top[0]);
+        Assert.Equal(3, tab.FieldStats.Get("RequestPath")!.Distinct);
+        Assert.NotNull(tab.FieldStats.Get("http.method"));
+
+        // field names, then values, with counts
+        var names = w.Suggestions("Stat", 4);
+        Assert.Equal("StatusCode:", names.Single().Label);
+        Assert.False(names.Single().Commit);
+        var values = w.Suggestions("-StatusCode:", 12);
+        Assert.Equal(["-StatusCode:200", "-StatusCode:500"], values.Select(v => v.Label));
+        Assert.Equal("-StatusCode:200 ", values[0].Text);
+        Assert.Equal(["level:error", "level:info"], w.Suggestions("x level:", 8).Select(v => v.Label));
+
+        var quick = w.GetVisualDescendants().OfType<TextBox>().First(t => t.Watermark?.ToString()?.StartsWith("Quick") == true);
+        quick.Focus();
+        quick.Text = "StatusCode:5";
+        quick.CaretIndex = quick.Text.Length;
+        await Until(() => w.SuggestionsOpen);
+        Assert.Equal("StatusCode:500", w.CurrentSuggestions.Single().Label);
+        w.KeyPressQwerty(PhysicalKey.ArrowDown, RawInputModifiers.None);
+        w.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+        await Until(() => tab.Info.ViewCount == 30 && tab.BusyProgress is null);
+        Assert.Equal("StatusCode:500 ", quick.Text);
+        Assert.Equal("StatusCode:500", settings.QueryHistory[0]);
+        quick.Text = "";
+        await Until(() => w.SuggestionsOpen);
+        Assert.Equal("StatusCode:500", w.CurrentSuggestions[0].Label);
+
+        w.AddColumn("StatusCode");
+        w.AddColumn("RequestPath");
+        Assert.Equal(["time", "level", "logger", "StatusCode", "RequestPath", "message"], w.Columns(tab).Select(c => c.Key));
+        await Until(() => w.LogView.GetCached(2) is not null);
+        w.LogView.Focus();
+        Screenshot(w, "json-columns.png");
+        w.Close();
+    }
+
     [Fact]
     public void Pretty_prints_embedded_json_and_xml()
     {

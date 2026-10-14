@@ -35,6 +35,8 @@ public sealed class FilterRule
     public RuleMode Mode { get; set; } = RuleMode.Include;
     /// <summary>Restrict matching to one parsed column (e.g. "logger"); null = whole entry text.</summary>
     public string? Column { get; set; }
+    /// <summary>The whole (trimmed) value must equal <see cref="Text"/>, e.g. "logger = com.acme.Db" from a click on a cell.</summary>
+    public bool Exact { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public TextPattern Pattern => new(Text, Regex, CaseSensitive, WholeWord);
@@ -104,6 +106,16 @@ public sealed class RowData
     public bool IsContext { get; init; }
 
     public string Field(string key) => Fields.TryGetValue(key, out var v) ? v : "";
+}
+
+/// <summary>The most common values of one parsed field, counted over the view (or a sample of it).</summary>
+public sealed record FieldStat(string Key, int Present, int Distinct, bool DistinctCapped, IReadOnlyList<(string Value, int Count)> Top);
+
+/// <summary><see cref="LogDocument.FieldStatsAsync"/> result: Scanned of ViewCount rows were read (Sampled when fewer).</summary>
+public sealed record FieldStats(int Scanned, int ViewCount, bool Sampled, IReadOnlyList<FieldStat> Fields)
+{
+    public static readonly FieldStats Empty = new(0, 0, false, []);
+    public FieldStat? Get(string key) => Fields.FirstOrDefault(f => f.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
 }
 
 public sealed record SearchResult(int[] Rows, int Total, bool Truncated, bool Cancelled = false)

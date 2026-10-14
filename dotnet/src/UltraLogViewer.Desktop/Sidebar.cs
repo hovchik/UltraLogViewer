@@ -9,7 +9,7 @@ using UltraLogViewer.Core;
 
 namespace UltraLogViewer.Desktop;
 
-/// <summary>Left panel: levels, filter rules and presets, time range, highlights, bookmarks and sources.</summary>
+/// <summary>Left panel: levels, field values, filter rules and presets, time range, highlights, bookmarks and sources.</summary>
 public sealed class Sidebar : ScrollViewer
 {
     private readonly MainWindow _host;
@@ -17,6 +17,7 @@ public sealed class Sidebar : ScrollViewer
     private readonly Dictionary<Level, TextBlock> _levelCounts = [];
     private TextBlock? _sourcesInfo;
     private TextBlock? _timeSpan;
+    private readonly Border _fieldsHost = new();
     private DocumentTab? _tab;
 
     public static readonly string[] HighlightColors = ["#E8590C", "#D6336C", "#9C36B5", "#1971C2", "#0C8599", "#2F9E44", "#F08C00", "#868E96"];
@@ -47,6 +48,8 @@ public sealed class Sidebar : ScrollViewer
             return;
         }
         _root.Children.Add(LevelsSection(tab));
+        _fieldsHost.Child = FieldsSection(tab);
+        _root.Children.Add(_fieldsHost);
         _root.Children.Add(FiltersSection(tab));
         _root.Children.Add(TimeSection(tab));
         _root.Children.Add(HighlightsSection());
@@ -145,6 +148,91 @@ public sealed class Sidebar : ScrollViewer
         })), [.. rows]);
     }
 
+    // ----------------------------------------------------------------- fields
+
+    /// <summary>Rebuilds only the Fields section (new statistics), keeping input focus elsewhere.</summary>
+    public void UpdateFields(DocumentTab tab)
+    {
+        if (tab == _tab) _fieldsHost.Child = FieldsSection(tab);
+    }
+
+    private Border FieldsSection(DocumentTab tab)
+    {
+        var refresh = Mini("↻", () => _ = _host.RefreshFieldStatsAsync(tab), "Count again");
+        var stats = tab.FieldStats;
+        var body = new List<Control>();
+        if (stats is null)
+        {
+            body.Add(Hint("Counting values…"));
+            return Section(Header("Fields", refresh), [.. body]);
+        }
+        if (stats.Fields.Count == 0) body.Add(Hint("No parsed fields in this view."));
+        else body.Add(Hint($"Top values in {stats.Scanned:N0} of {stats.ViewCount:N0} entries{(stats.Sampled ? " (sample)" : "")}. Click a value to show only it, right-click to exclude it."));
+        var p = Palette.Current;
+        foreach (var f in stats.Fields)
+        {
+            var expanded = tab.ExpandedFields.Contains(f.Key);
+            var shown = _host.IsColumnShown(tab, f.Key);
+            var col = Mini(shown ? "✓ column" : "+ column", () =>
+            {
+                if (shown) _host.RemoveColumn(f.Key);
+                else _host.AddColumn(f.Key);
+            }, shown ? "Remove this column" : "Show this field as a column");
+            var name = new TextBlock
+            {
+                Text = (expanded ? "▾ " : "▸ ") + f.Key,
+                FontFamily = Fonts.Mono,
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            var count = new TextBlock
+            {
+                Text = $"{f.Distinct:N0}{(f.DistinctCapped ? "+" : "")} {(f.Distinct == 1 && !f.DistinctCapped ? "value" : "values")}",
+                FontSize = 11,
+                Opacity = 0.6,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { count, col } };
+            var head = new DockPanel { Background = Brushes.Transparent, Cursor = new Cursor(StandardCursorType.Hand), MinHeight = 22 };
+            DockPanel.SetDock(right, Dock.Right);
+            head.Children.Add(right);
+            head.Children.Add(name);
+            head.PointerPressed += (_, e) =>
+            {
+                if (e.Handled || !e.GetCurrentPoint(head).Properties.IsLeftButtonPressed) return;
+                if (!tab.ExpandedFields.Remove(f.Key)) tab.ExpandedFields.Add(f.Key);
+                UpdateFields(tab);
+            };
+            body.Add(head);
+            if (!expanded) continue;
+            var max = Math.Max(1, f.Present);
+            foreach (var (value, n) in f.Top)
+            {
+                var label = new TextBlock { Text = value, FontFamily = Fonts.Mono, FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+                var num = new TextBlock { Text = n.ToString("N0", CultureInfo.CurrentCulture), FontSize = 11, Opacity = 0.65, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
+                var bar = new Border { Height = 2, CornerRadius = new CornerRadius(1), Background = p.Accent, HorizontalAlignment = HorizontalAlignment.Left, Opacity = 0.7 };
+                var row = new DockPanel { Background = Brushes.Transparent, Cursor = new Cursor(StandardCursorType.Hand), Margin = new Thickness(14, 0, 0, 0) };
+                DockPanel.SetDock(num, Dock.Right);
+                DockPanel.SetDock(bar, Dock.Bottom);
+                row.Children.Add(num);
+                row.Children.Add(bar);
+                row.Children.Add(label);
+                row.SizeChanged += (_, e) => bar.Width = Math.Max(2, e.NewSize.Width * n / max);
+                ToolTip.SetTip(row, $"{value}\n{n:N0} of {f.Present:N0} ({(double)n / max:P0}). Click: only this value. Right-click: exclude it.");
+                row.PointerPressed += (_, e) =>
+                {
+                    var props = e.GetCurrentPoint(row).Properties;
+                    if (props.IsLeftButtonPressed) _host.AddValueRule(f.Key, value, RuleMode.Include);
+                    else if (props.IsRightButtonPressed) _host.AddValueRule(f.Key, value, RuleMode.Exclude);
+                    e.Handled = true;
+                };
+                body.Add(row);
+            }
+        }
+        return Section(Header("Fields", refresh), [.. body]);
+    }
+
     // ---------------------------------------------------------------- filters
 
     private Border FiltersSection(DocumentTab tab)
@@ -164,7 +252,7 @@ public sealed class Sidebar : ScrollViewer
         };
         var body = new List<Control>();
         if (f.Rules.Count == 0) body.Add(Hint("Add include (+) or exclude (−) rules. Entries must match any include and no exclude."));
-        var columns = tab.Info.Columns.Where(c => c.Key != "__source").ToList();
+        var columns = _host.Columns(tab).Where(c => c.Key != "__source").ToList();
         foreach (var r in f.Rules.ToList())
         {
             var en = new CheckBox { IsChecked = r.Enabled, MinWidth = 0, Padding = new Thickness(2, 0) };
@@ -183,7 +271,7 @@ public sealed class Sidebar : ScrollViewer
             };
             var text = new TextBlock
             {
-                Text = (r.Regex ? $"/{r.Text}/" : r.Text) + (r.CaseSensitive ? "  Aa" : ""),
+                Text = (r.Exact ? $"{columns.FirstOrDefault(c => c.Key == r.Column)?.Title ?? r.Column} = {r.Text}" : r.Regex ? $"/{r.Text}/" : r.Text) + (r.CaseSensitive ? "  Aa" : ""),
                 FontFamily = Fonts.Mono,
                 FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -211,6 +299,7 @@ public sealed class Sidebar : ScrollViewer
                 _host.ApplyFilter();
             }, "Remove");
             var dp = new DockPanel();
+            col.IsVisible = !r.Exact; // the column is part of the rule's text
             var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { col, del } };
             DockPanel.SetDock(right, Dock.Right);
             DockPanel.SetDock(en, Dock.Left);

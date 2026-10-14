@@ -133,4 +133,98 @@ public class DocumentTests
         await d.RefreshAsync();
         Assert.Equal([1], Entries(d));
     }
+
+    [Fact]
+    public async Task ExactRulesMatchTheWholeValue()
+    {
+        using var d = await Doc();
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(new FilterRule { Text = "com.acme.App", Column = "logger", Exact = true })));
+        Assert.Equal([0, 4, 5], Entries(d));
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(new FilterRule { Text = "com.acme", Column = "logger", Exact = true })));
+        Assert.Equal(0, d.ViewCount);
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(new FilterRule { Text = "worker-1", Column = "thread", Exact = true, Mode = RuleMode.Exclude })));
+        Assert.Equal([0, 1, 3, 4, 5], Entries(d));
+    }
+
+    [Fact]
+    public async Task ShowsAllEntriesInContextWithoutLosingTheFilter()
+    {
+        using var d = await Doc();
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(Rule("Db", RuleMode.Include))));
+        Assert.Equal([1, 3], Entries(d));
+        d.IgnoreFilter = true;
+        Assert.Equal(6, d.ViewCount);
+        Assert.Equal([true, false, true, false, true, true], d.GetRows(0, 10).Select(r => r.IsContext));
+        Assert.Equal(3, d.RowForKey("0:3"));
+        Assert.Equal(new[] { 2 }, (await d.SearchAsync(new TextPattern("Cache"))).Rows);
+        d.IgnoreFilter = false;
+        Assert.Equal([1, 3], Entries(d));
+        Assert.Null(d.RowForKey("0:2"));
+        Assert.Equal(1, d.RowForKey("0:2", nearest: true));
+    }
+
+    [Fact]
+    public async Task CountsTopFieldValues()
+    {
+        using var d = await Doc();
+        var stats = await d.FieldStatsAsync();
+        Assert.Equal((6, 6, false), (stats.Scanned, stats.ViewCount, stats.Sampled));
+        Assert.Null(stats.Get("message"));
+        var logger = stats.Get("logger")!;
+        Assert.Equal(("com.acme.App", 3), logger.Top[0]);
+        Assert.Equal(3, logger.Distinct);
+        Assert.Equal(6, logger.Present);
+        Assert.Equal(("main", 4), stats.Get("thread")!.Top[0]);
+
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(Rule("Db", RuleMode.Include))));
+        Assert.Equal([("com.acme.Db", 2)], (await d.FieldStatsAsync()).Get("logger")!.Top);
+        var sampled = await d.FieldStatsAsync(maxRows: 1);
+        Assert.True(sampled.Sampled || sampled.ViewCount <= 1000);
+    }
+
+    [Fact]
+    public async Task SamplesLargeViewsInBlocks()
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < 5000; i++) sb.Append($"2024-01-01 00:00:00 [t{i % 3}] INFO x - m{i}\n");
+        using var d = await Doc(sb.ToString());
+        var stats = await d.FieldStatsAsync(maxRows: 2000);
+        Assert.True(stats.Sampled);
+        Assert.Equal(2000, stats.Scanned);
+        Assert.Equal(3, stats.Get("thread")!.Distinct);
+    }
+
+    [Fact]
+    public async Task JsonEntriesExposeEveryPropertyAsAField()
+    {
+        using var d = await Doc("{\"@t\":\"2024-01-01T00:00:00Z\",\"@l\":\"Warning\",\"@m\":\"slow\",\"Elapsed\":812,\"http\":{\"path\":\"/api\",\"status\":503},\"tags\":[\"a\"]}\n");
+        var row = d.GetRows(0, 1)[0];
+        Assert.Equal("WARN", row.Field("level"));
+        Assert.Equal("slow", row.Field("message"));
+        Assert.Equal("812", row.Field("Elapsed"));
+        Assert.Equal("/api", row.Field("http.path"));
+        Assert.Equal("503", row.Field("http.status"));
+        Assert.Equal("[\"a\"]", row.Field("tags"));
+        Assert.False(row.Fields.ContainsKey("@m"));
+        await d.ApplyFilterAsync(Spec(s => s.Query = "http.status:503"));
+        Assert.Equal(1, d.ViewCount);
+    }
+
+    [Fact]
+    public async Task KeepsLateCommonValuesSkipsUnlistableOnesAndFlattensCanonicalObjects()
+    {
+        var sb = new System.Text.StringBuilder();
+        var longText = new string('x', 300);
+        for (var i = 0; i < 6000; i++) sb.Append($"{{\"@m\":\"m\",\"id\":\"u{i}\",\"body\":\"{longText}\"}}\n");
+        for (var i = 0; i < 300; i++) sb.Append("{\"@m\":\"m\",\"id\":\"late\",\"error\":{\"code\":\"EHOST\",\"stack\":\"s\"}}\n");
+        using var d = await Doc(sb.ToString());
+        var stats = await d.FieldStatsAsync(maxRows: 1_000_000);
+        var id = stats.Get("id")!;
+        Assert.Equal(("late", 300), id.Top[0]);
+        Assert.True(id.DistinctCapped);
+        var body = stats.Get("body")!;
+        Assert.Equal(6000, body.Present);
+        Assert.Empty(body.Top);
+        Assert.Equal("EHOST", d.GetRows(6000, 1)[0].Field("error.code"));
+    }
 }

@@ -45,6 +45,12 @@ public sealed class AppSettings
     public Dictionary<string, List<SavedBookmark>> Bookmarks { get; set; } = [];
     public Dictionary<string, double> ColumnWidths { get; set; } = [];
     public List<string> HiddenColumns { get; set; } = [];
+    /// <summary>Parsed fields the user added as columns, per format name.</summary>
+    public Dictionary<string, List<string>> ExtraColumns { get; set; } = [];
+    /// <summary>Column keys in the order the user arranged them, per format name.</summary>
+    public Dictionary<string, List<string>> ColumnOrder { get; set; } = [];
+    /// <summary>Recently applied quick-filter queries, most recent first.</summary>
+    public List<string> QueryHistory { get; set; } = [];
 
     [JsonIgnore] public string? FilePath { get; set; }
 
@@ -101,6 +107,13 @@ public sealed class AppSettings
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
         }
+    }
+
+    public void AddQueryHistory(string query)
+    {
+        query = query.Trim();
+        if (query.Length == 0) return;
+        QueryHistory = new[] { query }.Concat(QueryHistory.Where(q => q != query)).Take(20).ToList();
     }
 
     public void AddRecent(IEnumerable<string> paths)

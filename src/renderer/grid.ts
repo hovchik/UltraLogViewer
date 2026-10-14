@@ -15,7 +15,12 @@ export interface GridHost {
   highlights(): HighlightRule[];
   columnWidth(col: ColumnDef): number;
   hiddenColumns(): string[];
-  onHeaderMenu(e: MouseEvent): void;
+  /** Effective columns of a tab (format columns plus extra field columns, in the user's order). */
+  columns(tab: Tab): ColumnDef[];
+  /** `key` is the column that was right-clicked (null for the line gutter). */
+  onHeaderMenu(e: MouseEvent, key: string | null): void;
+  /** Right-click on a row; `col` is the clicked cell's column key (null for the line gutter). */
+  onRowMenu(e: MouseEvent, row: RowData, col: string | null): void;
   setColumnWidth(key: string, width: number): void;
   onSelectionChange(): void;
   onTopRowChange(): void;
@@ -66,8 +71,10 @@ export class Grid {
     this.overviewEl.addEventListener('mousedown', (e) => this.onOverviewClick(e));
     this.header.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      this.host.onHeaderMenu(e);
+      const key = ((e.target as HTMLElement).closest('.h') as HTMLElement | null)?.dataset.key ?? null;
+      this.host.onHeaderMenu(e, key);
     });
+    this.rowsEl.addEventListener('contextmenu', (e) => this.onContextMenu(e));
     root.addEventListener('keydown', (e) => this.onKey(e));
     new ResizeObserver(() => {
       this.syncScroll();
@@ -142,7 +149,7 @@ export class Grid {
   /** Visible columns with resolved widths; exactly one column (0 width) stretches. */
   private cols(): { col: ColumnDef; width: number }[] {
     const hidden = this.host.hiddenColumns();
-    const all = this.tab?.info.columns ?? [];
+    const all = this.tab ? this.host.columns(this.tab) : [];
     let cols = all.filter((c) => !hidden.includes(c.key)).map((col) => ({ col, width: this.host.columnWidth(col) }));
     if (!cols.length) cols = all.map((col) => ({ col, width: this.host.columnWidth(col) }));
     if (cols.length && !cols.some((c) => c.width === 0)) cols[cols.length - 1].width = 0;
@@ -160,6 +167,7 @@ export class Grid {
     for (const { col, width: w } of this.cols()) {
       const el = document.createElement('div');
       el.className = w ? 'h' : 'h flex';
+      el.dataset.key = col.key;
       if (w) el.style.width = `${w}px`;
       el.textContent = col.title;
       if (w) {
@@ -355,7 +363,7 @@ export class Grid {
         const style = w ? ` style="width:${w}px"` : '';
         const cc = w ? 'c' : 'c flex';
         const content = c.key === 'level' ? `<span class="lvtag">${esc(v)}</span>` : this.markup(v, r === curHit);
-        html += `<div class="${cc}${c.key === '__source' ? ' src' : ''}"${style}>${content}</div>`;
+        html += `<div class="${cc}${c.key === '__source' ? ' src' : ''}" data-col="${esc(c.key)}"${style}>${content}</div>`;
       }
       html += '</div>';
     }
@@ -501,6 +509,23 @@ export class Grid {
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
+  }
+
+  private onContextMenu(e: MouseEvent) {
+    e.preventDefault();
+    const t = this.tab;
+    const r = this.rowAt(e);
+    const row = r === null ? undefined : this.cache.get(r);
+    if (!t || r === null || !row) return;
+    const col = ((e.target as HTMLElement).closest('.c') as HTMLElement | null)?.dataset.col ?? null;
+    this.root.focus();
+    // Keep a multi-row selection when right-clicking inside it.
+    if (r < Math.min(t.anchor, t.focus) || r > Math.max(t.anchor, t.focus)) {
+      t.anchor = t.focus = r;
+      this.render();
+      this.host.onSelectionChange();
+    }
+    this.host.onRowMenu(e, row, col);
   }
 
   select(row: number, extend = false, align: 'nearest' | 'center' = 'nearest') {

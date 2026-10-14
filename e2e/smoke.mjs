@@ -47,6 +47,57 @@ await step('detects columns and levels', async () => {
   assert.ok((await win.locator('.lvl').count()) >= 4);
 });
 
+await step('filters by a cell value from the row menu', async () => {
+  const cell = win.locator('.grid-rows .r .c[data-col="logger"]').first();
+  const logger = (await cell.innerText()).trim();
+  await cell.click({ button: 'right' });
+  const item = win.locator('.ctxmenu .item', { hasText: `Only Logger = “` });
+  await item.waitFor();
+  await shot('08-row-menu');
+  await item.click();
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
+  assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === logger), `loggers: ${loggers.slice(0, 5)}`);
+  assert.ok((await win.locator('#sidebar .rule .txt').allInnerTexts()).includes(`Logger = ${logger}`));
+});
+
+await step('shows every entry in context and goes back', async () => {
+  const shown = await status();
+  await win.focus('#grid');
+  await win.keyboard.press('c');
+  await win.waitForSelector('#ctx-banner:not(.hidden)');
+  assert.match(await win.locator('#ctx-banner').innerText(), /Showing every entry around line \d+\. Rows your filters hide are dimmed\./);
+  await win.waitForFunction(() => /filters ignored/.test(document.querySelector('#status')?.textContent ?? ''));
+  await win.waitForSelector('.grid-rows .r.ctx');
+  await shot('09-context');
+  await win.keyboard.press('Escape');
+  await win.waitForSelector('#ctx-banner.hidden', { state: 'attached' });
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''));
+  assert.equal((await status()).match(/[\d,]+ shown/)?.[0], shown.match(/[\d,]+ shown/)?.[0]);
+});
+
+await step('lists parsed fields with their top values', async () => {
+  const shown = (await status()).match(/([\d,]+) shown/)[1];
+  // Stats follow the filtered view: one logger left.
+  await win.waitForFunction((n) => (document.querySelector('#sidebar .fields-sec .empty-hint')?.textContent ?? '').includes(`of ${n} entries`), shown, { timeout: 20000 });
+  const logger = win.locator('#sidebar .fields-sec .fld', { hasText: 'logger' });
+  assert.match(await logger.innerText(), /\b1 value\b/);
+  await win.locator('#sidebar .fields-sec .fld', { hasText: 'thread' }).first().click();
+  await win.waitForSelector('#sidebar .fields-sec .fv');
+});
+
+await step('suggests field values in the quick filter', async () => {
+  await win.click('#quick');
+  await win.keyboard.type('logger:');
+  await win.waitForSelector('#quick-ac:not(.hidden) .ac-item', { timeout: 10000 });
+  assert.ok((await win.locator('#quick-ac .ac-item').count()) > 0);
+  await shot('10-autocomplete');
+  await win.keyboard.press('Escape'); // closes the dropdown
+  await win.keyboard.press('Escape'); // clears the box
+  await win.locator('#sidebar .rule', { hasText: 'Logger =' }).locator('.mini.danger').click();
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+});
+
 await step('searches with highlights and navigation', async () => {
   await win.fill('#search', 'ConnectionPool');
   await win.waitForFunction(() => /\d+ \/ [\d,]+/.test(document.querySelector('#search-count')?.textContent ?? ''));

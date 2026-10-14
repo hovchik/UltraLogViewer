@@ -10,6 +10,7 @@ using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Styling;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using UltraLogViewer.Core;
 using UltraLogViewer.Desktop.Controls;
 
@@ -19,7 +20,7 @@ namespace UltraLogViewer.Desktop;
 /// The application window: toolbar, tabs, sidebar, the log grid with its timeline and detail pane,
 /// and the status bar. Built in code so the layout and behaviour live side by side.
 /// </summary>
-public sealed class MainWindow : Window, ILogGridHost
+public sealed partial class MainWindow : Window, ILogGridHost
 {
     public static readonly string[] Encodings = ["auto", "utf-8", "utf-16le", "utf-16be", "windows-1252"];
 
@@ -31,7 +32,13 @@ public sealed class MainWindow : Window, ILogGridHost
     private readonly HistogramView _hist;
     private readonly Sidebar _sidebar;
     private readonly TextBox _detail;
+    private readonly Grid _detailFields = new() { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Margin = new Thickness(8, 4, 8, 6) };
     private readonly TextBlock _detailBar;
+    private readonly Border _contextBanner;
+    private readonly TextBlock _contextText = new() { VerticalAlignment = VerticalAlignment.Center, FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly Popup _quickPopup;
+    private readonly ListBox _quickList = new() { MaxHeight = 280, MinWidth = 260, FontSize = 12.5 };
+    private List<Suggestion> _quickSuggestions = [];
     private readonly Grid _center;
     private readonly GridSplitter _detailSplitter;
     private readonly GridSplitter _sideSplitter;
@@ -114,20 +121,36 @@ public sealed class MainWindow : Window, ILogGridHost
         {
             _quickDebounce.Stop();
             _quickDebounce.Start();
+            if (_quick.IsFocused) UpdateSuggestions();
         };
-        _quick.KeyDown += (_, e) =>
+        _quick.AddHandler(KeyDownEvent, OnQuickKey, RoutingStrategies.Tunnel);
+        _quick.GotFocus += (_, _) => UpdateSuggestions();
+        _quick.LostFocus += (_, _) =>
         {
-            if (e.Key == Key.Enter)
+            CloseSuggestions();
+            if (_active is { } t && !string.IsNullOrWhiteSpace(t.Filter.Query) && t.Filter.Query == _quick.Text) RememberQuery(t.Filter.Query);
+        };
+        _quickList.ItemTemplate = new Avalonia.Controls.Templates.FuncDataTemplate<Suggestion>((sg, _) => new DockPanel
+        {
+            Children =
             {
-                e.Handled = true;
-                _quickDebounce.Stop();
-                CommitQuickFilter();
-            }
-            else if (e.Key == Key.Escape)
-            {
-                e.Handled = true;
-                _grid!.Focus();
-            }
+                new TextBlock { Text = sg?.Detail ?? "", Opacity = 0.6, FontSize = 11.5, Margin = new Thickness(12, 0, 0, 0), [DockPanel.DockProperty] = Dock.Right, VerticalAlignment = VerticalAlignment.Center },
+                new TextBlock { Text = sg?.Label ?? "", FontFamily = Fonts.Mono, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center },
+            },
+        });
+        // Tunnel, so the pick happens before the item takes focus away from the text box.
+        _quickList.AddHandler(PointerPressedEvent, (_, e) =>
+        {
+            if ((e.Source as Control)?.FindAncestorOfType<ListBoxItem>(true)?.DataContext is not Suggestion sg) return;
+            e.Handled = true;
+            AcceptSuggestion(sg);
+        }, RoutingStrategies.Tunnel);
+        _quickPopup = new Popup
+        {
+            PlacementTarget = _quick,
+            Placement = PlacementMode.BottomEdgeAlignedLeft,
+            IsLightDismissEnabled = false,
+            Child = _quickList,
         };
 
         _followBtn = Toggle("Follow", "Follow new lines (Ctrl+T)");
@@ -166,7 +189,7 @@ public sealed class MainWindow : Window, ILogGridHost
         toolbar.Children.Add(leftTools);
         toolbar.Children.Add(rightTools);
         _quick.Margin = new Thickness(0, 0, 8, 0);
-        toolbar.Children.Add(_quick);
+        toolbar.Children.Add(new Panel { Children = { _quick, _quickPopup } });
 
         // --------------------------------------------------------------- menu
         _recentMenu = new MenuItem { Header = "Open _recent" };
@@ -282,18 +305,28 @@ public sealed class MainWindow : Window, ILogGridHost
         });
         var detailHead = new DockPanel { Children = { copyEntry, _detailBar } };
         DockPanel.SetDock(copyEntry, Dock.Right);
-        var detailPane = new DockPanel { Children = { detailHead, _detail } };
+        ScrollViewer.SetVerticalScrollBarVisibility(_detail, ScrollBarVisibility.Disabled);
+        var detailBody = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Content = new StackPanel { Children = { _detailFields, _detail } },
+        };
+        var detailPane = new DockPanel { Children = { detailHead, detailBody } };
         DockPanel.SetDock(detailHead, Dock.Top);
         _detailSplitter = new GridSplitter { ResizeDirection = GridResizeDirection.Rows, Height = 5, Background = new SolidColorBrush(Color.Parse("#808080"), 0.25) };
 
-        _center = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto,Auto") };
-        _center.RowDefinitions[3].Height = new GridLength(_settings.DetailHeight);
-        _center.RowDefinitions[3].MinHeight = 0;
+        _contextBanner = BuildContextBanner();
+        _center = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,*,Auto,Auto") };
+        _center.RowDefinitions[DetailRow].Height = new GridLength(_settings.DetailHeight);
+        _center.RowDefinitions[DetailRow].MinHeight = 0;
         Grid.SetRow(_hist, 0);
-        Grid.SetRow(_grid, 1);
-        Grid.SetRow(_detailSplitter, 2);
-        Grid.SetRow(detailPane, 3);
+        Grid.SetRow(_contextBanner, 1);
+        Grid.SetRow(_grid, 2);
+        Grid.SetRow(_detailSplitter, 3);
+        Grid.SetRow(detailPane, DetailRow);
         _center.Children.Add(_hist);
+        _center.Children.Add(_contextBanner);
         _center.Children.Add(_grid);
         _center.Children.Add(_detailSplitter);
         _center.Children.Add(detailPane);
@@ -405,6 +438,7 @@ public sealed class MainWindow : Window, ILogGridHost
         Activate(null);
     }
 
+    private const int DetailRow = 4;
     private readonly Control _detailPane;
     private readonly Control _sideBorder;
 
@@ -549,10 +583,12 @@ public sealed class MainWindow : Window, ILogGridHost
         RebuildTabStrip();
         _sidebar.Render(tab);
         _hist.Data = null;
+        UpdateContextBanner();
         UpdateSearchCount();
         UpdateDetail();
         UpdateStatus();
         if (tab is { Ready: true }) Run(() => RefreshDerivedAsync(tab));
+        if (tab is { Ready: true, FieldStats: null }) ScheduleFieldStats(tab);
         _grid.Focus();
     }
 
@@ -696,6 +732,7 @@ public sealed class MainWindow : Window, ILogGridHost
             await RefreshOverviewAsync();
             await RefreshHistogramAsync();
         }
+        ScheduleFieldStats(tab);
         return tab;
     }
 
@@ -745,6 +782,7 @@ public sealed class MainWindow : Window, ILogGridHost
             tab.Info = tab.Doc.Info();
             tab.StaleViews = true;
             UpdateBookmarkRows(tab);
+            if (DateTime.UtcNow - tab.StatsTime > TimeSpan.FromSeconds(10)) ScheduleFieldStats(tab);
             if (tab != _active) return;
             _grid.Invalidate();
             if (tab.Follow) _grid.ScrollTo(int.MaxValue);
@@ -810,6 +848,12 @@ public sealed class MainWindow : Window, ILogGridHost
             }
         }
         var focusKey = (_grid.GetCached(tab.Focus) ?? (tab.Info.ViewCount > 0 ? (await Task.Run(() => tab.Doc.GetRows(tab.Focus, 1))).FirstOrDefault() : null))?.Key;
+        if (tab.Doc.IgnoreFilter)
+        {
+            // A filter change ends "show in context".
+            tab.Doc.IgnoreFilter = false;
+            if (tab == _active) UpdateContextBanner();
+        }
         tab.BusyLabel = "Filtering";
         tab.BusyProgress = 0;
         UpdateStatus();
@@ -834,6 +878,7 @@ public sealed class MainWindow : Window, ILogGridHost
         _sidebar.Render(tab);
         UpdateStatus();
         UpdateDetail();
+        ScheduleFieldStats(tab);
         if (tab.SearchPattern.Text.Length > 0) await RunSearch(false);
         await RefreshOverviewAsync();
         await RefreshHistogramAsync();
@@ -1206,6 +1251,7 @@ public sealed class MainWindow : Window, ILogGridHost
         _sidebar.Render(tab);
         UpdateStatus();
         UpdateDetail();
+        ScheduleFieldStats(tab);
         await RefreshOverviewAsync();
         await RefreshHistogramAsync();
     }
@@ -1231,12 +1277,12 @@ public sealed class MainWindow : Window, ILogGridHost
 
     private void ToggleDetail(bool on, bool save = true)
     {
-        if (!on && _detailPane.IsVisible) _settings.DetailHeight = Math.Max(80, _center.RowDefinitions[3].ActualHeight);
+        if (!on && _detailPane.IsVisible) _settings.DetailHeight = Math.Max(80, _center.RowDefinitions[DetailRow].ActualHeight);
         _settings.ShowDetail = on;
         _detailBtn.IsChecked = on;
         _detailPane.IsVisible = on;
         _detailSplitter.IsVisible = on;
-        _center.RowDefinitions[3].Height = on ? new GridLength(_settings.DetailHeight) : new GridLength(0);
+        _center.RowDefinitions[DetailRow].Height = on ? new GridLength(_settings.DetailHeight) : new GridLength(0);
         if (save) _settings.Save();
         if (on) UpdateDetail();
     }
@@ -1274,7 +1320,7 @@ public sealed class MainWindow : Window, ILogGridHost
 
     private void SaveOnClose()
     {
-        if (_detailPane.IsVisible) _settings.DetailHeight = Math.Max(80, _center.RowDefinitions[3].ActualHeight);
+        if (_detailPane.IsVisible) _settings.DetailHeight = Math.Max(80, _center.RowDefinitions[DetailRow].ActualHeight);
         _settings.Save();
         _tick.Stop();
         foreach (var t in _tabs) t.Dispose();
@@ -1319,31 +1365,6 @@ public sealed class MainWindow : Window, ILogGridHost
 
     public bool IsColumnHidden(string key) => _settings.HiddenColumns.Contains(key);
 
-    public void ShowColumnMenu(Control anchor)
-    {
-        if (_active is not { } tab) return;
-        var menu = new ContextMenu();
-        foreach (var col in tab.Info.Columns)
-        {
-            var item = new MenuItem { Header = col.Title, ToggleType = MenuItemToggleType.CheckBox, IsChecked = !IsColumnHidden(col.Key) };
-            item.Click += (_, _) =>
-            {
-                if (!_settings.HiddenColumns.Remove(col.Key)) _settings.HiddenColumns.Add(col.Key);
-                _settings.Save();
-                _grid.InvalidateVisual();
-            };
-            menu.Items.Add(item);
-        }
-        menu.Items.Add(new Separator());
-        menu.Items.Add(Item("Reset column widths", () =>
-        {
-            _settings.ColumnWidths.Clear();
-            _settings.Save();
-            _grid.InvalidateVisual();
-        }));
-        menu.Open(anchor);
-    }
-
     public void SelectionChanged()
     {
         UpdateDetail();
@@ -1359,6 +1380,7 @@ public sealed class MainWindow : Window, ILogGridHost
     {
         if (_active is { } t) _followBtn.IsChecked = t.Follow;
         UpdateViewport();
+        if (_contextBanner.IsVisible) UpdateContextBanner();
         if (_detail.Text is null or "") UpdateDetail();
     }
 
@@ -1385,6 +1407,12 @@ public sealed class MainWindow : Window, ILogGridHost
                 return true;
             case Key.Oem2 or Key.Divide when !shift:
                 FocusSearch();
+                return true;
+            case Key.C when !shift:
+                Run(() => SetContextMode(!(_active?.Doc.IgnoreFilter ?? false)));
+                return true;
+            case Key.Escape when _active?.Doc.IgnoreFilter == true:
+                Run(() => SetContextMode(false));
                 return true;
             default:
                 return false;
@@ -1437,6 +1465,7 @@ public sealed class MainWindow : Window, ILogGridHost
         {
             _detail.Text = "";
             _detailBar.Text = "";
+            _detailFields.Children.Clear();
             return;
         }
         Run(async () =>
@@ -1451,10 +1480,8 @@ public sealed class MainWindow : Window, ILogGridHost
             if (other?.Time is long a && row.Time is long b) parts.Add($"Δ selection {Timestamps.FormatDuration(Math.Abs(b - a))}");
             if (tab.Bookmarks.TryGetValue(row.Key, out var bm)) parts.Add(bm.Note.Length > 0 ? $"🔖 {bm.Note}" : "🔖 bookmarked");
             _detailBar.Text = string.Join("   ·   ", parts);
-            var fields = row.Fields.Where(kv => kv.Key != "message" && kv.Value.Length > 0)
-                .Select(kv => $"{kv.Key,-10} {(kv.Value.Length > 300 ? kv.Value[..300] + "…" : kv.Value)}").ToList();
-            var body = Pretty.Entry(row.Text);
-            _detail.Text = fields.Count > 0 ? string.Join("\n", fields) + "\n\n" + body : body;
+            RenderDetailFields(tab, row);
+            _detail.Text = Pretty.Entry(row.Text);
         });
     }
 
@@ -1470,8 +1497,8 @@ public sealed class MainWindow : Window, ILogGridHost
             return;
         }
         var i = tab.Info;
-        _statusLeft.Text = i.ViewCount == i.Total && !tab.HasCustomFilter
-            ? $"{i.Total:N0} entries"
+        _statusLeft.Text = tab.Doc.IgnoreFilter ? $"All {i.Total:N0} entries (filters ignored)"
+            : i.ViewCount == i.Total && !tab.HasCustomFilter ? $"{i.Total:N0} entries"
             : $"{i.ViewCount:N0} of {i.Total:N0} entries (filtered)";
         var n = tab.SelectionEnd - tab.SelectionStart + 1;
         _statusSel.Text = i.ViewCount == 0 ? "" : n > 1 ? $"{n:N0} selected" : $"Row {tab.Focus + 1:N0}";

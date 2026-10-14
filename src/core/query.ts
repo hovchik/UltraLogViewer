@@ -1,4 +1,4 @@
-import { TextPattern } from './types';
+import { FilterRule, TextPattern } from './types';
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -57,8 +57,9 @@ export function matchRanges(re: RegExp, text: string, limit = 1000): [number, nu
  *   a OR b          either
  *   -word / NOT w   must not appear
  *   "exact phrase"
- *   field:value     match inside a parsed column (e.g. logger:Db, level:error)
- *   /regex/
+ *   field:value     match inside a parsed column (e.g. logger:Db, level:error, http.status:500)
+ *   field:"a b"     a value with spaces (also -field:"a b")
+ *   /regex/         also -/regex/ and field:/regex/
  */
 export interface QueryAlt extends TextPattern {
   /** Restrict to a parsed column, e.g. "logger". */
@@ -70,15 +71,18 @@ export interface QueryTerm {
   any: QueryAlt[]; // OR-ed alternatives
 }
 
+// An unclosed quote is allowed (the user is still typing).
+const TOKEN_RE = /(?<neg>-?)(?<field>[A-Za-z_][\w.-]*):"(?<fq>[^"]*)"?|"(?<q>[^"]*)"?|\/(?<re>(?:\\.|[^/])+)\/|\S+/g;
+const FIELD_RE = /^([A-Za-z_][\w.-]*):(.+)$/;
+const BARE_FIELD_RE = /^[A-Za-z_][\w.-]*:$/;
+
 export function parseQuery(q: string, caseSensitive = false): QueryTerm[] {
-  const tokens: string[] = [];
-  const re = /"([^"]*)"|\/((?:\\.|[^/])+)\/|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(q))) tokens.push(m[1] !== undefined ? `"${m[1]}` : m[2] !== undefined ? `/${m[2]}` : m[3]);
   const terms: QueryTerm[] = [];
   let negateNext = false;
   let orNext = false;
-  for (const raw of tokens) {
+  for (const m of q.matchAll(TOKEN_RE)) {
+    const raw = m[0];
+    const g = m.groups ?? {};
     if (raw === 'OR' || raw === '|') {
       orNext = terms.length > 0;
       continue;
@@ -88,23 +92,40 @@ export function parseQuery(q: string, caseSensitive = false): QueryTerm[] {
       negateNext = true;
       continue;
     }
-    let tok = raw;
     let negate = negateNext;
     negateNext = false;
-    if (tok.startsWith('-') && tok.length > 1) {
-      negate = true;
-      tok = tok.slice(1);
-    }
     let field: string | null = null;
-    const fm = /^([A-Za-z_][\w-]*):(.+)$/.exec(tok);
-    if (fm && !tok.startsWith('"') && !tok.startsWith('/')) {
-      field = fm[1].toLowerCase();
-      tok = fm[2];
+    let text: string;
+    let regex = false;
+    if (g.fq !== undefined) {
+      negate ||= g.neg === '-';
+      field = g.field.toLowerCase();
+      text = g.fq;
+    } else if (g.q !== undefined) {
+      text = g.q;
+    } else if (g.re !== undefined) {
+      text = g.re;
+      regex = true;
+    } else {
+      let tok = raw;
+      if (tok.length > 1 && tok.startsWith('-')) {
+        negate = true;
+        tok = tok.slice(1);
+      }
+      const fm = FIELD_RE.exec(tok);
+      if (fm) {
+        field = fm[1].toLowerCase();
+        tok = fm[2];
+      } else if (BARE_FIELD_RE.test(tok)) {
+        continue; // a field name still being typed ("logger:") filters nothing yet
+      }
+      if (tok.length > 1 && tok.startsWith('/') && tok.endsWith('/')) {
+        text = tok.slice(1, -1);
+        regex = true;
+      } else text = tok;
     }
-    let pat: QueryAlt;
-    if (tok.startsWith('/')) pat = { field, text: tok.slice(1), regex: true, caseSensitive, wholeWord: false };
-    else if (tok.startsWith('"')) pat = { field, text: tok.slice(1), regex: false, caseSensitive, wholeWord: false };
-    else pat = { field, text: tok, regex: false, caseSensitive, wholeWord: false };
+    if (!text) continue;
+    const pat: QueryAlt = { field, text, regex, caseSensitive, wholeWord: false };
     if (orNext && !negate) {
       terms[terms.length - 1].any.push(pat);
     } else {
@@ -113,6 +134,47 @@ export function parseQuery(q: string, caseSensitive = false): QueryTerm[] {
     orNext = false;
   }
   return terms;
+}
+
+const isSpace = (c: string) => /\s/.test(c);
+
+/** The whitespace-delimited token that the caret is in or just after, as [start, length] (for autocomplete). */
+export function tokenAt(text: string, caret: number): [number, number] {
+  caret = Math.max(0, Math.min(text.length, caret));
+  let start = caret;
+  let quotes = 0;
+  for (let i = 0; i < caret; i++) if (text[i] === '"') quotes++;
+  // Inside an open quote, the token starts before the quote's field prefix.
+  while (start > 0 && (!isSpace(text[start - 1]) || quotes % 2 === 1)) {
+    start--;
+    if (text[start] === '"') quotes--;
+  }
+  let end = caret;
+  while (end < text.length && !isSpace(text[end])) end++;
+  return [start, end - start];
+}
+
+/** Splits an autocomplete token into an optional "-" prefix, a field name (null if none yet) and the partial value. */
+export function splitToken(token: string): [string, string | null, string] {
+  const prefix = token.startsWith('-') ? '-' : '';
+  const t = token.slice(prefix.length);
+  const colon = t.indexOf(':');
+  if (colon <= 0 || !FIELD_RE.test(t.slice(0, colon) + ':x')) return [prefix, null, t];
+  return [prefix, t.slice(0, colon), t.slice(colon + 1).replace(/^"+|"+$/g, '')];
+}
+
+/** A `field:value` token, quoted when the value contains spaces or quotes. */
+export function fieldToken(field: string, value: string): string {
+  return value.length > 0 && !/[\s"]/.test(value) ? `${field}:${value}` : `${field}:"${value.replace(/"/g, '')}"`;
+}
+
+/** Matcher for a filter rule (exact rules compare the trimmed value). */
+export function ruleMatcher(r: FilterRule): Matcher {
+  if (!r.exact) return compileMatcher(r);
+  const needle = r.text.trim();
+  if (r.caseSensitive) return (t) => t.trim() === needle;
+  const lower = needle.toLowerCase();
+  return (t) => t.trim().toLowerCase() === lower;
 }
 
 /** `field(name)` returns a parsed column value (lower-case name). */

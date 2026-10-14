@@ -15,10 +15,13 @@ namespace UltraLogViewer.Desktop.Controls;
 public interface ILogGridHost
 {
     IReadOnlyList<HighlightRule> Highlights { get; }
+    /// <summary>The tab's columns in display order (format columns plus user-added fields).</summary>
+    IReadOnlyList<ColumnDef> Columns(DocumentTab tab);
     double ColumnWidth(ColumnDef col);
     void SetColumnWidth(string key, double width);
     bool IsColumnHidden(string key);
-    void ShowColumnMenu(Control anchor);
+    void ShowColumnMenu(Control anchor, ColumnDef? col);
+    void ShowRowMenu(RowData row, ColumnDef? col);
     void SelectionChanged();
     void TopRowChanged();
     /// <summary>Return true if the key was handled.</summary>
@@ -214,7 +217,7 @@ public sealed class LogGrid : Control
     private List<(ColumnDef Col, double Width)> Columns()
     {
         if (_tab is null) return [];
-        var all = _tab.Info.Columns;
+        var all = _host.Columns(_tab);
         var cols = all.Where(c => !_host.IsColumnHidden(c.Key)).Select(c => (c, _host.ColumnWidth(c))).ToList();
         if (cols.Count == 0) cols = all.Select(c => (c, _host.ColumnWidth(c))).ToList();
         if (cols.Count > 0 && !cols.Any(c => c.Item2 == 0)) cols[^1] = (cols[^1].c, 0);
@@ -442,6 +445,17 @@ public sealed class LogGrid : Control
         return r < Count ? r : null;
     }
 
+    private ColumnDef? ColumnAt(double x)
+    {
+        var cx = GutterWidth;
+        foreach (var (col, w) in Columns())
+        {
+            if (x >= cx && x < cx + w) return col;
+            cx += w;
+        }
+        return null;
+    }
+
     private (ColumnDef Col, double Right)? ResizeHandleAt(double x)
     {
         var cx = GutterWidth;
@@ -463,7 +477,7 @@ public sealed class LogGrid : Control
         {
             if (props.IsRightButtonPressed)
             {
-                _host.ShowColumnMenu(this);
+                _host.ShowColumnMenu(this, ColumnAt(pt.X));
             }
             else if (ResizeHandleAt(pt.X) is { } h)
             {
@@ -484,6 +498,13 @@ public sealed class LogGrid : Control
             return;
         }
         var row = RowAt(pt);
+        if (row is not null && _tab is not null && props.IsRightButtonPressed)
+        {
+            if (row < _tab.SelectionStart || row > _tab.SelectionEnd) Select(row.Value);
+            if (_cache.TryGetValue(row.Value, out var clicked)) _host.ShowRowMenu(clicked, ColumnAt(pt.X));
+            e.Handled = true;
+            return;
+        }
         if (row is null || _tab is null || !props.IsLeftButtonPressed) return;
         if (e.ClickCount == 2)
         {

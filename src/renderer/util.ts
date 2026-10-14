@@ -109,6 +109,108 @@ export function ask(title: string, opts: { value?: string; hint?: string; placeh
   });
 }
 
+// ------------------------------------------------------------ context menu
+
+export type MenuItem =
+  | 'sep'
+  | { label: string; shortcut?: string; checked?: boolean; disabled?: boolean; action?: () => void; submenu?: MenuItem[] };
+
+let closeOpenMenu: (() => void) | null = null;
+
+export function closeContextMenu() {
+  closeOpenMenu?.();
+}
+
+/** Drops leading, trailing and doubled separators. */
+function tidy(items: MenuItem[]): MenuItem[] {
+  const out: MenuItem[] = [];
+  for (const it of items) {
+    if (it === 'sep' && (!out.length || out[out.length - 1] === 'sep')) continue;
+    out.push(it);
+  }
+  while (out[out.length - 1] === 'sep') out.pop();
+  return out;
+}
+
+/** A small popup menu at (x, y). Closes on click outside, Esc, scroll or window blur. */
+export function contextMenu(x: number, y: number, items: MenuItem[]) {
+  closeContextMenu();
+  const close = () => {
+    root.remove();
+    document.removeEventListener('mousedown', outside, true);
+    window.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('blur', close);
+    window.removeEventListener('resize', close);
+    document.removeEventListener('wheel', close, true);
+    if (closeOpenMenu === close) closeOpenMenu = null;
+  };
+  const build = (list: MenuItem[]): HTMLElement => {
+    const el = h('div', { class: 'ctxmenu', role: 'menu' });
+    // Keep keyboard focus where it was (usually the grid).
+    el.addEventListener('mousedown', (e) => e.preventDefault());
+    for (const it of tidy(list)) {
+      if (it === 'sep') {
+        el.append(h('div', { class: 'sep' }));
+        continue;
+      }
+      const cls = ['item'];
+      if (it.disabled) cls.push('disabled');
+      if (it.submenu) cls.push('has-sub');
+      const row = h(
+        'div',
+        { class: cls.join(' '), role: 'menuitem' },
+        h('span', { class: 'chk' }, it.checked ? '✓' : ''),
+        h('span', { class: 'lbl' }, it.label),
+        h('span', { class: 'key' }, it.submenu ? '›' : it.shortcut ?? ''),
+      );
+      if (it.submenu && !it.disabled) {
+        const sub = build(it.submenu);
+        row.append(sub);
+        row.addEventListener('mouseenter', () => {
+          const r = row.getBoundingClientRect();
+          row.classList.toggle('flip', r.right + sub.offsetWidth + 4 > window.innerWidth);
+          sub.style.top = `${Math.min(-4, window.innerHeight - r.top - sub.offsetHeight - 4)}px`;
+        });
+      } else if (!it.disabled && it.action) {
+        const action = it.action;
+        row.addEventListener('click', (e) => {
+          e.stopPropagation();
+          close();
+          action();
+        });
+      }
+      el.append(row);
+    }
+    return el;
+  };
+  const root = build(items);
+  root.classList.add('root');
+  const outside = (e: MouseEvent) => {
+    if (!root.contains(e.target as Node)) close();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    const rows = [...root.children].filter((c) => c.classList.contains('item') && !c.classList.contains('disabled')) as HTMLElement[];
+    const cur = rows.findIndex((r) => r.classList.contains('hot'));
+    const hot = (i: number) => rows.forEach((r, k) => r.classList.toggle('hot', k === i));
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowDown') hot(rows.length ? (cur + 1) % rows.length : -1);
+    else if (e.key === 'ArrowUp') hot(rows.length ? (cur - 1 + rows.length) % rows.length : -1);
+    else if (e.key === 'Enter' && cur >= 0) rows[cur].click();
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  document.body.append(root);
+  root.style.left = `${Math.max(0, Math.min(x, window.innerWidth - root.offsetWidth - 4))}px`;
+  root.style.top = `${Math.max(0, Math.min(y, window.innerHeight - root.offsetHeight - 4))}px`;
+  document.addEventListener('mousedown', outside, true);
+  window.addEventListener('keydown', onKey, true);
+  window.addEventListener('blur', close);
+  window.addEventListener('resize', close);
+  document.addEventListener('wheel', close, true);
+  closeOpenMenu = close;
+}
+
 // ------------------------------------------------------------ pretty print
 
 function highlightJson(json: string): string {

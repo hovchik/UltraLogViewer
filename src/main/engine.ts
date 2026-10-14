@@ -4,7 +4,7 @@
 import * as path from 'node:path';
 import { LogDocument } from '../core/document';
 import { Encoding } from '../core/fileSource';
-import { CustomFormat, DocInfo, FilterSpec, Level, RowData, SearchResult, TextPattern } from '../core/types';
+import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, RowData, SearchResult, TextPattern } from '../core/types';
 
 export interface OpenOptions {
   encoding?: Encoding;
@@ -23,6 +23,7 @@ export class Engine {
   private docs = new Map<number, LogDocument>();
   private nextId = 1;
   private searchGen = new Map<number, number>();
+  private statsGen = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
 
@@ -99,8 +100,20 @@ export class Engine {
   rowForTime(docId: number, t: number) {
     return this.doc(docId).rowForTime(t);
   }
-  rowForKey(docId: number, key: string) {
-    return this.doc(docId).rowForKey(key);
+  rowForKey(docId: number, key: string, nearest = false) {
+    return this.doc(docId).rowForKey(key, nearest);
+  }
+  /** "Show in context": show every entry, dimming the ones the filter hides. */
+  setIgnoreFilter(docId: number, on: boolean): DocInfo {
+    const d = this.doc(docId);
+    d.ignoreFilter = on;
+    return d.info();
+  }
+  /** Top values per parsed field over the view; a newer call for the same document cancels the previous one. */
+  async fieldStats(docId: number, maxRows?: number, top?: number): Promise<FieldStats> {
+    const gen = (this.statsGen.get(docId) ?? 0) + 1;
+    this.statsGen.set(docId, gen);
+    return this.doc(docId).fieldStats(maxRows, top, () => this.statsGen.get(docId) !== gen || !this.docs.has(docId));
   }
   keyForLine(docId: number, source: number, line: number) {
     return this.doc(docId).keyForLine(source, line);
