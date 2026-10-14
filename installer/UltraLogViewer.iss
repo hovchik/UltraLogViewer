@@ -62,6 +62,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 LicenseFile=..\LICENSE
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=..\dotnet\src\UltraLogViewer.Desktop\Assets\app.ico
 UninstallDisplayName={#AppName}
 ChangesAssociations=yes
 CloseApplications=yes

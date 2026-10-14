@@ -104,6 +104,9 @@ It needs the [.NET 8 SDK](https://dotnet.microsoft.com/download). From a termina
 .\build-installer.cmd -Version 1.0.0                # override the version
 ```
 
+The app icon lives in `dotnet/src/UltraLogViewer.Desktop/Assets/` (`app.ico`, `app.png`) and is
+drawn by `python3 scripts/make-icon.py`; the exe, window, shortcuts, setup and the Electron build all use it.
+
 The [Windows installer workflow](.github/workflows/installer.yml) builds it on every change to the
 app or installer and uploads the setup .exe as an artifact; pushing a `v*` tag also attaches it to
 a GitHub release.
