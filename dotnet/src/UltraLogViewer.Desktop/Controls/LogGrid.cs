@@ -7,6 +7,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Immutable;
+using Avalonia.Media.TextFormatting;
 using Avalonia.Threading;
 using UltraLogViewer.Core;
 
@@ -29,6 +30,8 @@ public interface ILogGridHost
     bool HandleKey(KeyEventArgs e);
     void ToggleBookmark(RowData row);
     void CopyRows(int from, int to);
+    /// <summary>Ctrl+click on a token: search for its text, starting at the clicked row.</summary>
+    void SearchFor(string text, int fromRow);
 }
 
 /// <summary>
@@ -67,7 +70,13 @@ public sealed class LogGrid : Control
     private (ColumnDef? Col, double X, double Width) _msg;
     private double _lineHeight;
 
-    private readonly record struct RowBox(int Row, double Y, double H, Rect Badge);
+    private readonly record struct RowBox(int Row, double Y, double H, Rect Badge, double ExpTop = double.NaN);
+    private readonly record struct Expanded(string Text, int MoreAt, HashSet<int> FoldLines);
+    private readonly record struct TokenHit(RowData Row, bool InExpansion, Token Token, string Text);
+    /// <summary>The token under the pointer while Ctrl is held (drawn underlined).</summary>
+    private (int Row, bool InExpansion, int Start, int Length)? _hover;
+    private DispatcherTimer? _flashTimer;
+    private static readonly TimeSpan FlashTime = TimeSpan.FromSeconds(1.5);
 
     public LogGrid(ILogGridHost host)
     {
@@ -168,6 +177,10 @@ public sealed class LogGrid : Control
     public RowData? GetCached(int row) => _cache.GetValueOrDefault(row);
 
     internal IReadOnlyList<(int Row, double Y, double H)> LayoutForTest => _layout.Select(b => (b.Row, b.Y, b.H)).ToList();
+    internal string? TokenAtForTest(Point pt) => TokenAt(pt) is { } h ? h.Text.Substring(h.Token.Start, h.Token.Length) : null;
+    internal (int Row, double Y, double H, double ExpTop)? BoxForTest(int row) => _layout.FirstOrDefault(b => b.Row == row) is { H: > 0 } b ? (b.Row, b.Y, b.H, b.ExpTop) : null;
+    internal double MessageXForTest => _msg.X;
+    internal string ExpansionForTest(int row) => _cache.TryGetValue(row, out var r) ? Expansion(r).Text : "";
     internal string TimeTextForTest(int row) => _cache.TryGetValue(row, out var r) ? TimeText(r, row) : "";
 
     // -------------------------------------------------------------- scrolling
@@ -349,15 +362,112 @@ public sealed class LogGrid : Control
         InvalidateVisual();
     }
 
-    /// <summary>Lines 2.. of a multi-line entry, at most <see cref="ExpandLines"/>, plus a "more" line.</summary>
-    private static (string Text, int MoreAt) Expansion(RowData row)
+    /// <summary>
+    /// Lines 2.. of a multi-line entry, framework frames folded unless turned off for it, at most
+    /// <see cref="ExpandLines"/> lines plus a "more" line.
+    /// </summary>
+    private Expanded Expansion(RowData row)
     {
-        var lines = row.Text.Replace("\r\n", "\n").Split('\n');
-        var rest = lines.Skip(1).Take(ExpandLines).Select(l => l.Length > 2000 ? l[..2000] + "…" : l);
-        var text = string.Join('\n', rest);
-        var more = lines.Length - 1 - ExpandLines;
-        if (more <= 0) return (text, -1);
-        return (text + $"\n… {more:N0} more lines", text.Length + 1);
+        var lines = row.Text.Replace("\r\n", "\n").Split('\n').Skip(1).Select(l => l.Length > 2000 ? l[..2000] + "…" : l).ToList();
+        var folds = new HashSet<int>();
+        if (Settings.FoldFrames && _tab is not null && !_tab.Unfolded.Contains(row.Key))
+        {
+            var folded = StackFolding.Fold(lines, Settings.FrameworkPackages);
+            lines = folded.Select(f => f.Line).ToList();
+            for (var i = 0; i < folded.Count; i++)
+                if (folded[i].Folded > 0) folds.Add(i);
+        }
+        var text = string.Join('\n', lines.Take(ExpandLines));
+        var more = lines.Count - ExpandLines;
+        if (more <= 0) return new Expanded(text, -1, folds);
+        return new Expanded(text + $"\n… {more:N0} more lines", text.Length + 1, folds);
+    }
+
+    /// <summary>Character ranges of the given lines in <paramref name="text"/>.</summary>
+    private static IEnumerable<(int Start, int Length)> LineRanges(string text, HashSet<int> lines)
+    {
+        var start = 0;
+        for (var i = 0; start <= text.Length; i++)
+        {
+            var nl = text.IndexOf('\n', start);
+            var end = nl < 0 ? text.Length : nl;
+            if (lines.Contains(i)) yield return (start, end - start);
+            if (nl < 0) break;
+            start = nl + 1;
+        }
+    }
+
+    // ------------------------------------------------------------ repeats/flash
+
+    private static string Compact(int n) => n < 10_000 ? n.ToString("N0", CultureInfo.InvariantCulture)
+        : n < 1_000_000 ? (n / 1000.0).ToString("0.#", CultureInfo.InvariantCulture) + "k"
+        : (n / 1_000_000.0).ToString("0.#", CultureInfo.InvariantCulture) + "M";
+
+    private static FormattedText? RepeatBadge(RowData row) => row.Repeat > 1 ? Text("×" + Compact(row.Repeat), Brushes.White, Fonts.MonoBold, 10.5) : null;
+
+    /// <summary>How far the message text moves right to make room for the "×N" badge.</summary>
+    private static double BadgeShift(RowData row) => RepeatBadge(row) is { } b ? b.Width + 8 + 6 : 0;
+
+    /// <summary>Tints rows from <paramref name="fromRow"/> on (just appended) and fades the tint out.</summary>
+    public void Flash(int fromRow)
+    {
+        if (_tab is null) return;
+        _tab.FlashFrom = fromRow;
+        _tab.FlashStart = DateTime.UtcNow;
+        _flashTimer ??= new DispatcherTimer(TimeSpan.FromMilliseconds(50), DispatcherPriority.Render, (_, _) =>
+        {
+            InvalidateVisual();
+            if (_tab is null || DateTime.UtcNow - _tab.FlashStart > FlashTime) _flashTimer!.Stop();
+        });
+        _flashTimer.Start();
+        InvalidateVisual();
+    }
+
+    // ---------------------------------------------------------------- tokens
+
+    /// <summary>The token under a point in the message cell or the expanded lines.</summary>
+    private TokenHit? TokenAt(Point pt)
+    {
+        if (TextAt(pt) is not { } at) return null;
+        foreach (var tk in Tokenizer.Tokenize(at.Text))
+            if (at.Pos >= tk.Start && at.Pos < tk.Start + tk.Length) return new TokenHit(at.Row, at.InExpansion, tk, at.Text);
+        return null;
+    }
+
+    /// <summary>The text drawn at a point (message cell or expansion) and the character position under it.</summary>
+    private (RowData Row, bool InExpansion, string Text, int Pos)? TextAt(Point pt)
+    {
+        if (_tab is null) return null;
+        RowBox? found = null;
+        foreach (var b in _layout)
+            if (pt.Y >= b.Y && pt.Y < b.Y + b.H) found = b;
+        if (found is not { } box || !_cache.TryGetValue(box.Row, out var row)) return null;
+        string text;
+        Point origin;
+        double maxW;
+        var wrap = false;
+        var inExp = !double.IsNaN(box.ExpTop) && pt.Y >= box.ExpTop;
+        if (inExp)
+        {
+            text = Expansion(row).Text;
+            origin = new Point((_msg.Col is null ? GutterWidth : _msg.X) + CellPad, box.ExpTop);
+            maxW = double.PositiveInfinity;
+        }
+        else if (_msg.Col is { } mc && pt.X >= _msg.X && pt.X < _msg.X + _msg.Width)
+        {
+            text = CellText(row, mc, row.Row);
+            var shift = BadgeShift(row);
+            origin = new Point(_msg.X + CellPad + shift, box.Y + (RowHeight - _lineHeight) / 2);
+            maxW = Math.Max(1, _msg.Width - CellPad * 2 - shift);
+            wrap = Settings.Wrap;
+        }
+        else return null;
+        if (text.Length == 0) return null;
+        var tl = new TextLayout(text, Fonts.MonoFace, FontSize, Brushes.Black, TextAlignment.Left, wrap ? TextWrapping.Wrap : TextWrapping.NoWrap,
+            null, null, FlowDirection.LeftToRight, maxW, double.PositiveInfinity, double.NaN, 0, wrap ? WrapLines : 0);
+        var hit = tl.HitTestPoint(pt - origin);
+        if (!hit.IsInside) return null;
+        return (row, inExp, text, Math.Clamp(hit.TextPosition, 0, text.Length - 1));
     }
 
     // ---------------------------------------------------------------- columns
@@ -465,10 +575,10 @@ public sealed class LogGrid : Control
             var curHit = hits is { Length: > 0 } ? hits[Math.Min(tab.SearchCurrent, hits.Length - 1)] : -1;
             for (var i = 0; i < layout.Count; i++)
             {
-                var (r, y, h, _) = layout[i];
+                var (r, y, h, _, _) = layout[i];
                 _cache.TryGetValue(r, out var row);
-                var badge = RenderRow(ctx, p, cols, r, y, h, row, r >= selLo && r <= selHi, r == tab.Focus, hits is not null && Array.BinarySearch(hits, r) >= 0, r == curHit);
-                layout[i] = layout[i] with { Badge = badge };
+                var (badge, expTop) = RenderRow(ctx, p, cols, r, y, h, row, r >= selLo && r <= selHi, r == tab.Focus, hits is not null && Array.BinarySearch(hits, r) >= 0, r == curHit);
+                layout[i] = layout[i] with { Badge = badge, ExpTop = expTop };
             }
         }
         _layout = layout;
@@ -513,7 +623,7 @@ public sealed class LogGrid : Control
     private FormattedText MessageText(RowData row, ColumnDef col, IBrush fg)
     {
         var t = Cell(CellText(row, col, row.Row), fg);
-        t.MaxTextWidth = Math.Max(1, _msg.Width - CellPad * 2);
+        t.MaxTextWidth = Math.Max(1, _msg.Width - CellPad * 2 - BadgeShift(row));
         t.MaxLineCount = Settings.Wrap ? WrapLines : 1;
         t.Trimming = TextTrimming.CharacterEllipsis;
         return t;
@@ -539,12 +649,12 @@ public sealed class LogGrid : Control
         }
     }
 
-    /// <summary>Draws one row; returns the rect of its "+N" badge (empty when it has none).</summary>
-    private Rect RenderRow(DrawingContext ctx, Palette p, List<(ColumnDef Col, double Width)> cols, int r, double y, double h, RowData? row, bool selected, bool focus, bool isHit, bool isCurHit)
+    /// <summary>Draws one row; returns the rect of its "+N" badge (empty when it has none) and the top of its expansion (NaN when none).</summary>
+    private (Rect Badge, double ExpTop) RenderRow(DrawingContext ctx, Palette p, List<(ColumnDef Col, double Width)> cols, int r, double y, double h, RowData? row, bool selected, bool focus, bool isHit, bool isCurHit)
     {
         var rect = new Rect(0, y, RowsWidth, h);
         if (r % 2 == 1) ctx.FillRectangle(p.RowAlt, rect);
-        if (row is null) return default;
+        if (row is null) return (default, double.NaN);
         var s = Settings;
         var rowH = RowHeight;
         IBrush fg;
@@ -573,6 +683,8 @@ public sealed class LogGrid : Control
             fg = levelFg = p.SelFg;
         }
         if (bg is not null) ctx.FillRectangle(bg, rect);
+        if (!selected && r >= _tab!.FlashFrom && _tab.FlashStart != default && DateTime.UtcNow - _tab.FlashStart is { } age && age < FlashTime)
+            ctx.FillRectangle(new ImmutableSolidColorBrush(((ISolidColorBrush)p.Accent).Color, 0.18 * (1 - age / FlashTime)), rect);
         if (focus) ctx.FillRectangle(p.Accent, new Rect(0, y, 2, h));
         if (!s.TintRows && !row.IsContext && p.LevelStripe(row.Level) is { } stripe)
             ctx.FillRectangle(stripe, new Rect(GutterWidth - 3, y, 3, h));
@@ -624,28 +736,48 @@ public sealed class LogGrid : Control
                         ft.Trimming = TextTrimming.CharacterEllipsis;
                     }
                     var origin = new Point(x + CellPad, y + (rowH - _lineHeight) / 2);
+                    if (isMsg && RepeatBadge(row) is { } rb)
+                    {
+                        var bh = rb.Height + 2;
+                        var pill = new Rect(x + CellPad, y + (rowH - bh) / 2, rb.Width + 8, bh);
+                        ctx.DrawRectangle(p.Accent, null, pill, 7, 7);
+                        ctx.DrawText(rb, new Point(pill.X + 4, pill.Y + 1));
+                        origin = origin.WithX(origin.X + BadgeShift(row));
+                    }
                     if (col.Key != "level") DrawMarks(ctx, p, ft, v, origin, isCurHit, tokens && isMsg);
+                    if (isMsg && _hover is { InExpansion: false } hv && hv.Row == r && hv.Start + hv.Length <= v.Length)
+                        ft.SetTextDecorations(TextDecorations.Underline, hv.Start, hv.Length);
                     ctx.DrawText(ft, origin);
                 }
             }
             x += w;
         }
 
+        var expTop = double.NaN;
         if (expanded)
         {
-            var (text, moreAt) = Expansion(row);
+            var (text, moreAt, folds) = Expansion(row);
             var et = Cell(text, fg);
             var ex = (_msg.Col is null ? GutterWidth : _msg.X) + CellPad;
             var ey = y + h - 4 - et.Height;
-            if (moreAt >= 0) et.SetForegroundBrush(p.Fg3, moreAt, text.Length - moreAt);
+            expTop = ey;
             using (ctx.PushClip(new Rect(ex - CellPad, ey, Math.Max(0, RowsWidth - ex + CellPad), et.Height)))
             {
                 ctx.DrawLine(new Pen(p.Border, 2), new Point(ex - 4, ey), new Point(ex - 4, ey + et.Height));
                 DrawMarks(ctx, p, et, moreAt >= 0 ? text[..moreAt] : text, new Point(ex, ey), isCurHit, tokens);
+                if (moreAt >= 0) et.SetForegroundBrush(p.Fg3, moreAt, text.Length - moreAt);
+                foreach (var (fs, fl) in LineRanges(text, folds))
+                {
+                    if (fl == 0) continue;
+                    et.SetForegroundBrush(p.Fg3, fs, fl);
+                    et.SetFontStyle(FontStyle.Italic, fs, fl);
+                }
+                if (_hover is { InExpansion: true } hv && hv.Row == r && hv.Start + hv.Length <= text.Length)
+                    et.SetTextDecorations(TextDecorations.Underline, hv.Start, hv.Length);
                 ctx.DrawText(et, new Point(ex, ey));
             }
         }
-        return badge;
+        return (badge, expTop);
     }
 
     private static bool SafeIsMatch(Regex re, string s)
@@ -792,6 +924,28 @@ public sealed class LogGrid : Control
             return;
         }
         if (row is null || _tab is null || !props.IsLeftButtonPressed) return;
+        var ctrl = e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        if (ctrl && TokenAt(pt) is { } th)
+        {
+            var t = th.Text.Substring(th.Token.Start, th.Token.Length);
+            if (th.Token.Kind == TokenKind.String && t.Length >= 2) t = t[1..^1];
+            _host.SearchFor(t, th.Row.Row);
+            e.Handled = true;
+            return;
+        }
+        if (!ctrl && e.ClickCount == 1 && TextAt(pt) is { InExpansion: true } at && Settings.FoldFrames)
+        {
+            var line = at.Text.AsSpan(0, at.Pos).Count('\n');
+            if (Expansion(at.Row).FoldLines.Contains(line))
+            {
+                _tab.Unfolded.Add(at.Row.Key);
+                _heights.Remove(at.Row.Key);
+                SyncScroll();
+                InvalidateVisual();
+                e.Handled = true;
+                return;
+            }
+        }
         if (e.ClickCount == 1 && _layout.FirstOrDefault(b => b.Row == row).Badge.Contains(pt) && _cache.TryGetValue(row.Value, out var multi))
         {
             SetExpanded(multi, !IsExpanded(multi));
@@ -844,7 +998,16 @@ public sealed class LogGrid : Control
             }
             return;
         }
-        Cursor = pt.Y < HeaderHeight && ResizeHandleAt(pt.X) is not null ? new Cursor(StandardCursorType.SizeWestEast) : Cursor.Default;
+        var ctrl = e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        var tok = ctrl && pt.Y >= HeaderHeight ? TokenAt(pt) : null;
+        (int, bool, int, int)? hover = tok is { } h ? (h.Row.Row, h.InExpansion, h.Token.Start, h.Token.Length) : null;
+        if (hover != _hover)
+        {
+            _hover = hover;
+            InvalidateVisual();
+        }
+        Cursor = tok is not null ? new Cursor(StandardCursorType.Hand)
+            : pt.Y < HeaderHeight && ResizeHandleAt(pt.X) is not null ? new Cursor(StandardCursorType.SizeWestEast) : Cursor.Default;
     }
 
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
@@ -861,6 +1024,17 @@ public sealed class LogGrid : Control
         var h = Bounds.Height - HeaderHeight;
         var f = Math.Clamp((y - HeaderHeight) / h, 0, 1);
         ScrollTo((int)(f * Count - VisibleRows / 2.0));
+    }
+
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        base.OnKeyUp(e);
+        if (_hover is not null && e.Key is Key.LeftCtrl or Key.RightCtrl or Key.LWin or Key.RWin)
+        {
+            _hover = null;
+            Cursor = Cursor.Default;
+            InvalidateVisual();
+        }
     }
 
     protected override void OnKeyDown(KeyEventArgs e)

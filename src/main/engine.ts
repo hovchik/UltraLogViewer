@@ -4,7 +4,7 @@
 import * as path from 'node:path';
 import { LogDocument } from '../core/document';
 import { Encoding } from '../core/fileSource';
-import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, RowData, SearchResult, TextPattern } from '../core/types';
+import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
 
 export interface OpenOptions {
   encoding?: Encoding;
@@ -24,6 +24,7 @@ export class Engine {
   private nextId = 1;
   private searchGen = new Map<number, number>();
   private statsGen = new Map<number, number>();
+  private patternsGen = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
 
@@ -114,6 +115,12 @@ export class Engine {
     const gen = (this.statsGen.get(docId) ?? 0) + 1;
     this.statsGen.set(docId, gen);
     return this.doc(docId).fieldStats(maxRows, top, () => this.statsGen.get(docId) !== gen || !this.docs.has(docId));
+  }
+  /** Message templates over the view; a newer call for the same document cancels the previous one. */
+  async patterns(docId: number, maxRows?: number, top?: number): Promise<PatternsResult> {
+    const gen = (this.patternsGen.get(docId) ?? 0) + 1;
+    this.patternsGen.set(docId, gen);
+    return this.doc(docId).patterns(maxRows, top, () => this.patternsGen.get(docId) !== gen || !this.docs.has(docId));
   }
   keyForLine(docId: number, source: number, line: number) {
     return this.doc(docId).keyForLine(source, line);

@@ -197,6 +197,156 @@ await step('shows a timeline tooltip on hover', async () => {
   await win.mouse.move(box.x + box.width / 2, box.y + box.height + 200);
 });
 
+await step('folds framework frames in an expanded entry and the details pane', async () => {
+  // the error filter is still on: pick an entry with a stack trace
+  await win.locator('.grid-rows .r', { has: win.locator('.more') }).first().locator('.c.msg').click();
+  await win.focus('#grid');
+  await win.keyboard.press('ArrowRight');
+  const open = win.locator('.grid-rows .r.cur.open');
+  await open.waitFor();
+  assert.match(await open.locator('.rx .fold').innerText(), /^… 3 framework frames$/);
+  assert.match(await open.locator('.rx').innerText(), /at com\.acme\.api\.OrderController/);
+  const fold = win.locator('#detail pre .fold');
+  await fold.waitFor();
+  assert.equal(await fold.innerText(), '… 3 framework frames');
+  assert.equal(await fold.evaluate((e) => getComputedStyle(e).fontStyle), 'italic');
+  await shot('17-fold');
+  // clicking the placeholder unfolds this entry only
+  await fold.click();
+  await win.waitForSelector('#detail pre .fold', { state: 'detached' });
+  assert.match(await win.locator('#detail pre').innerText(), /ThreadPoolExecutor\.runWorker/);
+  await win.waitForSelector('.grid-rows .r.cur.open .rx .fold', { state: 'detached' });
+  await win.focus('#grid');
+  await win.keyboard.press('ArrowLeft');
+  await win.waitForSelector('.grid-rows .r.open', { state: 'detached' });
+});
+
+await step('Ctrl+click on a token searches for it', async () => {
+  const tok = win.locator('.grid-rows .r:not(.sel) .c.msg .tk-number').first();
+  const text = (await tok.innerText()).trim();
+  const row = Number(await tok.evaluate((e) => e.closest('.r').dataset.row));
+  await tok.click({ modifiers: ['Control'] });
+  await win.waitForFunction((t) => document.querySelector('#search').value === t, text);
+  await win.waitForFunction(() => /^\d[\d,]* \/ [\d,]+/.test(document.querySelector('#search-count')?.textContent ?? ''));
+  const focus = await win.evaluate(() => window.__ulv.state().active.focus);
+  assert.ok(focus >= row, `selected hit ${focus} should be at or after the clicked row ${row}`);
+  assert.ok((await win.locator('.grid-rows mark').count()) > 0);
+  await win.press('#search', 'Escape');
+  await win.waitForFunction(() => document.querySelector('#search-count')?.textContent === '');
+});
+
+await step('opens the command palette and runs a menu action', async () => {
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+P');
+  await win.waitForSelector('.modal .palette .pal-item');
+  const all = await win.locator('.palette .pal-item').count();
+  assert.ok(all > 30, `palette items: ${all}`);
+  await win.keyboard.type('identical');
+  await win.waitForFunction(() => document.querySelectorAll('.palette .pal-item').length === 1);
+  assert.match(await win.locator('.palette .pal-item .lbl').innerText(), /^View › Group repeats › Identical entries$/);
+  await shot('18-palette');
+  await win.keyboard.press('Enter');
+  await win.waitForSelector('#modal.hidden', { state: 'attached' });
+});
+
+await step('groups repeated entries with a ×N badge', async () => {
+  await win.waitForFunction(() => /grouped/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  const badge = win.locator('.grid-rows .r .c.msg .rep').first();
+  await badge.waitFor();
+  assert.match(await badge.innerText(), /^×\d+$/);
+  assert.ok(/Heartbeat ok/.test(await badge.locator('xpath=..').innerText()));
+  await shot('19-group');
+  // the palette shows the radio state, then turns grouping off again
+  await win.keyboard.press('F1');
+  await win.waitForSelector('.modal .palette');
+  await win.keyboard.type('group repeats');
+  assert.equal(await win.locator('.palette .pal-item', { hasText: 'Identical entries' }).locator('.chk').innerText(), '✓');
+  await win.keyboard.type(' off');
+  await win.keyboard.press('Enter');
+  await win.waitForFunction(() => !/grouped|shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.equal(await win.locator('.grid-rows .rep').count(), 0);
+});
+
+await step('lists patterns and filters to one with a double-click', async () => {
+  await win.click('#btn-patterns');
+  await win.waitForSelector('#patterns:not(.hidden) .pt-row', { timeout: 20000 });
+  assert.ok(await win.locator('#grid').evaluate((e) => e.classList.contains('hidden')));
+  assert.match(await win.locator('#patterns .pt-sum').innerText(), /^[\d,]+ patterns in [\d,]+ of [\d,]+ entries/);
+  assert.ok((await win.locator('#patterns .pt-tpl .ph').count()) > 0);
+  assert.match(await win.locator('#detail').innerText(), /Pattern/);
+  await shot('20-patterns');
+  const heartbeat = win.locator('#patterns .pt-row', { hasText: 'Heartbeat ok' });
+  await heartbeat.dblclick();
+  await win.waitForSelector('#patterns.hidden', { state: 'attached' });
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.ok((await win.locator('#sidebar .rule .txt').allInnerTexts()).includes('Pattern ≈ Heartbeat ok (queue empty)'));
+  const msgs = await win.locator('.grid-rows .r .c.msg').allInnerTexts();
+  assert.ok(msgs.length > 0 && msgs.every((m) => m === 'Heartbeat ok (queue empty)'), `messages: ${msgs.slice(0, 3)}`);
+  await win.locator('#sidebar .rule', { hasText: 'Pattern ≈' }).locator('.mini.danger').click();
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+});
+
+await step('shows a new-lines pill while not following and follows on click', async () => {
+  await win.focus('#grid');
+  await win.keyboard.press('Home');
+  await win.waitForFunction(() => window.__ulv.state().active.follow === false);
+  fs.appendFileSync(log, '2030-01-01 00:00:01,000 [main] INFO  com.acme.Tail - pill line one\n2030-01-01 00:00:02,000 [main] INFO  com.acme.Tail - pill line two\n');
+  await win.waitForSelector('#newpill:not(.hidden)', { timeout: 10000 });
+  assert.match(await win.locator('#newpill').innerText(), /^↓ [\d,]+ new$/);
+  await shot('21-new-lines');
+  await win.click('#newpill');
+  await win.waitForSelector('#newpill.hidden', { state: 'attached' });
+  await win.waitForSelector('.grid-rows .r:has-text("pill line two")');
+  assert.ok(await win.locator('#btn-follow').evaluate((e) => e.classList.contains('on')));
+  await win.click('#btn-follow'); // back off for the steps below
+});
+
+await step('Clear hides every entry so far', async () => {
+  await win.focus('#grid');
+  await win.keyboard.press('Control+k');
+  await win.waitForFunction(() => /[\d,]+ cleared · Show/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForFunction(() => document.querySelectorAll('.grid-rows .r .c').length === 0);
+  fs.appendFileSync(log, '2030-01-01 00:00:03,000 [main] WARN  com.acme.Tail - after clear\n');
+  await win.waitForSelector('.grid-rows .r:has-text("after clear")', { timeout: 10000 });
+  assert.equal(await win.locator('.grid-rows .r .c[data-col="message"]').count(), 1);
+  await win.locator('#status .show-cleared').click();
+  await win.waitForFunction(() => !/cleared/.test(document.querySelector('#status')?.textContent ?? '') && document.querySelectorAll('.grid-rows .r .c').length > 20, null, { timeout: 20000 });
+});
+
+await step('saves a workspace and opens it again', async () => {
+  const wsFile = path.join(tmp, 'round trip.ulvw');
+  await win.fill('#quick', 'ConnectionPool');
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.fill('#search', 'Acquired');
+  await win.waitForFunction(() => /\d+ \/ [\d,]+/.test(document.querySelector('#search-count')?.textContent ?? ''));
+  await win.evaluate((f) => window.__ulv.saveWorkspace(f), wsFile);
+  const ws = JSON.parse(fs.readFileSync(wsFile, 'utf-8'));
+  assert.equal(ws.version, 1);
+  assert.equal(ws.tabs.length, 1);
+  assert.deepEqual(ws.tabs[0].paths, [log]);
+  assert.deepEqual(ws.tabs[0].relPaths, ['app.log']);
+  assert.equal(ws.tabs[0].filter.query, 'ConnectionPool');
+  assert.equal(ws.tabs[0].search.text, 'Acquired');
+  assert.equal(ws.tabs[0].bookmarks.length, 1);
+  assert.equal(await win.title(), 'round trip.ulvw — UltraLogViewer');
+  // close the tab and reset the boxes, then reopen
+  await win.locator('.tab .x').click();
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 0);
+  await win.fill('#quick', '');
+  await win.fill('#search', '');
+  await win.evaluate((f) => window.__ulv.openWorkspace(f), wsFile);
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 1);
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 30000 });
+  assert.equal(await win.inputValue('#quick'), 'ConnectionPool');
+  assert.equal(await win.inputValue('#search'), 'Acquired');
+  await win.waitForFunction(() => /Bookmarks \(1\)/i.test(document.querySelector('#sidebar')?.textContent ?? ''), null, { timeout: 20000 });
+  await shot('22-workspace');
+  await win.fill('#search', '');
+  await win.press('#search', 'Escape');
+});
+
 await step('clears the filter and follows appended lines', async () => {
   await win.fill('#quick', '');
   await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });

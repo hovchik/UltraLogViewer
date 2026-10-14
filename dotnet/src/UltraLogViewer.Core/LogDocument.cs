@@ -16,7 +16,7 @@ public sealed class LogDocument : IDisposable
     private const int MaxSearchRows = 2_000_000;
 
     private sealed record Merge(ushort[] Src, int[] Ent, int[][] BasePos);
-    private sealed record View(int[] Rows, byte[]? Context);
+    private sealed record View(int[] Rows, byte[]? Context, int[]? Repeat = null);
 
     private readonly List<FileSource> _sources = [];
     private readonly SemaphoreSlim _queue = new(1, 1);
@@ -26,6 +26,9 @@ public sealed class LogDocument : IDisposable
     /// <summary>Per-source filter verdicts of already evaluated entries: 1 = match.</summary>
     private List<Grow<byte>> _verdict = [];
     private int _filterGen;
+    /// <summary>Per-source repeat-key hashes for group repeats, computed for <see cref="_repeatMode"/>.</summary>
+    private List<Grow<ulong>> _repeatHash = [];
+    private string _repeatMode = "";
 
     public LogDocument(string title) => Title = title;
 
@@ -144,6 +147,7 @@ public sealed class LogDocument : IDisposable
             if (!r.Changed) continue;
             changed = true;
             if (i < _verdict.Count) _verdict[i].Truncate(r.Reset ? 0 : r.FirstChangedEntry);
+            if (i < _repeatHash.Count) _repeatHash[i].Truncate(r.Reset ? 0 : r.FirstChangedEntry);
         }
         if (!changed) return false;
         RebuildBase();
@@ -171,8 +175,11 @@ public sealed class LogDocument : IDisposable
             _verdict = [];
             return true;
         }
-        var includes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Include).Select(r => (M: Query.RuleMatcher(r), r.Column)).ToArray();
-        var excludes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Exclude).Select(r => (M: Query.RuleMatcher(r), r.Column)).ToArray();
+        (Func<string, bool> M, string? Column, string? Template) Compile(FilterRule r) =>
+            r.PatternMatch ? (_ => false, null, r.Text) : (Query.RuleMatcher(r), r.Column, null);
+        var includes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Include).Select(Compile).ToArray();
+        var excludes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Exclude).Select(Compile).ToArray();
+        var cleared = spec.ClearedBefore;
         var query = string.IsNullOrWhiteSpace(spec.Query) ? null : Query.CompileQuery(spec.Query, spec.QueryCaseSensitive);
         var needsText = includes.Length > 0 || excludes.Length > 0 || query is not null;
         var bookmarks = spec.BookmarksOnly ? spec.Bookmarks : null;
@@ -192,6 +199,7 @@ public sealed class LogDocument : IDisposable
             done += start;
             bool Cheap(int e)
             {
+                if (cleared is not null && si < cleared.Length && e < cleared[si]) return false;
                 if (bookmarks is not null) return bookmarks.Contains(RowKeys.Of(si, e));
                 if (!spec.Levels[(int)src.LevelOf(e)]) return false;
                 if (hasTime)
@@ -234,7 +242,16 @@ public sealed class LogDocument : IDisposable
                             if (parsed.TryGetValue(alias, out val)) return val;
                             return parsed.FirstOrDefault(p => p.Key.Equals(k, StringComparison.OrdinalIgnoreCase)).Value ?? "";
                         }
-                        bool Test((Func<string, bool> M, string? Column) r) => r.Column is null ? r.M(text) : r.M(Field(r.Column));
+                        string? template = null;
+                        bool Test((Func<string, bool> M, string? Column, string? Template) r)
+                        {
+                            if (r.Template is not null)
+                            {
+                                template ??= Patterns.Template(Patterns.MessageOf(text, parsed ??= fmt.Parse(text)));
+                                return template == r.Template;
+                            }
+                            return r.Column is null ? r.M(text) : r.M(Field(r.Column));
+                        }
                         if (includes.Length > 0 && !includes.Any(Test)) ok = false;
                         else if (excludes.Any(Test)) ok = false;
                         else if (query is not null && !query(text, Field)) ok = false;
@@ -248,8 +265,64 @@ public sealed class LogDocument : IDisposable
             if (cancelled) return false;
         }
         BuildView(spec.Context);
+        if (spec.Grouped && !GroupView(spec.GroupRepeats, gen, ct)) return false;
         return true;
     }, CancellationToken.None);
+
+    /// <summary>Folds consecutive view rows with the same repeat key into their first row.</summary>
+    private bool GroupView(string mode, int gen, CancellationToken ct)
+    {
+        if (mode != _repeatMode)
+        {
+            _repeatHash = [];
+            _repeatMode = mode;
+        }
+        for (var si = 0; si < _sources.Count; si++)
+        {
+            var src = _sources[si];
+            while (_repeatHash.Count <= si) _repeatHash.Add(new Grow<ulong>(Math.Max(16, src.EntryCount)));
+            var h = _repeatHash[si];
+            if (h.Count >= src.EntryCount) continue;
+            var fmt = src.Format;
+            var cancelled = false;
+            src.ForEachEntryBatch(h.Count, src.EntryCount, (first, texts) =>
+            {
+                if (gen != _filterGen || ct.IsCancellationRequested)
+                {
+                    cancelled = true;
+                    return false;
+                }
+                for (var i = 0; i < texts.Length; i++)
+                    h.Add(Patterns.Hash(Patterns.RepeatKey(src.LevelOf(first + i), fmt.Parse(texts[i]), texts[i], mode)));
+                return true;
+            });
+            if (cancelled) return false;
+        }
+        var view = _view!;
+        var m = _merge;
+        var rows = new List<int>(view.Rows.Length);
+        var ctx = view.Context is null ? null : new List<byte>(view.Rows.Length);
+        var repeat = new List<int>(view.Rows.Length);
+        ulong? prev = null;
+        for (var i = 0; i < view.Rows.Length; i++)
+        {
+            var b = view.Rows[i];
+            var isCtx = view.Context is { } c && c[i] == 1;
+            var (s, e) = Ref(b, m);
+            ulong? key = isCtx || s >= _repeatHash.Count || e >= _repeatHash[s].Count ? null : _repeatHash[s][e];
+            if (key is not null && key == prev)
+            {
+                repeat[^1]++;
+                continue;
+            }
+            rows.Add(b);
+            ctx?.Add(isCtx ? (byte)1 : (byte)0);
+            repeat.Add(1);
+            prev = key;
+        }
+        _view = new View(rows.ToArray(), ctx?.ToArray(), repeat.ToArray());
+        return true;
+    }
 
     private void BuildView(int context)
     {
@@ -340,6 +413,7 @@ public sealed class LogDocument : IDisposable
                     Fields = src.Format.Parse(text),
                     Text = text,
                     IsContext = v?.Context is { } c ? c[r + i] == 1 : hidden is not null && !Passes(hidden, s, e),
+                    Repeat = v?.Repeat is { } rep ? rep[r + i] : 1,
                 });
             }
             r += len;
@@ -439,6 +513,68 @@ public sealed class LogDocument : IDisposable
             foreach (var (k, n) in values.ToList())
                 if (n <= limit) values.Remove(k);
     }
+
+    // ----------------------------------------------------------------- patterns
+
+    /// <summary>
+    /// Groups the view's messages by template (variable parts masked), counting levels and where each occurs.
+    /// Views larger than <paramref name="maxRows"/> are sampled like <see cref="FieldStatsAsync"/>.
+    /// </summary>
+    public Task<PatternStats> PatternsAsync(int maxRows = 200_000, int top = 300, CancellationToken ct = default) => Task.Run(() =>
+    {
+        const int Block = 1000;
+        const int Cap = 20_000;
+        const string Other = "(other)";
+        var n = ViewCount;
+        var sampled = n > maxRows;
+        var expected = Math.Max(1, sampled ? Math.Max(1, maxRows / Block) * Block : n);
+        var map = new Dictionary<string, (int Count, int[] Levels, string Sample, int[] Spark)>(StringComparer.Ordinal);
+        var scanned = 0;
+        void Count(List<RowData> rows)
+        {
+            foreach (var row in rows)
+            {
+                var msg = Patterns.MessageOf(row.Text, row.Fields);
+                var t = Patterns.Template(msg);
+                if (!map.TryGetValue(t, out var p))
+                {
+                    if (map.Count >= Cap) t = Other;
+                    if (!map.TryGetValue(t, out p))
+                    {
+                        var nl = msg.IndexOf('\n');
+                        var sample = nl >= 0 ? msg[..nl] : msg;
+                        p = (0, new int[7], sample.Length > 300 ? sample[..300] : sample, new int[24]);
+                    }
+                }
+                p.Count++;
+                p.Levels[(int)row.Level]++;
+                p.Spark[Math.Min(23, (int)((long)scanned * 24 / expected))]++;
+                map[t] = p;
+                scanned++;
+            }
+        }
+        if (!sampled)
+        {
+            for (var r = 0; r < n; r += 2000)
+            {
+                ct.ThrowIfCancellationRequested();
+                Count(GetRows(r, 2000));
+            }
+        }
+        else
+        {
+            var blocks = Math.Max(1, maxRows / Block);
+            var stride = (double)(n - Block) / Math.Max(1, blocks - 1);
+            for (var b = 0; b < blocks; b++)
+            {
+                ct.ThrowIfCancellationRequested();
+                Count(GetRows((int)(b * stride), Block));
+            }
+        }
+        var list = map.OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key, StringComparer.Ordinal).Take(top)
+            .Select(kv => new PatternInfo(kv.Key, kv.Value.Count, kv.Value.Levels, kv.Value.Sample, kv.Value.Spark)).ToList();
+        return new PatternStats(scanned, n, sampled, map.Count, list);
+    }, ct);
 
     // ------------------------------------------------------------------- search
 
@@ -701,6 +837,7 @@ public sealed class LogDocument : IDisposable
     {
         foreach (var s in _sources) await s.SetFormatAsync(formatId, custom);
         _verdict = [];
+        _repeatHash = [];
         RebuildBase();
         if (_filter is not null) await ApplyNowAsync(_filter, false, _filterGen, null, default);
         return true;

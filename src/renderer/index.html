@@ -33,6 +33,8 @@
         </div>
         <div class="tb-group">
           <button id="btn-follow" class="btn tog-btn" title="Follow new lines (Ctrl+T)">Follow</button>
+          <button id="btn-clear" class="btn" title="Hide everything so far (Ctrl+K)">Clear</button>
+          <button id="btn-patterns" class="btn tog-btn" title="Patterns: messages grouped by template (Ctrl+Shift+A)">Patterns</button>
           <button id="btn-hist" class="btn tog-btn" title="Timeline (Ctrl+Shift+H)">Timeline</button>
           <button id="btn-detail" class="btn tog-btn" title="Details pane (Ctrl+Shift+D)">Details</button>
           <select id="format" class="btn" title="Log format"></select>
@@ -57,8 +59,10 @@
                 <div class="grid-scroll"><div class="grid-spacer"></div></div>
                 <div class="grid-rows"></div>
                 <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
+                <button id="newpill" class="newpill hidden" title="Follow new lines"></button>
               </div>
             </div>
+            <div id="patterns" class="patterns hidden" tabindex="0"></div>
             <div id="detail" class="detail"></div>
           </div>
           <div id="empty" class="empty">

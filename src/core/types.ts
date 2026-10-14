@@ -30,6 +30,8 @@ export interface FilterRule extends TextPattern {
   column?: string;
   /** The whole (trimmed) value must equal `text`, e.g. "logger = com.acme.Db" from a click on a cell. */
   exact?: boolean;
+  /** `text` is a message template (see patterns.ts): the entry's template must equal it. `column` is ignored. */
+  patternMatch?: boolean;
 }
 
 export interface FilterSpec {
@@ -46,6 +48,10 @@ export interface FilterSpec {
   bookmarks?: string[];
   /** Also show N entries before/after each matching entry (grep -C). */
   context?: number;
+  /** Collapse consecutive view rows with the same repeat key into one row (`RowData.repeat`). */
+  groupRepeats?: 'off' | 'exact' | 'pattern';
+  /** Per-source entry counts: entries below them are hidden ("Clear" in live tail). */
+  clearedBefore?: number[] | null;
 }
 
 export interface CustomFormat {
@@ -106,6 +112,8 @@ export interface RowData {
   text: string;
   /** True when the row is only shown as filter context. */
   context?: boolean;
+  /** Rows collapsed into this one by "group repeats" (1 = not grouped). */
+  repeat: number;
 }
 
 export interface SearchResult {
@@ -134,6 +142,28 @@ export interface FieldStats {
   viewCount: number;
   sampled: boolean;
   fields: FieldStat[];
+  cancelled?: boolean;
+}
+
+export interface PatternStat {
+  template: string;
+  count: number;
+  /** Indexed by Level. */
+  levels: number[];
+  /** First message seen with this template (first line, at most 300 chars). */
+  sample: string;
+  /** Counts in 24 equal buckets of the scanned sequence. */
+  spark: number[];
+}
+
+/** Message templates over the view (or a sample of it), most common first. */
+export interface PatternsResult {
+  scanned: number;
+  viewCount: number;
+  sampled: boolean;
+  /** Distinct templates seen (the overflow pattern counts as one). */
+  total: number;
+  patterns: PatternStat[];
   cancelled?: boolean;
 }
 

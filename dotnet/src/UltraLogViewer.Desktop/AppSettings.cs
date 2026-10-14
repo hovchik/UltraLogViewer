@@ -69,6 +69,10 @@ public sealed class AppSettings
     /// <summary>Mark gaps between consecutive rows of at least this many milliseconds (0 = off).</summary>
     public long GapMs { get; set; } = 10000;
     public double HistogramHeight { get; set; } = 64;
+    /// <summary>Collapse runs of framework stack frames in expanded entries and the details pane.</summary>
+    public bool FoldFrames { get; set; } = true;
+    public List<string> FrameworkPackages { get; set; } = [.. StackFolding.DefaultPackages];
+    public List<string> RecentWorkspaces { get; set; } = [];
 
     [JsonIgnore] public bool Comfortable => Density == "comfortable";
 
@@ -134,6 +138,11 @@ public sealed class AppSettings
         query = query.Trim();
         if (query.Length == 0) return;
         QueryHistory = new[] { query }.Concat(QueryHistory.Where(q => q != query)).Take(20).ToList();
+    }
+
+    public void AddRecentWorkspace(string path)
+    {
+        RecentWorkspaces = new[] { path }.Concat(RecentWorkspaces.Where(p => p != path)).Take(10).ToList();
     }
 
     public void AddRecent(IEnumerable<string> paths)

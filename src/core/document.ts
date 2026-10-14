@@ -10,7 +10,8 @@ import * as fs from 'node:fs';
 import { FileSource, SourceOptions } from './fileSource';
 import { GrowU32, GrowU8, lowerBound } from './grow';
 import { compileMatcher, compileQuery, Matcher, ruleMatcher } from './query';
-import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, RowData, rowKey, SearchResult, TextPattern } from './types';
+import { fnv1a64, messageOf, RepeatMode, repeatKey, template } from './patterns';
+import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, PatternsResult, PatternStat, RowData, rowKey, SearchResult, TextPattern } from './types';
 
 export type Progress = (phase: string, fraction: number) => void;
 
@@ -21,6 +22,9 @@ const LEVEL_MATCH_NAMES = ['NONE', 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR',
 const UNCOUNTED_FIELDS = new Set(['message', 'time']);
 const STATS_BLOCK = 1000;
 const STATS_DISTINCT_CAP = 5000;
+const PATTERNS_CAP = 20_000;
+const SPARK_BUCKETS = 24;
+const OTHER_PATTERN = '(other)';
 
 const passes = (verdict: GrowU8[], s: number, e: number) => {
   const v = verdict[s];
@@ -37,6 +41,12 @@ function pruneRare(values: Map<string, number>) {
   }
 }
 
+function newPattern(tpl: string, msg: string): PatternStat {
+  const i = msg.indexOf('\n');
+  const first = i < 0 ? msg : msg.slice(0, i);
+  return { template: tpl, count: 0, levels: new Array(LEVEL_COUNT).fill(0), sample: first.length > 300 ? first.slice(0, 300) : first, spark: new Array(SPARK_BUCKETS).fill(0) };
+}
+
 export class LogDocument {
   readonly sources: FileSource[] = [];
   private mergedSrc: GrowU8 | null = null;
@@ -46,6 +56,12 @@ export class LogDocument {
   private filter: FilterSpec | null = null;
   private view: Uint32Array | null = null;
   private viewContext: Uint8Array | null = null;
+  /** Rows collapsed into each view row by "group repeats" (null when not grouping). */
+  private viewRepeat: Uint32Array | null = null;
+  /** Per-source cache of repeat-key hashes (64-bit FNV-1a as high/low halves) for `repeatMode`. */
+  private repeatHi: GrowU32[] = [];
+  private repeatLo: GrowU32[] = [];
+  private repeatMode: RepeatMode = 'off';
   /** Per-source filter verdicts for already evaluated entries: 1 = match. */
   private verdict: GrowU8[] = [];
   private filterGen = 0;
@@ -166,8 +182,10 @@ export class LogDocument {
       const r = await s.refresh();
       if (!r.changed) continue;
       changed = true;
-      const v = this.verdict[i];
-      if (v) v.truncate(r.reset ? 0 : r.firstChangedEntry);
+      const keep = r.reset ? 0 : r.firstChangedEntry;
+      this.verdict[i]?.truncate(keep);
+      this.repeatHi[i]?.truncate(keep);
+      this.repeatLo[i]?.truncate(keep);
     }
     if (!changed) return false;
     this.rebuildBase();
@@ -184,7 +202,9 @@ export class LogDocument {
       !(f.query && f.query.trim()) &&
       f.timeFrom == null &&
       f.timeTo == null &&
-      !f.bookmarksOnly
+      !f.bookmarksOnly &&
+      (f.groupRepeats ?? 'off') === 'off' &&
+      f.clearedBefore == null
     );
   }
 
@@ -202,12 +222,15 @@ export class LogDocument {
     if (!incremental) this.verdict = [];
     this.filter = spec;
     if (!spec || LogDocument.isTrivial(spec)) {
-      this.view = this.viewContext = null;
+      this.view = this.viewContext = this.viewRepeat = null;
       this.verdict = [];
       return true;
     }
-    const includes = spec.rules.filter((r) => r.enabled && r.text && r.mode === 'include').map((r) => ({ m: ruleMatcher(r), col: r.column }));
-    const excludes = spec.rules.filter((r) => r.enabled && r.text && r.mode === 'exclude').map((r) => ({ m: ruleMatcher(r), col: r.column }));
+    const compiled = (mode: 'include' | 'exclude') =>
+      spec.rules.filter((r) => r.enabled && r.text && r.mode === mode).map((r) => ({ m: ruleMatcher(r), col: r.patternMatch ? undefined : r.column, pattern: !!r.patternMatch }));
+    const includes = compiled('include');
+    const excludes = compiled('exclude');
+    const cleared = spec.clearedBefore ?? null;
     const query = spec.query?.trim() ? compileQuery(spec.query, !!spec.queryCaseSensitive) : null;
     const needsText = includes.length > 0 || excludes.length > 0 || !!query;
     const bookmarks = spec.bookmarksOnly ? new Set(spec.bookmarks ?? []) : null;
@@ -221,7 +244,9 @@ export class LogDocument {
       const v = (this.verdict[si] ??= new GrowU8(Math.max(16, src.entryCount)));
       const start = v.length;
       done += start;
+      const clearedAt = cleared?.[si] ?? 0;
       const cheap = (e: number) => {
+        if (e < clearedAt) return false;
         if (bookmarks) return bookmarks.has(rowKey(si, e));
         if (!spec.levels[src.level(e)]) return false;
         if (hasTime) {
@@ -236,7 +261,6 @@ export class LogDocument {
         continue;
       }
       const fmt = src.format;
-      const test = (m: Matcher, col: string | undefined, text: string, field: (k: string) => string) => (col ? m(field(col)) : m(text));
       await src.forEachEntryBatch(start, src.entryCount, (first, texts) => {
         if (gen !== this.filterGen) return false;
         for (let i = 0; i < texts.length; i++) {
@@ -245,6 +269,9 @@ export class LogDocument {
           if (ok) {
             const text = texts[i];
             let parsed: Record<string, string> | null = null;
+            let tpl: string | null = null;
+            const test = (r: { m: Matcher; col: string | undefined; pattern: boolean }) =>
+              r.pattern ? r.m((tpl ??= template(messageOf(text, (parsed ??= fmt.parse(text)))))) : r.col ? r.m(field(r.col)) : r.m(text);
             const field = (k: string): string => {
               // The level is already indexed: answer without parsing the entry.
               if (k === 'level') return LEVEL_MATCH_NAMES[src.level(e)];
@@ -254,8 +281,8 @@ export class LogDocument {
               const alias = lk === 'timestamp' ? 'time' : lk;
               return f[alias] ?? f[Object.keys(f).find((x) => x.toLowerCase() === lk) ?? ''] ?? '';
             };
-            if (includes.length && !includes.some((r) => test(r.m, r.col, text, field))) ok = false;
-            else if (excludes.some((r) => test(r.m, r.col, text, field))) ok = false;
+            if (includes.length && !includes.some(test)) ok = false;
+            else if (excludes.some(test)) ok = false;
             else if (query && !query(text, field)) ok = false;
           }
           v.push(ok ? 1 : 0);
@@ -265,11 +292,47 @@ export class LogDocument {
       });
       if (gen !== this.filterGen) return false;
     }
-    this.buildView(spec.context ?? 0);
+    const group = spec.groupRepeats ?? 'off';
+    if (group !== this.repeatMode) {
+      this.repeatHi = [];
+      this.repeatLo = [];
+      this.repeatMode = group;
+    }
+    if (group !== 'off' && !(await this.updateRepeatKeys(group, gen))) return false;
+    this.buildView(spec.context ?? 0, group !== 'off');
     return true;
   }
 
-  private buildView(context: number) {
+  /** Hashes the repeat key of every entry not hashed yet (tail updates only read new entries). */
+  private async updateRepeatKeys(mode: 'exact' | 'pattern', gen: number): Promise<boolean> {
+    for (const [si, src] of this.sources.entries()) {
+      const hi = (this.repeatHi[si] ??= new GrowU32(Math.max(16, src.entryCount)));
+      const lo = (this.repeatLo[si] ??= new GrowU32(Math.max(16, src.entryCount)));
+      const fmt = src.format;
+      await src.forEachEntryBatch(hi.length, src.entryCount, (first, texts) => {
+        if (gen !== this.filterGen) return false;
+        for (let i = 0; i < texts.length; i++) {
+          const text = texts[i];
+          const [h, l] = fnv1a64(repeatKey(src.level(first + i), fmt.parse(text), text, mode));
+          hi.push(h);
+          lo.push(l);
+        }
+      });
+      if (gen !== this.filterGen) return false;
+    }
+    return true;
+  }
+
+  /** True when two base rows have the same (hashed) repeat key. */
+  private sameRepeatKey(a: number, b: number): boolean {
+    const [sa, ea] = this.ref(a);
+    const [sb, eb] = this.ref(b);
+    const ha = this.repeatHi[sa], hb = this.repeatHi[sb];
+    if (!ha || !hb || ea >= ha.length || eb >= hb.length) return false;
+    return ha.get(ea) === hb.get(eb) && this.repeatLo[sa].get(ea) === this.repeatLo[sb].get(eb);
+  }
+
+  private buildView(context: number, group = false) {
     const n = this.baseCount();
     const hit = (b: number) => {
       const [s, e] = this.ref(b);
@@ -304,6 +367,33 @@ export class LogDocument {
     }
     this.view = out.view().slice();
     this.viewContext = context > 0 ? ctx.view().slice() : null;
+    this.viewRepeat = null;
+    if (group) this.groupView();
+  }
+
+  /** Collapses runs of consecutive view rows with the same repeat key into their first row. Context rows never merge. */
+  private groupView() {
+    const view = this.view!;
+    const vctx = this.viewContext;
+    const out = new GrowU32(1024);
+    const ctx = new GrowU8(1024);
+    const rep = new GrowU32(1024);
+    let lastCtx = true;
+    for (let i = 0; i < view.length; i++) {
+      const b = view[i];
+      const isCtx = !!vctx && vctx[i] === 1;
+      if (!isCtx && !lastCtx && out.length && this.sameRepeatKey(out.last(), b)) {
+        rep.set(rep.length - 1, rep.last() + 1);
+        continue;
+      }
+      out.push(b);
+      ctx.push(isCtx ? 1 : 0);
+      rep.push(1);
+      lastCtx = isCtx;
+    }
+    this.view = out.view().slice();
+    if (vctx) this.viewContext = ctx.view().slice();
+    this.viewRepeat = rep.view().slice();
   }
 
   // --------------------------------------------------------------------- rows
@@ -311,6 +401,7 @@ export class LogDocument {
   getRows(start: number, count: number): RowData[] {
     const end = Math.min(this.viewCount(), start + count);
     const viewContext = this.ignoreFilter ? null : this.viewContext;
+    const viewRepeat = this.ignoreFilter ? null : this.viewRepeat;
     // In "show in context" mode, entries the filter rejects are marked as context.
     const hidden = this.ignoreFilter && this.view ? this.verdict : null;
     const rows: RowData[] = [];
@@ -342,6 +433,7 @@ export class LogDocument {
           fields: src.format.parse(texts[i] ?? ''),
           text: texts[i] ?? '',
           context: viewContext ? viewContext[r + i] === 1 : hidden ? !passes(hidden, s, e) : undefined,
+          repeat: viewRepeat ? viewRepeat[r + i] : 1,
         });
       }
       r += len;
@@ -385,23 +477,7 @@ export class LogDocument {
       }
       scanned += rows.length;
     };
-    const tick = () => new Promise<void>((res) => setImmediate(res));
-    const sampled = n > maxRows;
-    if (!sampled) {
-      for (let r = 0; r < n; r += 2000) {
-        if (cancelled()) break;
-        count(this.getRows(r, 2000));
-        await tick();
-      }
-    } else {
-      const blocks = Math.max(1, Math.floor(maxRows / STATS_BLOCK));
-      const stride = (n - STATS_BLOCK) / Math.max(1, blocks - 1);
-      for (let b = 0; b < blocks; b++) {
-        if (cancelled()) break;
-        count(this.getRows(Math.floor(b * stride), STATS_BLOCK));
-        if (b % 2 === 1) await tick();
-      }
-    }
+    const sampled = await this.scanView(maxRows, cancelled, count);
     if (cancelled()) return { scanned, viewCount: n, sampled, fields: [], cancelled: true };
     const fields: FieldStat[] = [...counts.values()].map((c) => ({
       key: c.key,
@@ -411,6 +487,70 @@ export class LogDocument {
       top: [...c.values].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0, top),
     }));
     return { scanned, viewCount: n, sampled, fields };
+  }
+
+  /**
+   * Reads the view rows in chunks: all of them, or evenly spaced blocks when the view has more than `maxRows`.
+   * Returns true when the view was sampled.
+   */
+  private async scanView(maxRows: number, cancelled: () => boolean, fn: (rows: RowData[]) => void): Promise<boolean> {
+    const n = this.viewCount();
+    const tick = () => new Promise<void>((res) => setImmediate(res));
+    const sampled = n > maxRows;
+    if (!sampled) {
+      for (let r = 0; r < n; r += 2000) {
+        if (cancelled()) break;
+        fn(this.getRows(r, 2000));
+        await tick();
+      }
+    } else {
+      const blocks = Math.max(1, Math.floor(maxRows / STATS_BLOCK));
+      const stride = (n - STATS_BLOCK) / Math.max(1, blocks - 1);
+      for (let b = 0; b < blocks; b++) {
+        if (cancelled()) break;
+        fn(this.getRows(Math.floor(b * stride), STATS_BLOCK));
+        if (b % 2 === 1) await tick();
+      }
+    }
+    return sampled;
+  }
+
+  /** Rows `scanView` will read. */
+  private scanSize(maxRows: number): number {
+    const n = this.viewCount();
+    return n > maxRows ? Math.min(n, Math.max(1, Math.floor(maxRows / STATS_BLOCK)) * STATS_BLOCK) : n;
+  }
+
+  // ----------------------------------------------------------------- patterns
+
+  /** Message templates over the view rows (sampled like fieldStats), most common first. */
+  async patterns(maxRows = 200_000, top = 300, cancelled: () => boolean = () => false): Promise<PatternsResult> {
+    const n = this.viewCount();
+    const expected = Math.max(1, this.scanSize(maxRows));
+    const map = new Map<string, PatternStat>();
+    let other: PatternStat | null = null;
+    let scanned = 0;
+    const count = (rows: RowData[]) => {
+      for (const row of rows) {
+        const msg = messageOf(row.text, row.fields);
+        const tpl = template(msg);
+        let p = map.get(tpl);
+        if (!p) {
+          if (map.size >= PATTERNS_CAP) p = other ??= newPattern(OTHER_PATTERN, msg);
+          else map.set(tpl, (p = newPattern(tpl, msg)));
+        }
+        p.count++;
+        p.levels[row.level]++;
+        p.spark[Math.min(SPARK_BUCKETS - 1, Math.floor((scanned * SPARK_BUCKETS) / expected))]++;
+        scanned++;
+      }
+    };
+    const sampled = await this.scanView(maxRows, cancelled, count);
+    if (cancelled()) return { scanned, viewCount: n, sampled, total: 0, patterns: [], cancelled: true };
+    const all = [...map.values()];
+    if (other) all.push(other);
+    all.sort((a, b) => b.count - a.count || (a.template < b.template ? -1 : a.template > b.template ? 1 : 0));
+    return { scanned, viewCount: n, sampled, total: all.length, patterns: all.slice(0, top) };
   }
 
   // ------------------------------------------------------------------- search
@@ -622,6 +762,8 @@ export class LogDocument {
     return this.serial(async () => {
       for (const s of this.sources) await s.setFormat(formatId, customFormats);
       this.verdict = [];
+      this.repeatHi = [];
+      this.repeatLo = [];
       this.rebuildBase();
       if (this.filter) await this.applyFilterNow(this.filter, false, this.filterGen);
     });

@@ -1,5 +1,6 @@
 import type { TimeMode } from '../core/timestamp';
-import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, SearchResult, TextPattern } from '../core/types';
+import { DEFAULT_FRAMEWORK_PACKAGES } from '../core/folding';
+import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, PatternsResult, SearchResult, TextPattern } from '../core/types';
 
 export interface HighlightRule extends TextPattern {
   id: string;
@@ -59,6 +60,11 @@ export interface Settings {
   /** Mark time gaps of at least this many ms between consecutive rows (0 = off). */
   gapMs?: number;
   histogramHeight?: number;
+  /** Fold runs of framework frames in stack traces (expansion and details pane). */
+  foldFrames?: boolean;
+  frameworkPackages?: string[];
+  /** Workspace files, most recent first. */
+  recentWorkspaces?: string[];
 }
 
 /** Display settings with their defaults resolved. */
@@ -73,6 +79,8 @@ export interface ViewSettings {
   timeUtc: boolean;
   gapMs: number;
   histogramHeight: number;
+  foldFrames: boolean;
+  frameworkPackages: string[];
 }
 
 export function viewSettings(s: Settings): ViewSettings {
@@ -87,6 +95,8 @@ export function viewSettings(s: Settings): ViewSettings {
     timeUtc: s.timeUtc ?? false,
     gapMs: s.gapMs ?? 10000,
     histogramHeight: Math.max(40, Math.min(240, s.histogramHeight ?? 64)),
+    foldFrames: s.foldFrames ?? true,
+    frameworkPackages: s.frameworkPackages ?? DEFAULT_FRAMEWORK_PACKAGES,
   };
 }
 
@@ -123,9 +133,34 @@ export interface Tab {
   expandedFields?: Set<string>;
   /** Keys of multi-line entries expanded inline in the grid. */
   expanded: Set<string>;
+  /** Keys of entries whose framework frames are shown unfolded. */
+  unfolded: Set<string>;
+  /** Patterns view shown instead of the grid. */
+  showPatterns?: boolean;
+  patterns?: PatternsResult | null;
+  /** Selected pattern (index into patterns.patterns). */
+  patternSel?: number;
+  /** Patterns being computed. */
+  patternsBusy?: boolean;
+  /** When the last patterns run started (ms). */
+  patternsAt?: number;
+  /** Rows appended to the view while not following (the "↓ N new" pill). */
+  newRows?: number;
+  /** Settings to apply once the tab's document is ready (workspace load). */
+  pending?: {
+    bookmarks: { path: string; line: number; note: string }[];
+    columns?: { extraColumns: string[]; columnOrder: string[]; hiddenColumns: string[] };
+  };
 }
 
-export const defaultFilter = (): FilterSpec => ({ levels: [true, true, true, true, true, true, true], rules: [], query: '', context: 0 });
+export const defaultFilter = (): FilterSpec => ({ levels: [true, true, true, true, true, true, true], rules: [], query: '', context: 0, groupRepeats: 'off', clearedBefore: null });
+
+/** "×N" badge text for grouped rows: ×1.2k above 9999, ×3.4M above 999,999. */
+export function fmtRepeat(n: number): string {
+  if (n > 999_999) return `×${(n / 1_000_000).toFixed(1)}M`;
+  if (n > 9999) return `×${(n / 1000).toFixed(1)}k`;
+  return `×${n}`;
+}
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 

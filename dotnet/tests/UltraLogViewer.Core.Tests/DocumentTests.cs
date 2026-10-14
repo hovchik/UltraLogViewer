@@ -227,4 +227,63 @@ public class DocumentTests
         Assert.Empty(body.Top);
         Assert.Equal("EHOST", d.GetRows(6000, 1)[0].Field("error.code"));
     }
+
+    private const string Repeats =
+        "2024-05-01 10:00:00,000 [main] INFO  com.acme.Api - Payment 1 done\n" +
+        "2024-05-01 10:00:01,000 [main] INFO  com.acme.Api - Payment 1 done\n" +
+        "2024-05-01 10:00:02,000 [main] INFO  com.acme.Api - Payment 2 done\n" +
+        "2024-05-01 10:00:03,000 [main] WARN  com.acme.Api - Payment 3 done\n" +
+        "2024-05-01 10:00:04,000 [main] INFO  com.acme.Api - Payment 4 done\n" +
+        "2024-05-01 10:00:05,000 [main] INFO  com.acme.Api - Payment 5 done\n";
+
+    [Fact]
+    public async Task GroupsRepeatsExactlyOrByPatternAndFollowsTail()
+    {
+        var path = TestFiles.Write("rep.log", Repeats);
+        using var d = new LogDocument("t");
+        await d.AddSourceAsync(path, new SourceOptions());
+        await d.ApplyFilterAsync(Spec(s => s.GroupRepeats = "exact"));
+        Assert.Equal([(0, 2), (2, 1), (3, 1), (4, 1), (5, 1)], d.GetRows(0, 10).Select(r => (r.Entry, r.Repeat)));
+        await d.ApplyFilterAsync(Spec(s => s.GroupRepeats = "pattern"));
+        Assert.Equal([(0, 3), (3, 1), (4, 2)], d.GetRows(0, 10).Select(r => (r.Entry, r.Repeat)));
+
+        // appended entries extend the last run, or start a new one
+        File.AppendAllText(path, "2024-05-01 10:00:06,000 [main] INFO  com.acme.Api - Payment 6 done\n2024-05-01 10:00:07,000 [main] INFO  com.acme.Api - Shutdown\n");
+        Assert.True(await d.RefreshAsync());
+        Assert.Equal([(0, 3), (3, 1), (4, 3), (7, 1)], d.GetRows(0, 10).Select(r => (r.Entry, r.Repeat)));
+
+        // show in context ignores grouping; context rows never merge
+        d.IgnoreFilter = true;
+        Assert.Equal(8, d.ViewCount);
+        Assert.All(d.GetRows(0, 10), r => Assert.Equal(1, r.Repeat));
+        d.IgnoreFilter = false;
+        await d.ApplyFilterAsync(Spec(s => { s.GroupRepeats = "pattern"; s.Levels[(int)Level.Warn] = false; s.Query = "Payment"; s.Context = 1; }));
+        var rows = d.GetRows(0, 10);
+        Assert.Equal([(0, 3, false), (3, 1, true), (4, 3, false), (7, 1, true)], rows.Select(r => (r.Entry, r.Repeat, r.IsContext)));
+    }
+
+    [Fact]
+    public async Task PatternRulesAndClearAndPatternScan()
+    {
+        using var d = await Doc(Repeats);
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(new FilterRule { Text = "Payment <num> done", PatternMatch = true, Mode = RuleMode.Exclude })));
+        Assert.Equal(0, d.ViewCount);
+        await d.ApplyFilterAsync(Spec(s => s.Rules.Add(new FilterRule { Text = "Payment <num> done", PatternMatch = true })));
+        Assert.Equal(6, d.ViewCount);
+        await d.ApplyFilterAsync(Spec(s => s.ClearedBefore = [4]));
+        Assert.Equal([4, 5], Entries(d));
+
+        await d.ApplyFilterAsync(null);
+        var stats = await d.PatternsAsync();
+        Assert.Equal((6, 6, false, 1), (stats.Scanned, stats.ViewCount, stats.Sampled, stats.Total));
+        var p = stats.Patterns.Single();
+        Assert.Equal(("Payment <num> done", 6, "Payment 1 done"), (p.Template, p.Count, p.Sample));
+        Assert.Equal(5, p.Levels[(int)Level.Info]);
+        Assert.Equal(1, p.Levels[(int)Level.Warn]);
+        Assert.Equal(6, p.Spark.Sum());
+
+        using var big = await Doc(TestFiles.Log4j);
+        var s2 = await big.PatternsAsync();
+        Assert.Equal(s2.Patterns.OrderByDescending(x => x.Count).ThenBy(x => x.Template, StringComparer.Ordinal).Select(x => x.Template), s2.Patterns.Select(x => x.Template));
+    }
 }

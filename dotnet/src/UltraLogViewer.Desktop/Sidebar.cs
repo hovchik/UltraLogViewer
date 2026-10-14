@@ -271,7 +271,7 @@ public sealed class Sidebar : ScrollViewer
             };
             var text = new TextBlock
             {
-                Text = (r.Exact ? $"{columns.FirstOrDefault(c => c.Key == r.Column)?.Title ?? r.Column} = {r.Text}" : r.Regex ? $"/{r.Text}/" : r.Text) + (r.CaseSensitive ? "  Aa" : ""),
+                Text = (r.PatternMatch ? $"Pattern ≈ {(r.Text.Length > 60 ? r.Text[..60] + "…" : r.Text)}" : r.Exact ? $"{columns.FirstOrDefault(c => c.Key == r.Column)?.Title ?? r.Column} = {r.Text}" : r.Regex ? $"/{r.Text}/" : r.Text) + (r.CaseSensitive ? "  Aa" : ""),
                 FontFamily = Fonts.Mono,
                 FontSize = 12,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -299,7 +299,7 @@ public sealed class Sidebar : ScrollViewer
                 _host.ApplyFilter();
             }, "Remove");
             var dp = new DockPanel();
-            col.IsVisible = !r.Exact; // the column is part of the rule's text
+            col.IsVisible = !r.Exact && !r.PatternMatch; // the column is part of the rule's text
             var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { col, del } };
             DockPanel.SetDock(right, Dock.Right);
             DockPanel.SetDock(en, Dock.Left);

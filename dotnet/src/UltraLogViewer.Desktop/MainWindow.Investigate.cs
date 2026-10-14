@@ -332,6 +332,7 @@ public sealed partial class MainWindow
     /// <summary>Recounts the Fields panel's top values shortly after the view changes (coalesced, cancellable).</summary>
     private void ScheduleFieldStats(DocumentTab tab)
     {
+        SchedulePatterns(tab);
         _statsPending = tab;
         if (_statsTimer is null)
         {

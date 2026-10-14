@@ -22,6 +22,7 @@ export interface SidebarHost {
   /** Click on a field value (include) or right-click (exclude). */
   filterByValue(key: string, value: string, mode: 'include' | 'exclude'): void;
   rescanFields(): void;
+  clearAllFilters(): void;
 }
 
 const LEVEL_COLORS = ['var(--fg-3)', 'var(--trace)', 'var(--debug)', 'var(--accent)', 'var(--warn)', 'var(--error)', 'var(--fatal-bg)'];
@@ -158,7 +159,20 @@ export class Sidebar {
     const sec = h(
       'div',
       { class: 'sec' },
-      h('h3', {}, 'Filters', h('span', {}, presetSel, ' ', h('button', { class: 'mini', title: 'Save current filters as a preset', onclick: () => this.savePreset(tab) }, 'Save'))),
+      h(
+        'h3',
+        {},
+        'Filters',
+        h(
+          'span',
+          {},
+          presetSel,
+          ' ',
+          h('button', { class: 'mini', title: 'Save current filters as a preset', onclick: () => this.savePreset(tab) }, 'Save'),
+          ' ',
+          h('button', { class: 'mini clear-all', title: 'Clear all filters (levels, rules, query, time, group repeats, Clear)', onclick: () => this.host.clearAllFilters() }, 'Clear all'),
+        ),
+      ),
     );
     if (!f.rules.length) sec.append(h('div', { class: 'empty-hint' }, 'Add include (+) or exclude (−) rules. Entries must match any include and no exclude.'));
     const columns = this.host.columns(tab).filter((c) => c.key !== '__source');
@@ -167,7 +181,13 @@ export class Sidebar {
       const options = columns.map((c) => h('option', { value: c.key, selected: r.column === c.key }, c.title));
       if (r.column && !columns.some((c) => c.key === r.column)) options.push(h('option', { value: r.column, selected: true }, r.column));
       const colSel = h('select', { class: 'mini', title: 'Match in column' }, h('option', { value: '' }, 'any'), ...options);
-      const label = r.exact && r.column ? `${titleOf(r.column)} = ${r.text}` : r.regex ? `/${r.text}/` : r.text;
+      const label = r.patternMatch
+        ? `Pattern ≈ ${r.text.length > 60 ? r.text.slice(0, 60) + '…' : r.text}`
+        : r.exact && r.column
+          ? `${titleOf(r.column)} = ${r.text}`
+          : r.regex
+            ? `/${r.text}/`
+            : r.text;
       colSel.onchange = () => {
         r.column = colSel.value || undefined;
         this.host.applyFilter();
@@ -178,9 +198,9 @@ export class Sidebar {
           { class: r.enabled ? 'rule' : 'rule off' },
           h('input', { type: 'checkbox', checked: r.enabled, onchange: () => { r.enabled = !r.enabled; this.host.applyFilter(); } }),
           h('span', { class: `mode ${r.mode === 'include' ? 'inc' : 'exc'}`, title: r.mode }, r.mode === 'include' ? '+' : '−'),
-          h('span', { class: 'txt', title: r.exact ? `${label} (whole value)` : r.text }, label),
-          h('span', { class: 'col' }, r.caseSensitive ? 'Aa' : ''),
-          r.exact ? null : colSel,
+          h('span', { class: 'txt', title: r.patternMatch ? `Pattern ≈ ${r.text}` : r.exact ? `${label} (whole value)` : r.text }, label),
+          h('span', { class: 'col' }, r.caseSensitive && !r.patternMatch ? 'Aa' : ''),
+          r.exact || r.patternMatch ? null : colSel,
           h('button', { class: 'mini danger', title: 'Remove', onclick: () => { f.rules = f.rules.filter((x) => x !== r); this.host.applyFilter(); } }, '×'),
         ),
       );

@@ -294,3 +294,46 @@ public class TimeFormatTests
         Assert.Equal(["+850ms", "+32s", "+2m", "+3h", "+1d"], new[] { 850L, 32_000, 125_000, 3 * 3_600_000 + 5, 90_000_000 }.Select(Timestamps.FormatGap));
     }
 }
+
+public class PatternTests
+{
+    [Fact]
+    public void TemplatesMaskVariableParts()
+    {
+        Assert.Equal("Payment <num> failed after <num> ms (req <num>)", Patterns.Template("Payment 42 failed after 30000 ms (req 133)"));
+        Assert.Equal("user=bob id=<guid> from <ip>", Patterns.Template("user=bob id=550e8400-e29b-41d4-a716-446655440000 from 10.0.0.12:8080"));
+        Assert.Equal("GET <url> took <num>", Patterns.Template("GET https://x.io/a?b=1 took 35ms"));
+        Assert.Equal("token <str> for <hex>", Patterns.Template("token \"abc def\" for deadbeef42"));
+        Assert.Equal("at <time> ok", Patterns.Template("at 2024-01-02T03:04:05Z ok"));
+        Assert.Equal("first line", Patterns.Template("first   line\nsecond 2"));
+    }
+
+    [Fact]
+    public void MessageAndRepeatKeys()
+    {
+        var none = new Dictionary<string, string>();
+        Assert.Equal("[main] hello", Patterns.MessageOf("2024-05-01 10:00:00 [main] hello", none));
+        Assert.Equal("msg", Patterns.MessageOf("x", new Dictionary<string, string> { ["message"] = "msg" }));
+        var f = new Dictionary<string, string> { ["message"] = "Payment 1 done", ["logger"] = "Api" };
+        Assert.Equal("3|Api|Payment 1 done", Patterns.RepeatKey(Level.Info, f, "", "exact"));
+        Assert.Equal("3|Payment <num> done", Patterns.RepeatKey(Level.Info, f, "", "pattern"));
+        Assert.NotEqual(Patterns.Hash("a"), Patterns.Hash("b"));
+    }
+
+    [Fact]
+    public void FoldsFrameworkFrames()
+    {
+        var p = StackFolding.DefaultPackages;
+        string[] java = ["Boom", "\tat com.shop.A.run(A.java:1)", "\tat com.shop.B.run(B.java:2)", "\tat java.lang.Thread.run(Thread.java:3)",
+            "\tat java.util.concurrent.X.y(X.java:4)", "\tat java.base/jdk.internal.Z.z(Z.java:5)", "\tat com.shop.C.run(C.java:6)"];
+        var f = StackFolding.Fold(java, p);
+        Assert.Equal(["Boom", "\tat com.shop.A.run(A.java:1)", "\tat com.shop.B.run(B.java:2)", "… 3 framework frames", "\tat com.shop.C.run(C.java:6)"], f.Select(x => x.Line));
+        Assert.Equal(3, f[3].Folded);
+        Assert.Equal(3, StackFolding.Fold(["x", "  at java.lang.Thread.run(Thread.java:1)", "  at app.Main(Main.java:2)"], p).Count);
+        string[] py = ["Traceback (most recent call last):", "  File \"/app/main.py\", line 3, in <module>", "    run()",
+            "  File \"/usr/lib/python3/site-packages/flask/app.py\", line 9, in run", "    self.go()",
+            "  File \"/usr/lib/python3/site-packages/flask/x.py\", line 2, in go", "    raise E", "ValueError: bad"];
+        var pf = StackFolding.Fold(py, p);
+        Assert.Equal(["Traceback (most recent call last):", "  File \"/app/main.py\", line 3, in <module>", "    run()", "… 4 framework lines", "ValueError: bad"], pf.Select(x => x.Line));
+    }
+}
