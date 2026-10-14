@@ -537,6 +537,11 @@ public sealed class CustomRegexFormat : LogFormat
     }
 }
 
+/// <summary>The chosen format and how it was chosen, shown to the user as the file's format.</summary>
+/// <param name="Auto">Picked by detection (false: the user chose it).</param>
+/// <param name="Matched">Non-empty sample lines that start an entry in this format, out of <paramref name="Sampled"/>.</param>
+public sealed record FormatDetection(LogFormat Format, bool Auto, int Matched, int Sampled);
+
 public static class FormatDetector
 {
     public static readonly (string Id, string Label)[] BuiltIns =
@@ -545,11 +550,21 @@ public static class FormatDetector
         ("access", "Apache / Nginx"), ("logcat", "Android logcat"), ("plain", "Plain text"),
     ];
 
+    /// <summary>Short name for the format picker and the status bar.</summary>
+    public static string Label(LogFormat f) =>
+        f.Id == "w3c" ? "W3C / IIS"
+        : BuiltIns.FirstOrDefault(b => b.Id == f.Id).Label ?? (f.Id.StartsWith("custom:", StringComparison.Ordinal) ? $"Custom: {f.Name}" : f.Name);
+
     /// <summary>Picks the best format for a sample of lines from the start of a file.</summary>
-    public static LogFormat Detect(IReadOnlyList<string> sample, int year = 0, IEnumerable<CustomFormat>? custom = null, string? force = null)
+    public static LogFormat Detect(IReadOnlyList<string> sample, int year = 0, IEnumerable<CustomFormat>? custom = null, string? force = null) =>
+        DetectWithInfo(sample, year, custom, force).Format;
+
+    /// <summary><see cref="Detect"/>, plus how well the sample fits the chosen format.</summary>
+    public static FormatDetection DetectWithInfo(IReadOnlyList<string> sample, int year = 0, IEnumerable<CustomFormat>? custom = null, string? force = null)
     {
         if (year == 0) year = DateTime.Now.Year;
         var lines = sample.Where(l => l.Trim().Length > 0).Take(500).ToList();
+        FormatDetection Plain(bool auto) => new(new PlainFormat(), auto, lines.Count, lines.Count);
         var candidates = new List<(LogFormat F, double Min, Func<string, bool> Test)>();
         foreach (var def in custom ?? [])
         {
@@ -575,18 +590,18 @@ public static class FormatDetector
 
         if (!string.IsNullOrEmpty(force))
         {
-            if (force == "plain") return new PlainFormat();
+            if (force == "plain") return Plain(false);
             var forced = candidates.FirstOrDefault(c => c.F.Id == force);
-            if (forced.F is not null) return forced.F;
+            if (forced.F is not null) return new(forced.F, false, lines.Count(forced.Test), lines.Count);
         }
-        if (lines.Count == 0) return new PlainFormat();
+        if (lines.Count == 0) return Plain(true);
         foreach (var (f, min, test) in candidates)
         {
             var hits = lines.Count(test);
             var ratio = (double)hits / lines.Count;
             // The first non-empty line must start an entry unless most lines do, otherwise we'd be guessing.
-            if (hits > 0 && ratio >= min && (min == 0 || test(lines[0]) || ratio > 0.5)) return f;
+            if (hits > 0 && ratio >= min && (min == 0 || test(lines[0]) || ratio > 0.5)) return new(f, true, hits, lines.Count);
         }
-        return new PlainFormat();
+        return Plain(true);
     }
 }
