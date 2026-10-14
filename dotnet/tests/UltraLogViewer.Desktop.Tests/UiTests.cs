@@ -101,6 +101,41 @@ public sealed class UiTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task Names_the_format_and_opens_plain_text_without_timestamps()
+    {
+        var (w, settings) = NewWindow();
+        await Open(w, Sample("app.log", 50));
+        await Until(() => w.FormatStatusForTest == "Timestamped text · auto");
+        Assert.Equal("Auto: Timestamped text", w.FormatPickerTextForTest);
+        Assert.True(w.HistogramForTest.IsVisible);
+
+        var notes = Path.Combine(_dir, "notes.txt");
+        File.WriteAllText(notes, "Release notes for build 4.2\n\nInstalled packages:\n  - libfoo 1.2\nWARNING: disk almost full\nerror: could not copy config.ini\ndone\n");
+        var tab = await Open(w, notes);
+        Assert.Equal(7, tab.Info.Total);
+        var src = tab.Info.Sources[0];
+        Assert.Equal(("plain", "Plain text", true), (src.FormatId, src.FormatLabel, src.FormatAuto));
+        Assert.Equal(["level", "message"], tab.Info.Columns.Select(c => c.Key));
+        Assert.Equal(Level.Error, tab.Doc.GetRows(5, 1)[0].Level);
+        await Until(() => w.FormatStatusForTest == "Plain text · auto");
+        Assert.Equal("Auto: Plain text", w.FormatPickerTextForTest);
+        Assert.Contains("no known log layout", MainWindow.FormatSummary(tab)!.Value.Tip);
+        Assert.False(w.HistogramForTest.IsVisible);
+        Assert.False(w.TimelineButtonEnabledForTest);
+        w.ToggleHistogramForTest(false); // Ctrl+Shift+H does nothing without a timeline
+        Assert.True(settings.ShowHistogram);
+        Screenshot(w, "plain-text.png");
+
+        // choosing a format by hand is shown as such, and auto goes back to detection
+        await w.ChooseFormatForTest("timestamped");
+        await Until(() => w.FormatStatusForTest == "Timestamped text");
+        Assert.Contains("chosen by you; 0 of 6 sampled lines start an entry", MainWindow.FormatSummary(tab)!.Value.Tip);
+        await w.ChooseFormatForTest("");
+        await Until(() => w.FormatStatusForTest == "Plain text · auto");
+        w.Close();
+    }
+
+    [AvaloniaFact]
     public async Task Quick_filter_and_level_toggles_narrow_the_view()
     {
         var (w, _) = NewWindow();

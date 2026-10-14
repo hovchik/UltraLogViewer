@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
-import { detectFormat, LogFormat, QuickInfo } from './formats';
+import { detectFormatInfo, FormatDetection, formatLabel, LogFormat, QuickInfo } from './formats';
 import { GrowF64, GrowU32, GrowU8, lowerBound } from './grow';
 import { CustomFormat, Level, SourceInfo } from './types';
 
@@ -41,6 +41,7 @@ export class FileSource {
   /** Byte offset just after the last indexed line. */
   dataEnd = 0;
   format!: LogFormat;
+  detection!: FormatDetection;
   encoding: Exclude<Encoding, 'auto'> = 'utf-8';
   compressed = false;
   /** Path actually read (a temp file for gzip / UTF-16 input). */
@@ -79,6 +80,11 @@ export class FileSource {
       lines: this.lineCount,
       entries: this.entryCount,
       format: this.format?.name ?? '',
+      formatId: this.format?.id ?? '',
+      formatLabel: this.format ? formatLabel(this.format.id, this.format.name) : '',
+      formatAuto: this.detection?.auto ?? true,
+      formatMatched: this.detection?.matched ?? 0,
+      formatSampled: this.detection?.sampled ?? 0,
       encoding: this.encoding,
       compressed: this.compressed,
       live: this.live,
@@ -109,11 +115,12 @@ export class FileSource {
     this.fd = fs.openSync(this.readPath, 'r');
     const st = fs.fstatSync(this.fd);
     this.ino = st.ino;
-    this.format = detectFormat(this.sampleLines(256 * 1024), {
+    this.detection = detectFormatInfo(this.sampleLines(256 * 1024), {
       year: st.mtime.getFullYear(),
       customFormats: this.opts.customFormats,
       force: this.opts.format,
     });
+    this.format = this.detection.format;
     this.dataEnd = this.dataStart;
     await this.exclusive(() => this.indexFrom(st.size, onProgress));
   }
@@ -124,7 +131,8 @@ export class FileSource {
     if (customFormats) this.opts.customFormats = customFormats;
     await this.exclusive(async () => {
       const st = fs.fstatSync(this.fd);
-      this.format = detectFormat(this.sampleLines(256 * 1024), { year: st.mtime.getFullYear(), customFormats: this.opts.customFormats, force: formatId });
+      this.detection = detectFormatInfo(this.sampleLines(256 * 1024), { year: st.mtime.getFullYear(), customFormats: this.opts.customFormats, force: formatId });
+      this.format = this.detection.format;
       this.resetIndex();
       await this.indexFrom(st.size);
     });

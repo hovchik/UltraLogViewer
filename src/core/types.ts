@@ -73,7 +73,16 @@ export interface SourceInfo {
   size: number;
   lines: number;
   entries: number;
+  /** Format name (also the key for per-format column settings). */
   format: string;
+  formatId: string;
+  /** Short format name for the picker and the status bar. */
+  formatLabel: string;
+  /** The format was detected (false: the user picked it). */
+  formatAuto: boolean;
+  /** Sampled non-empty lines from the start of the file that start an entry in this format. */
+  formatMatched: number;
+  formatSampled: number;
   encoding: string;
   compressed: boolean;
   live: boolean;

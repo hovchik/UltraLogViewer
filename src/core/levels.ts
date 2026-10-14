@@ -49,7 +49,7 @@ export function levelFromSyslogSeverity(sev: number): Level {
 }
 
 const BARE = /\b(TRACE|VERBOSE|FINEST|FINER|DEBUG|FINE|INFO|INFORMATION|NOTICE|WARN|WARNING|ERROR|ERR|SEVERE|CRITICAL|CRIT|FATAL|PANIC|EMERG)\b/;
-const DELIMITED = /[[<(|:\s](trace|debug|info|notice|warn(?:ing)?|error|err|fatal|crit(?:ical)?|alert|emerg)[\]>)|:]/i;
+const DELIMITED = /(?:^|[[<(|:\s])(trace|debug|info|notice|warn(?:ing)?|error|err|fatal|crit(?:ical)?|alert|emerg)[\]>)|:]/i;
 
 /** Heuristic level detection for free-form text: looks at the beginning of the line only. */
 export function detectLevel(text: string): Level {

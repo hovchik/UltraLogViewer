@@ -55,8 +55,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private readonly TextBox _quick;
     private readonly ToggleButton _followBtn, _histBtn, _detailBtn;
     private readonly ComboBox _format;
-    private readonly TextBlock _statusLeft, _statusSel, _statusFormat, _statusLive, _statusBusy;
-    private readonly Button _statusEnc;
+    private readonly TextBlock _statusLeft, _statusSel, _statusLive, _statusBusy;
+    private readonly Button _statusEnc, _statusFormat;
     private readonly ProgressBar _progress;
     private readonly MenuItem _recentMenu;
 
@@ -400,7 +400,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         // -------------------------------------------------------- status bar
         _statusLeft = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
         _statusSel = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.75 };
-        _statusFormat = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.75 };
+        _statusFormat = new Button { Classes = { "mini" }, Padding = new Thickness(6, 0), MinHeight = 18, FontSize = 12, IsVisible = false };
+        _statusFormat.Click += (_, _) => _format.IsDropDownOpen = true;
         _statusLive = new TextBlock { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.75 };
         _statusBusy = new TextBlock { VerticalAlignment = VerticalAlignment.Center };
         _statusEnc = new Button { Classes = { "mini" }, Padding = new Thickness(6, 0), MinHeight = 18, FontSize = 12 };
@@ -1225,9 +1226,70 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     // =============================================================== formats
 
+    /// <summary>The tab's format: one label (or "Mixed formats" for merged files that differ) and per-file detection details.</summary>
+    internal static (string Label, string Tip, bool Auto)? FormatSummary(DocumentTab tab)
+    {
+        var srcs = tab.Info.Sources;
+        if (srcs.Count == 0) return null;
+        var labels = srcs.Select(s => s.FormatLabel).Distinct().ToList();
+        var lines = srcs.Select(s =>
+        {
+            var how = !s.FormatAuto
+                ? "chosen by you" + (s.FormatId == "plain" ? "" : $"; {s.FormatMatched:N0} of {s.FormatSampled:N0} sampled lines start an entry")
+                : s.FormatId == "plain"
+                    ? "detected: no known log layout, so each line is one entry"
+                    : $"detected: {s.FormatMatched:N0} of {s.FormatSampled:N0} sampled lines start an entry";
+            return srcs.Count > 1 ? $"{s.DisplayName}: {s.Format}\n  {how}" : $"{s.Format}\n{how}";
+        });
+        return (labels.Count > 1 ? "Mixed formats" : labels[0], $"Log format\n\n{string.Join("\n", lines)}\n\nClick to choose another format.", srcs.All(s => s.FormatAuto));
+    }
+
+    private string _autoFormatLabel = "Auto-detect format";
+
+    /// <summary>The auto option of the format picker names what detection picked for the active tab.</summary>
+    private void SyncAutoFormatLabel()
+    {
+        var fmt = _active is { FormatId: "" } tab ? FormatSummary(tab) : null;
+        var label = fmt is null ? "Auto-detect format" : $"Auto: {fmt.Value.Label}";
+        ToolTip.SetTip(_format, fmt?.Tip ?? "Log format");
+        if (label == _autoFormatLabel) return;
+        _autoFormatLabel = label;
+        RebuildFormatItems();
+    }
+
+    /// <summary>The active file has no timestamps at all (plain text): the timeline has nothing to show.</summary>
+    private static bool Timeless(DocumentTab? tab) => tab is { Info: { Indexing: false, Total: > 0, TimeMin: null } };
+
+    private bool HistogramOn => _settings.ShowHistogram && !Timeless(_active);
+
+    private bool _timeless;
+
+    private void SyncTimeless()
+    {
+        var timeless = Timeless(_active);
+        if (timeless == _timeless) return;
+        _timeless = timeless;
+        SaveHistogramSize();
+        _hist.IsVisible = HistogramOn;
+        ApplyHistogramSize();
+        _histBtn.IsEnabled = !timeless;
+        ToolTip.SetTip(_histBtn, timeless ? "Timeline: this file has no timestamps" : "Timeline (Ctrl+Shift+H)");
+        if (HistogramOn) Run(RefreshHistogramAsync);
+    }
+
+    internal string FormatStatusForTest => _statusFormat.IsVisible ? _statusFormat.Content as string ?? "" : "";
+    internal string FormatPickerTextForTest => _format.SelectedItem as string ?? "";
+    internal bool TimelineButtonEnabledForTest => _histBtn.IsEnabled;
+
+    internal async Task ChooseFormatForTest(string id)
+    {
+        _format.SelectedIndex = FormatItems().FindIndex(i => (i.Id ?? "") == id);
+        await Task.Yield();
+    }
+
     private List<(string? Id, string Label)> FormatItems()
     {
-        var items = new List<(string? Id, string Label)> { (null, "Auto-detect format") };
+        var items = new List<(string? Id, string Label)> { (null, _autoFormatLabel) };
         items.AddRange(FormatDetector.BuiltIns.Select(b => ((string?)b.Id, b.Label)));
         items.AddRange(_settings.CustomFormats.Select(c => ((string?)$"custom:{c.Name}", $"Custom: {c.Name}")));
         items.Add(("__new", "New custom format…"));
@@ -1318,10 +1380,16 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void ToggleHistogram(bool on)
     {
+        // no timeline to show: leave the preference alone for files that have timestamps
+        if (Timeless(_active))
+        {
+            _histBtn.IsChecked = _settings.ShowHistogram;
+            return;
+        }
         SaveHistogramSize();
         _settings.ShowHistogram = on;
         _histBtn.IsChecked = on;
-        _hist.IsVisible = on;
+        _hist.IsVisible = HistogramOn;
         ApplyHistogramSize();
         _settings.Save();
         if (on) Run(RefreshHistogramAsync);
@@ -1395,7 +1463,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void ApplyHistogramSize()
     {
-        var on = _settings.ShowHistogram;
+        var on = HistogramOn;
         _center.RowDefinitions[0].Height = on ? new GridLength(Math.Clamp(_settings.HistogramHeight, 40, 240)) : new GridLength(0);
         _center.RowDefinitions[0].MinHeight = on ? 40 : 0;
         _histSplitter.IsVisible = on;
@@ -1454,7 +1522,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private async Task RefreshHistogramAsync()
     {
-        if (_active is not { Ready: true } tab || !_settings.ShowHistogram) return;
+        if (_active is not { Ready: true } tab || !HistogramOn) return;
         var buckets = Math.Clamp((int)(_hist.Bounds.Width / 5), 20, 400);
         var h = await Task.Run(() => tab.Doc.Histogram(buckets));
         if (tab != _active) return;
@@ -1615,8 +1683,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab is null)
         {
             _statusLeft.Text = "No file open";
-            _statusSel.Text = _statusFormat.Text = _statusLive.Text = _statusBusy.Text = "";
-            _statusEnc.IsVisible = false;
+            _statusSel.Text = _statusLive.Text = _statusBusy.Text = "";
+            _statusEnc.IsVisible = _statusFormat.IsVisible = false;
+            SyncAutoFormatLabel();
+            SyncTimeless();
             _progress.IsVisible = false;
             UpdateClearedStatus(null);
             return;
@@ -1630,7 +1700,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
         var n = tab.SelectionEnd - tab.SelectionStart + 1;
         _statusSel.Text = i.ViewCount == 0 ? "" : n > 1 ? $"{n:N0} selected" : $"Row {tab.Focus + 1:N0}";
         var src = i.Sources.FirstOrDefault();
-        _statusFormat.Text = src is null ? "" : i.Merged ? $"{i.Sources.Count} files merged" : src.Format;
+        var fmt = FormatSummary(tab);
+        _statusFormat.IsVisible = fmt is not null;
+        _statusFormat.Content = fmt is null ? "" : fmt.Value.Auto ? $"{fmt.Value.Label} · auto" : fmt.Value.Label;
+        ToolTip.SetTip(_statusFormat, fmt?.Tip);
+        SyncAutoFormatLabel();
+        SyncTimeless();
         _statusEnc.IsVisible = src is not null;
         _statusEnc.Content = src is null ? "" : src.Encoding + (src.Compressed ? " · gzip" : "");
         _statusLive.Text = src is null ? "" : i.Sources.Any(s => s.Live) ? (tab.Follow ? "● Following" : "● Live") : "Static";
