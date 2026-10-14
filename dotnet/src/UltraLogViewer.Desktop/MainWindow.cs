@@ -87,7 +87,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         var open = ToolButton("Open", "Open files (Ctrl+O)", () => Run(() => PickAndOpen(false)));
         var merge = ToolButton("Merge…", "Open several files merged into one timeline (Ctrl+Shift+O)", () => Run(() => PickAndOpen(true)));
 
-        _search = new TextBox { Watermark = "Find (Ctrl+F)", Width = 200, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
+        _search = new TextBox { Watermark = "Find (Ctrl+F)", Width = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
         _sCase = Toggle("Aa", "Match case");
         _sWord = Toggle("ab|", "Whole word");
         _sRegex = Toggle(".*", "Regular expression");
@@ -161,7 +161,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _detailBtn = Toggle("Details", "Details pane (Ctrl+Shift+D)");
         _detailBtn.IsChecked = _settings.ShowDetail;
         _detailBtn.Click += (_, _) => ToggleDetail(_detailBtn.IsChecked == true);
-        _format = new ComboBox { Width = 170, FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center };
+        _format = new ComboBox { Width = 150, FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center };
         ToolTip.SetTip(_format, "Log format");
         _format.SelectionChanged += (_, _) =>
         {
@@ -169,7 +169,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         };
         RebuildFormatItems();
         var theme = ToolButton("◐", "Toggle dark mode", CycleTheme);
-        var help = ToolButton("?", "Keyboard shortcuts (F1)", () => Run(() => Dialogs.Help(this)));
+        var help = ToolButton("?", "Keyboard shortcuts", () => Run(() => Dialogs.Help(this)));
 
         var toolbar = new DockPanel { Margin = new Thickness(8, 6) };
         var leftTools = new StackPanel
@@ -183,7 +183,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 Sep(),
             },
         };
-        var rightTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { _followBtn, _histBtn, _detailBtn, _format, theme, help } };
+        var clearBtn = ToolButton("Clear", "Hide everything so far (Ctrl+K)", ClearSoFar);
+        var patternsBtn = ToolButton("Patterns", "Group messages by pattern (Ctrl+Shift+A)", TogglePatterns);
+        var rightTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { patternsBtn, clearBtn, _followBtn, _histBtn, _detailBtn, _format, theme, help } };
         DockPanel.SetDock(leftTools, Dock.Left);
         DockPanel.SetDock(rightTools, Dock.Right);
         toolbar.Children.Add(leftTools);
@@ -193,7 +195,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
         // --------------------------------------------------------------- menu
         _recentMenu = new MenuItem { Header = "Open _recent" };
-        var menu = new Menu
+        var menu = _mainMenu = new Menu
         {
             Items =
             {
@@ -205,6 +207,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("_Open…", () => Run(() => PickAndOpen(false)), new KeyGesture(Key.O, KeyModifiers.Control)),
                         Item("Open and _merge…", () => Run(() => PickAndOpen(true)), new KeyGesture(Key.O, KeyModifiers.Control | KeyModifiers.Shift)),
                         _recentMenu,
+                        new Separator(),
+                        Item("Open _workspace…", () => Run(PickOpenWorkspace)),
+                        Item("_Save workspace…", () => Run(PickSaveWorkspace), new KeyGesture(Key.S, KeyModifiers.Control | KeyModifiers.Alt)),
                         new Separator(),
                         Item("_Export view…", () => Run(Export), new KeyGesture(Key.E, KeyModifiers.Control)),
                         Item("Reopen with _encoding…", () => Run(ChooseEncoding)),
@@ -227,6 +232,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Next bookmark", () => NextBookmark(1), new KeyGesture(Key.F2)),
                         Item("Previous bookmark", () => NextBookmark(-1), new KeyGesture(Key.F2, KeyModifiers.Shift)),
                         Item("Clear all filters", ClearFilters),
+                        Item("C_lear (hide everything so far)", ClearSoFar, new KeyGesture(Key.K, KeyModifiers.Control)),
                     },
                 },
                 new MenuItem
@@ -247,6 +253,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Check("Details on the right", () => DockRight, () => SetDetailDock(!DockRight)),
                         TimeMenu(new MenuItem { Header = "Time _column" }),
                         new Separator(),
+                        Check("_Patterns", () => _patternsShown, TogglePatterns, new KeyGesture(Key.A, KeyModifiers.Control | KeyModifiers.Shift)),
+                        GroupMenu(),
+                        Check("Fold framework frames", () => _settings.FoldFrames, () => { SetDisplay(() => _settings.FoldFrames = !_settings.FoldFrames); UpdateDetail(); }),
+                        new Separator(),
                         Item("Next tab", () => CycleTab(1), new KeyGesture(Key.Tab, KeyModifiers.Control)),
                     },
                 },
@@ -255,7 +265,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                     Header = "_Help",
                     Items =
                     {
-                        Item("_Keyboard shortcuts", () => Run(() => Dialogs.Help(this)), new KeyGesture(Key.F1)),
+                        Item("_Command palette", OpenPalette, new KeyGesture(Key.P, KeyModifiers.Control | KeyModifiers.Shift)),
+                        Item("_Keyboard shortcuts", () => Run(() => Dialogs.Help(this))),
                         Item("_About", () => Run(() => Dialogs.Message(this, "About UltraLogViewer",
                             $"UltraLogViewer {typeof(MainWindow).Assembly.GetName().Version?.ToString(3)}\nA fast viewer for large log files, built with Avalonia and .NET {Environment.Version}."))),
                     },
@@ -310,8 +321,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 Toast("Entry copied");
             }
         });
-        var detailHead = new DockPanel { Children = { copyEntry, _detailBar } };
+        _unfoldBtn.Click += (_, _) => UnfoldFocused();
+        var detailHead = new DockPanel { Children = { copyEntry, _unfoldBtn, _detailBar } };
         DockPanel.SetDock(copyEntry, Dock.Right);
+        DockPanel.SetDock(_unfoldBtn, Dock.Right);
         ScrollViewer.SetVerticalScrollBarVisibility(_detail, ScrollBarVisibility.Disabled);
         var detailBody = new ScrollViewer
         {
@@ -336,7 +349,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _center.Children.Add(_hist);
         _center.Children.Add(_histSplitter);
         _center.Children.Add(_work);
-        var gridHost = new DockPanel { Children = { _contextBanner, _grid } };
+        var gridHost = new DockPanel { Children = { _contextBanner, BuildGridArea() } };
         DockPanel.SetDock(_contextBanner, Dock.Top);
         _work.Children.Add(gridHost);
         _work.Children.Add(_detailSplitter);
@@ -395,7 +408,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _statusEnc.Click += (_, _) => Run(ChooseEncoding);
         _progress = new ProgressBar { Width = 140, Minimum = 0, Maximum = 1, IsVisible = false, VerticalAlignment = VerticalAlignment.Center, MinHeight = 4 };
         var status = new DockPanel { Margin = new Thickness(10, 3), LastChildFill = false };
-        var sl = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16, Children = { _statusLeft, _statusSel } };
+        _statusCleared.Click += (_, _) => Unclear();
+        ToolTip.SetTip(_statusCleared, "Show the entries hidden by Clear");
+        var sl = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16, Children = { _statusLeft, _statusCleared, _statusSel } };
         var sr = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, Children = { _statusBusy, _progress, _statusFormat, _statusEnc, _statusLive } };
         DockPanel.SetDock(sl, Dock.Left);
         DockPanel.SetDock(sr, Dock.Right);
@@ -547,6 +562,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Opacity = 0.7,
                     },
                     new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center, Children = { openBtn, mergeBtn } },
+                    _recentWsTitle,
+                    _recentWsList,
                     new TextBlock { Text = "RECENT", Classes = { "h3" }, Margin = new Thickness(0, 12, 0, 0) },
                     _recentList,
                 },
@@ -556,6 +573,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void RebuildRecent()
     {
+        RebuildRecentWorkspaces();
         _recentList.Children.Clear();
         foreach (var p in _settings.Recent.Take(8))
         {
@@ -576,6 +594,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private void RebuildRecentMenu()
     {
         _recentMenu.Items.Clear();
+        foreach (var w in _settings.RecentWorkspaces)
+            _recentMenu.Items.Add(Item(w.Replace("_", "__"), () => Run(() => OpenWorkspaceAsync(w))));
+        if (_settings.RecentWorkspaces.Count > 0) _recentMenu.Items.Add(new Separator());
         foreach (var p in _settings.Recent)
             _recentMenu.Items.Add(Item(p.Replace("_", "__"), () => Run(() => OpenPaths([p], false))));
         if (_settings.Recent.Count == 0) _recentMenu.Items.Add(new MenuItem { Header = "(empty)", IsEnabled = false });
@@ -590,7 +611,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _welcome.IsVisible = tab is null;
         _center.IsVisible = tab is not null;
         if (tab is null) RebuildRecent();
-        Title = tab is null ? "UltraLogViewer" : $"{tab.Title} — UltraLogViewer";
+        UpdateTitle();
+        if (_patternsShown) ShowPatterns(false);
         _search.Text = tab?.SearchPattern.Text ?? "";
         if (tab is not null)
         {
@@ -699,10 +721,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
     }
 
-    private async Task<DocumentTab?> OpenTab(string[] paths, string encoding, DocumentTab? replacing)
+    private async Task<DocumentTab?> OpenTab(string[] paths, string encoding, DocumentTab? replacing, Action<DocumentTab>? init = null)
     {
         var doc = new LogDocument(paths.Length == 1 ? Path.GetFileName(paths[0]) : "Merged");
         var tab = new DocumentTab(paths, doc) { Encoding = encoding, BusyLabel = "Indexing", BusyProgress = 0 };
+        init?.Invoke(tab);
         if (replacing is not null)
         {
             tab.Filter = replacing.Filter.Clone();
@@ -799,8 +822,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _refreshing.Add(tab);
         try
         {
+            var before = tab.Info.ViewCount;
             if (!await tab.Doc.RefreshAsync() || !_tabs.Contains(tab)) return;
             tab.Info = tab.Doc.Info();
+            OnRowsAppended(tab, before, tab.Info.ViewCount);
             tab.StaleViews = true;
             UpdateBookmarkRows(tab);
             if (DateTime.UtcNow - tab.StatsTime > TimeSpan.FromSeconds(10)) ScheduleFieldStats(tab);
@@ -890,6 +915,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         if (!applied || !_tabs.Contains(tab)) return;
         tab.Info = tab.Doc.Info();
+        tab.NewRows = 0;
         var row = focusKey is null ? null : tab.Doc.RowForKey(focusKey);
         tab.Focus = tab.Anchor = row ?? Math.Clamp(tab.Focus, 0, Math.Max(0, tab.Info.ViewCount - 1));
         UpdateBookmarkRows(tab);
@@ -899,6 +925,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _sidebar.Render(tab);
         UpdateStatus();
         UpdateDetail();
+        UpdatePill();
+        RefreshChecks();
         ScheduleFieldStats(tab);
         if (tab.SearchPattern.Text.Length > 0) await RunSearch(false);
         await RefreshOverviewAsync();
@@ -1041,6 +1069,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.Follow = on;
         _followBtn.IsChecked = on;
         if (on) _grid.Select(Math.Max(0, tab.Info.ViewCount - 1));
+        UpdatePill();
     }
 
     // ============================================================= bookmarks
@@ -1465,6 +1494,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     public void TopRowChanged()
     {
         if (_active is { } t) _followBtn.IsChecked = t.Follow;
+        if (_newPill.IsVisible) UpdatePill();
         UpdateViewport();
         if (_contextBanner.IsVisible) UpdateContextBanner();
         if (_detail.Text is null or "") UpdateDetail();
@@ -1525,7 +1555,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
             case Key.H when ctrl && shift: ToggleHistogram(!_settings.ShowHistogram); break;
             case Key.D when ctrl && shift: ToggleDetail(!_settings.ShowDetail); break;
             case Key.Z when e.KeyModifiers == KeyModifiers.Alt: SetDisplay(() => _settings.Wrap = !_settings.Wrap); break;
-            case Key.F1: Run(() => Dialogs.Help(this)); break;
+            case Key.F1: OpenPalette(); break;
+            case Key.P when ctrl && shift: OpenPalette(); break;
+            case Key.A when ctrl && shift: TogglePatterns(); break;
+            case Key.K when ctrl && !shift: ClearSoFar(); break;
+            case Key.S when ctrl && e.KeyModifiers.HasFlag(KeyModifiers.Alt): Run(PickSaveWorkspace); break;
             case Key.F2: NextBookmark(shift ? -1 : 1); break;
             case Key.F3: Run(() => NextHit(shift ? -1 : 1)); break;
             case Key.G when ctrl && shift: Run(() => NextHit(-1)); break;
@@ -1549,6 +1583,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (!_settings.ShowDetail) return;
         var tab = _active;
         var gen = ++_detailGen;
+        if (UpdatePatternDetail()) return;
         if (tab is null || tab.Info.ViewCount == 0)
         {
             _detail.Text = "";
@@ -1566,10 +1601,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
             if (row.Time is long t) parts.Add(Timestamps.Format(t));
             if (row.Level != Level.None) parts.Add(LevelNames.Labels[(int)row.Level]);
             if (other?.Time is long a && row.Time is long b) parts.Add($"Δ selection {Timestamps.FormatDuration(Math.Abs(b - a))}");
+            if (row.Repeat > 1) parts.Add($"Repeated {row.Repeat:N0} times");
             if (tab.Bookmarks.TryGetValue(row.Key, out var bm)) parts.Add(bm.Note.Length > 0 ? $"🔖 {bm.Note}" : "🔖 bookmarked");
             _detailBar.Text = string.Join("   ·   ", parts);
             RenderDetailFields(tab, row);
-            _detail.Text = Pretty.Entry(row.Text);
+            _detail.Text = FoldDetail(tab, row, Pretty.Entry(row.Text));
         });
     }
 
@@ -1582,12 +1618,15 @@ public sealed partial class MainWindow : Window, ILogGridHost
             _statusSel.Text = _statusFormat.Text = _statusLive.Text = _statusBusy.Text = "";
             _statusEnc.IsVisible = false;
             _progress.IsVisible = false;
+            UpdateClearedStatus(null);
             return;
         }
         var i = tab.Info;
         _statusLeft.Text = tab.Doc.IgnoreFilter ? $"All {i.Total:N0} entries (filters ignored)"
             : i.ViewCount == i.Total && !tab.HasCustomFilter ? $"{i.Total:N0} entries"
             : $"{i.ViewCount:N0} of {i.Total:N0} entries (filtered)";
+        if (!tab.Doc.IgnoreFilter && tab.Filter.Grouped) _statusLeft.Text += " · grouped";
+        UpdateClearedStatus(tab);
         var n = tab.SelectionEnd - tab.SelectionStart + 1;
         _statusSel.Text = i.ViewCount == 0 ? "" : n > 1 ? $"{n:N0} selected" : $"Row {tab.Focus + 1:N0}";
         var src = i.Sources.FirstOrDefault();

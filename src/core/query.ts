@@ -170,6 +170,11 @@ export function fieldToken(field: string, value: string): string {
 
 /** Matcher for a filter rule (exact rules compare the trimmed value). */
 export function ruleMatcher(r: FilterRule): Matcher {
+  // Pattern rules are tested against the entry's message template (ordinal equality).
+  if (r.patternMatch) {
+    const tpl = r.text;
+    return (t) => t === tpl;
+  }
   if (!r.exact) return compileMatcher(r);
   const needle = r.text.trim();
   if (r.caseSensitive) return (t) => t.trim() === needle;

@@ -1,3 +1,4 @@
+using Avalonia;
 using System.Globalization;
 using System.Text;
 using Avalonia.Controls;
@@ -390,6 +391,156 @@ public sealed class UiTests : IDisposable
         w.SetDetailDockForTest(false);
         await Until(() => Math.Abs(grid.Bounds.Width - before) < 1);
         w.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Patterns_repeats_folding_clear_palette_and_workspaces()
+    {
+        var sb = new StringBuilder();
+        var t0 = new DateTime(2024, 3, 1, 10, 0, 0);
+        string T(int s) => t0.AddSeconds(s).ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
+        var n = 0;
+        for (var i = 0; i < 40; i++)
+        {
+            sb.Append($"{T(n++)} [main] INFO  com.shop.Api - Handled request {i} for 9f1c2e7a-1b2c-4d5e-8f90-1234567890ab in {i * 3}ms\n");
+            if (i % 10 == 0)
+                for (var k = 0; k < 4; k++) sb.Append($"{T(n++)} [main] WARN  com.shop.Cache - Cache miss for key user:7\n");
+            if (i % 13 == 5)
+            {
+                sb.Append($"{T(n++)} [main] ERROR com.shop.PaymentService - Payment {i} failed\n");
+                sb.Append("java.lang.IllegalStateException: boom\n\tat com.shop.PaymentService.charge(PaymentService.java:41)\n");
+                sb.Append("\tat java.base/java.lang.reflect.Method.invoke(Method.java:580)\n\tat org.springframework.aop.Proxy.invoke(Proxy.java:12)\n\tat org.springframework.web.Servlet.service(Servlet.java:9)\n");
+                sb.Append("\tat com.shop.Api.handle(Api.java:120)\n");
+            }
+        }
+        var path = Path.Combine(_dir, "workflow.log");
+        File.WriteAllText(path, sb.ToString());
+        var (w, settings) = NewWindow();
+        var tab = await Open(w, path);
+        var grid = w.GridForTest;
+        await Until(() => grid.GetCached(5) is not null);
+
+        // patterns view: the request template is the top one; Enter keeps only it
+        w.TogglePatternsForTest();
+        await Until(() => w.PatternsForTest.Data is not null);
+        var top = w.PatternsForTest.Data!.Patterns[0];
+        Assert.Equal(("Handled request <num> for <guid> in <num>", 40), (top.Template, top.Count));
+        Assert.Contains(w.PatternsForTest.Data.Patterns, p => p.Template == "Cache miss for key user:<num>" && p.Count == 16);
+        Screenshot(w, "patterns.png");
+        w.PatternsForTest.Focus();
+        w.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+        await Until(() => !w.PatternsShownForTest && tab.Info.ViewCount == 40 && tab.BusyProgress is null);
+        Assert.True(tab.Filter.Rules.Single().PatternMatch);
+        tab.Filter.Rules.Clear();
+        await w.ApplyFilterAsync(tab);
+
+        // group identical repeats into one row with a count
+        w.SetGroupRepeatsForTest("exact");
+        await Until(() => tab.Info.ViewCount == tab.Info.Total - 12 && tab.BusyProgress is null);
+        await Until(() => grid.GetCached(1)?.Repeat == 4);
+        Screenshot(w, "group-repeats.png");
+        w.SetGroupRepeatsForTest("off");
+        await Until(() => tab.Info.ViewCount == tab.Info.Total && tab.BusyProgress is null);
+
+        // framework frames fold in the inline expansion and the details pane
+        var errRow = tab.Doc.GetRows(0, tab.Info.ViewCount).First(r => r.Level == Level.Error).Row;
+        grid.Select(errRow);
+        w.LogView.Focus();
+        w.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
+        await Until(() => grid.ExpansionForTest(errRow).Contains("… 3 framework frames"));
+        Assert.Contains("com.shop.Api.handle", grid.ExpansionForTest(errRow));
+        await Until(() => grid.BoxForTest(errRow) is { ExpTop: > 0 });
+        Screenshot(w, "folded-frames.png");
+
+        // Ctrl+click on the GUID searches for it
+        var box = grid.BoxForTest(0)!.Value;
+        Point? guidAt = null;
+        for (var x = grid.MessageXForTest; x < grid.Bounds.Width && guidAt is null; x += 4)
+            if (grid.TokenAtForTest(new Point(x, box.Y + 10)) is { } tk && tk.StartsWith("9f1c2e7a")) guidAt = new Point(x, box.Y + 10);
+        Assert.NotNull(guidAt);
+        var wp = grid.TranslatePoint(guidAt!.Value, w)!.Value;
+        w.MouseDown(wp, MouseButton.Left, RawInputModifiers.Control);
+        w.MouseUp(wp, MouseButton.Left, RawInputModifiers.Control);
+        await Until(() => tab.SearchResult is { Total: 40 });
+        Assert.Equal("9f1c2e7a-1b2c-4d5e-8f90-1234567890ab", tab.SearchPattern.Text);
+
+        // command palette runs a menu action
+        w.OpenPaletteForTest();
+        await Until(() => w.PaletteWindow is { IsVisible: true });
+        var palette = w.PaletteWindow!;
+        var paletteBox = palette.GetVisualDescendants().OfType<TextBox>().First();
+        paletteBox.Text = "comfortable";
+        Dispatcher.UIThread.RunJobs();
+        Screenshot(palette, "command-palette.png");
+        palette.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+        await Until(() => settings.Comfortable);
+
+        // workspace round trip
+        tab.Filter.GroupRepeats = "pattern";
+        await w.ApplyFilterAsync(tab);
+        settings.Highlights.Add(new HighlightRule { Text = "boom", Color = "#2B8A3E" });
+        w.ToggleBookmark(grid.GetCached(0) ?? tab.Doc.GetRows(0, 1)[0]);
+        var ws = Path.Combine(_dir, "ws", "team.ulvw");
+        Directory.CreateDirectory(Path.GetDirectoryName(ws)!);
+        await w.SaveWorkspaceAsync(ws);
+        Assert.Contains("\"relPaths\"", File.ReadAllText(ws));
+        Assert.Contains("../workflow.log", File.ReadAllText(ws));
+        w.CloseAllTabsForTest();
+        settings.Highlights.Clear();
+        settings.Bookmarks.Clear();
+        await w.OpenWorkspaceAsync(ws);
+        var back = w.ActiveTab!;
+        await Until(() => back.Ready && back.BusyProgress is null);
+        Assert.Equal("pattern", back.Filter.GroupRepeats);
+        Assert.Contains(settings.Highlights, h => h.Text == "boom");
+        Assert.Single(back.Bookmarks);
+        Assert.Equal("team.ulvw — UltraLogViewer", w.Title);
+        Assert.Equal("team.ulvw", Path.GetFileName(settings.RecentWorkspaces[0]));
+
+        // new lines while not following show a pill; clicking it follows
+        back.Filter.GroupRepeats = "off";
+        await w.ApplyFilterAsync(back);
+        grid.Select(0);
+        Assert.False(back.Follow);
+        var before = back.Info.ViewCount;
+        File.AppendAllText(path, $"{T(n++)} [main] INFO  com.shop.Api - Late 1\n{T(n++)} [main] INFO  com.shop.Api - Late 2\n");
+        await Until(() => back.Info.ViewCount == before + 2);
+        await Until(() => w.NewPillForTest.IsVisible);
+        Assert.Equal("↓ 2 new", w.NewPillForTest.Content);
+        Screenshot(w, "new-lines-pill.png");
+        w.NewPillForTest.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        Assert.True(back.Follow);
+        Assert.False(w.NewPillForTest.IsVisible);
+
+        // clear hides everything so far; later lines still show up
+        w.ClearSoFarForTest();
+        await Until(() => back.Info.ViewCount == 0 && back.BusyProgress is null);
+        File.AppendAllText(path, $"{T(n++)} [main] INFO  com.shop.Api - After clear\n");
+        await Until(() => back.Info.ViewCount == 1);
+        w.Close();
+    }
+
+    [Fact]
+    public void Palette_ranks_prefix_then_word_starts()
+    {
+        string[] labels = ["View › Wrap long messages", "Edit › Find", "View › Time column › Show in UTC", "File › Open workspace…", "View › Details pane"];
+        Assert.Equal(["View › Wrap long messages"], MainWindow.RankPalette(labels, x => x, "wrap"));
+        Assert.Equal(["View › Time column › Show in UTC", "Edit › Find"], MainWindow.RankPalette(labels, x => x, "in"));
+        Assert.Equal(["File › Open workspace…"], MainWindow.RankPalette(labels, x => x, "op wo"));
+        Assert.Equal(5, MainWindow.RankPalette(labels, x => x, "").Count);
+    }
+
+    [Fact]
+    public void Workspace_paths_fall_back_to_relative()
+    {
+        var t = new WorkspaceTab { Paths = ["/old/place/a.log", "/old/place/b.log"], RelPaths = ["logs/a.log", "logs/b.log"] };
+        var dir = Path.Combine(Path.GetTempPath(), "wsdir");
+        var a = Path.GetFullPath(Path.Combine(dir, "logs/a.log"));
+        Assert.Equal([a], Workspace.Resolve(t, dir, p => p == a));
+        Assert.Equal("logs/a.log", Workspace.Relative(a, dir));
+        var json = Workspace.Serialize(new WorkspaceFile { Tabs = [t] });
+        Assert.Equal("logs/b.log", Workspace.Deserialize(json).Tabs[0].RelPaths[1]);
+        Assert.DoesNotContain("isTrivial", json);
     }
 
     [Fact]

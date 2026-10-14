@@ -1,13 +1,16 @@
 import { fieldToken, splitToken, tokenAt, validatePattern } from '../core/query';
-import { ColumnDef, CustomFormat, DocInfo, FilterRule, Level, LEVEL_NAMES, RowData, TextPattern } from '../core/types';
+import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
 import { DetailView } from './detail';
 import { Grid } from './grid';
 import { HistogramView } from './histogram';
+import { openPalette } from './palette';
+import { PatternsView } from './patternsView';
 import { Sidebar } from './sidebar';
 import type { TimeMode } from '../core/timestamp';
-import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, Settings, Tab, uid, viewSettings } from './state';
+import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, HighlightRule, Settings, Tab, uid, viewSettings } from './state';
+import { baseName, dirName, parseWorkspace, resolvePath, resolveWorkspace, serializeWorkspace } from './workspace';
 import { $, ask, contextMenu, debounce, esc, fmtBytes, fmtNum, h, MenuItem, modal, toast } from './util';
 
 let settings: Settings = {};
@@ -41,11 +44,17 @@ const grid = new Grid($('#grid'), {
   },
   onTopRowChange: () => {
     updateHistogramViewport();
+    // scrolled to the last row: the new-lines pill has done its job
+    if (active?.follow && active.newRows) {
+      active.newRows = 0;
+      renderPill();
+    }
     renderStatus();
   },
   onKey: gridKey,
   toggleBookmark: (row) => void toggleBookmark(row),
   copyRows: (a, b) => void copyRows(a, b),
+  onTokenClick: (row, text) => searchToken(row, text),
 });
 
 const sidebar = new Sidebar($('#sidebar'), {
@@ -64,6 +73,7 @@ const sidebar = new Sidebar($('#sidebar'), {
   toggleColumn: (key) => setColumnShown(key, !isColumnShown(key)),
   filterByValue: (key, value, mode) => active && filterByValue(active, key, value, mode),
   rescanFields: () => active && void refreshFields(active),
+  clearAllFilters: () => active && clearAllFilters(active),
 });
 
 const detail = new DetailView(
@@ -76,7 +86,27 @@ const detail = new DetailView(
   (e, row, key) => fieldMenu(e, row, key),
   () => viewSettings(settings).detailDock,
   () => setView('detailDock', viewSettings(settings).detailDock === 'right' ? 'bottom' : 'right'),
+  () => viewSettings(settings),
+  (key) => {
+    if (!active) return;
+    grid.unfold(key);
+    active.unfolded.add(key);
+    void updateDetail();
+  },
 );
+
+const patternsView = new PatternsView($('#patterns'), {
+  onlyPattern: (p) => active && addPatternRule(active, p, 'include'),
+  excludePattern: (p) => active && addPatternRule(active, p, 'exclude'),
+  copy: (text, what) => copyText(text, what),
+  rescan: (all) => active && void refreshPatterns(active, all),
+  selectionChanged: () => void updateDetail(),
+  close: () => {
+    if (!active) return;
+    setPatternsShown(active, false);
+    $('#grid').focus();
+  },
+});
 
 const histogram = new HistogramView($('#histogram'), {
   jumpToTime: async (t) => {
@@ -102,29 +132,34 @@ function placeholderInfo(id: number, title: string): DocInfo {
   return { id, title, sources: [], columns: [], total: 0, viewCount: 0, levelCounts: [0, 0, 0, 0, 0, 0, 0], indexing: true, progress: 0, timeMin: null, timeMax: null, merged: false, ignoreFilter: false };
 }
 
+/** Opens one tab over the given files (several = merged timeline) without activating it. */
+async function openTab(g: string[], opts: { format?: string; encoding?: string } = {}): Promise<Tab> {
+  const id = await engine.open(g, { customFormats: settings.customFormats, format: opts.format || undefined, encoding: (opts.encoding || undefined) as 'auto' | undefined });
+  const title = g.length === 1 ? g[0].split(/[\\/]/).pop()! : `${g[0].split(/[\\/]/).pop()} + ${g.length - 1}`;
+  const tab: Tab = {
+    id,
+    paths: g,
+    info: placeholderInfo(id, title),
+    filter: defaultFilter(),
+    search: { pattern: currentPattern(), result: null, current: 0 },
+    bookmarks: new Map(),
+    anchor: 0,
+    focus: 0,
+    topRow: 0,
+    follow: false,
+    formatId: opts.format ?? '',
+    encoding: opts.encoding && opts.encoding !== 'auto' ? opts.encoding : undefined,
+    expanded: new Set(),
+    unfolded: new Set(),
+  };
+  tabs.push(tab);
+  return tab;
+}
+
 async function openPaths(paths: string[], merge: boolean) {
   if (!paths.length) return;
   const groups = merge ? [paths] : paths.map((p) => [p]);
-  for (const g of groups) {
-    const id = await engine.open(g, { customFormats: settings.customFormats });
-    const title = g.length === 1 ? g[0].split(/[\\/]/).pop()! : `${g[0].split(/[\\/]/).pop()} + ${g.length - 1}`;
-    const tab: Tab = {
-      id,
-      paths: g,
-      info: placeholderInfo(id, title),
-      filter: defaultFilter(),
-      search: { pattern: currentPattern(), result: null, current: 0 },
-      bookmarks: new Map(),
-      anchor: 0,
-      focus: 0,
-      topRow: 0,
-      follow: false,
-      formatId: '',
-      expanded: new Set(),
-    };
-    tabs.push(tab);
-    activate(tab);
-  }
+  for (const g of groups) activate(await openTab(g));
   void ulv().addRecent(paths);
   settings.recent = [...paths, ...(settings.recent ?? []).filter((p) => !paths.includes(p))].slice(0, 15);
 }
@@ -137,6 +172,9 @@ function activate(tab: Tab | null) {
   renderTabs();
   sidebar.render(tab);
   $('#empty').classList.toggle('hidden', !!tab);
+  applyPatternsLayout();
+  renderPill();
+  syncMenu();
   renderBanner();
   ac.close();
   if (tab) {
@@ -158,6 +196,8 @@ async function closeTab(tab: Tab) {
   tabs.splice(i, 1);
   clearTimeout(statsTimers.get(tab));
   statsTimers.delete(tab);
+  clearTimeout(patternTimers.get(tab));
+  patternTimers.delete(tab);
   await engine.close(tab.id);
   if (active === tab) activate(tabs[Math.min(i, tabs.length - 1)] ?? null);
   else renderTabs();
@@ -184,6 +224,12 @@ function renderRecent() {
   const el = $('#recent');
   el.innerHTML = '';
   const recent = settings.recent ?? [];
+  const workspaces = settings.recentWorkspaces ?? [];
+  if (workspaces.length) {
+    el.append(h('div', { class: 'muted', style: 'margin-bottom:4px' }, 'Workspaces'));
+    for (const p of workspaces.slice(0, 5)) el.append(h('a', { class: 'ws', title: p, onclick: () => void openWorkspace(p) }, p));
+    if (recent.length) el.append(h('div', { style: 'height:10px' }));
+  }
   if (!recent.length) return;
   el.append(h('div', { class: 'muted', style: 'margin-bottom:4px' }, 'Recent'));
   for (const p of recent.slice(0, 8)) el.append(h('a', { title: p, onclick: () => void openPaths([p], false) }, p));
@@ -209,12 +255,19 @@ window.ulv.onEvent((raw) => {
     return;
   }
   const wasIndexing = tab.info.indexing;
+  const before = tab.info.viewCount;
   tab.info = ev.info;
   if (wasIndexing && !ev.info.indexing) void onDocReady(tab);
+  // live tail: rows appended to the view
+  const appended = !ev.reset && !wasIndexing && !ev.info.indexing ? ev.info.viewCount - before : 0;
+  if (appended > 0 && !tab.follow) tab.newRows = (tab.newRows ?? 0) + appended;
+  if (tab.showPatterns && !ev.info.indexing && !wasIndexing && (ev.reset || Date.now() - (tab.patternsAt ?? 0) > 10_000) && !patternTimers.has(tab)) refreshPatternsSoon(tab);
   if (tab !== active) {
     renderTabs();
     return;
   }
+  if (appended > 0 && document.visibilityState === 'visible') grid.flash(before, ev.info.viewCount);
+  renderPill();
   if (ev.reset) grid.renderHeader();
   if (tab.follow) tab.topRow = Number.MAX_SAFE_INTEGER;
   grid.invalidate();
@@ -233,6 +286,7 @@ window.ulv.onEvent((raw) => {
 
 async function onDocReady(tab: Tab) {
   tab.progress = undefined;
+  if (tab.pending) await applyPending(tab);
   if (tab.paths.length === 1) {
     const saved = settings.bookmarks?.[tab.paths[0]] ?? [];
     for (const s of saved) {
@@ -244,7 +298,7 @@ async function onDocReady(tab: Tab) {
     if (saved.length) await resolveBookmarkRows(tab);
   }
   if (!isDefaultFilter(tab)) await applyFilter(tab);
-  if (tab.search.pattern.text) void runSearch(tab, false);
+  if (tab.search.pattern.text) void runSearch(tab, false, tab.search.pattern);
   refreshFieldsSoon(tab);
   if (tab === active) {
     sidebar.render(tab);
@@ -255,7 +309,39 @@ async function onDocReady(tab: Tab) {
 // -------------------------------------------------------------------- filter
 
 const isDefaultFilter = (t: Tab) =>
-  t.filter.levels.every(Boolean) && !t.filter.rules.length && !t.filter.query && t.filter.timeFrom == null && t.filter.timeTo == null && !t.filter.bookmarksOnly;
+  t.filter.levels.every(Boolean) &&
+  !t.filter.rules.length &&
+  !t.filter.query &&
+  t.filter.timeFrom == null &&
+  t.filter.timeTo == null &&
+  !t.filter.bookmarksOnly &&
+  (t.filter.groupRepeats ?? 'off') === 'off' &&
+  t.filter.clearedBefore == null;
+
+/** "Clear all filters": levels, rules, query, time range, bookmarks-only, context, group repeats and Clear. */
+function clearAllFilters(t: Tab) {
+  t.filter = { ...defaultFilter(), bookmarks: t.filter.bookmarks };
+  if (t === active) quickInput.value = '';
+  void applyFilter(t);
+}
+
+/** Clear (Ctrl+K): hides every entry so far; only lines appended from now on are shown. */
+function clearView(t: Tab) {
+  if (t.info.indexing) return;
+  t.filter.clearedBefore = t.info.sources.map((s) => s.entries);
+  void applyFilter(t);
+}
+
+function setGroupRepeats(t: Tab, mode: NonNullable<FilterSpec['groupRepeats']>) {
+  if ((t.filter.groupRepeats ?? 'off') === mode) return;
+  t.filter.groupRepeats = mode;
+  void applyFilter(t);
+}
+
+/** Tells main what the menu should show for the active tab (Group repeats, Patterns). */
+function syncMenu() {
+  void ulv().setMenuState({ groupRepeats: active?.filter.groupRepeats ?? 'off', patterns: !!active?.showPatterns });
+}
 
 async function applyFilter(tab: Tab) {
   const focusKey = grid.getCached(tab.focus)?.key;
@@ -277,11 +363,16 @@ async function applyFilter(tab: Tab) {
   if (!info) return; // superseded by a newer filter
   tab.info = info;
   tab.progress = undefined;
+  tab.newRows = 0;
+  if (tab.showPatterns) refreshPatternsSoon(tab);
   const row = focusKey ? await engine.rowForKey(tab.id, focusKey, wasContext) : null;
   tab.anchor = tab.focus = row ?? Math.min(tab.focus, Math.max(0, info.viewCount - 1));
   await resolveBookmarkRows(tab);
   refreshFieldsSoon(tab);
   if (tab !== active) return;
+  grid.clearFlash();
+  renderPill();
+  syncMenu();
   grid.invalidate();
   grid.reveal(tab.focus, 'center');
   sidebar.render(tab);
@@ -290,6 +381,101 @@ async function applyFilter(tab: Tab) {
   void updateDetail();
   if (tab.search.pattern.text) void runSearch(tab, false);
 }
+
+// ------------------------------------------------------------------ patterns
+
+const patternTimers = new Map<Tab, ReturnType<typeof setTimeout>>();
+
+/** Recomputes the patterns after ~300 ms of quiet (a newer run cancels the older one in the engine). */
+function refreshPatternsSoon(t: Tab, ms = 300) {
+  clearTimeout(patternTimers.get(t));
+  patternTimers.set(
+    t,
+    setTimeout(() => {
+      patternTimers.delete(t);
+      void refreshPatterns(t);
+    }, ms),
+  );
+}
+
+async function refreshPatterns(t: Tab, all = false) {
+  if (!tabs.includes(t) || !t.showPatterns) return;
+  if (t.info.indexing) return refreshPatternsSoon(t, 500);
+  t.patternsAt = Date.now();
+  t.patternsBusy = true;
+  if (t === active) patternsView.render(t);
+  const selected = t.patterns?.patterns[t.patternSel ?? -1]?.template;
+  let r;
+  try {
+    r = await engine.patterns(t.id, all ? Math.max(1, t.info.viewCount) : undefined);
+  } catch {
+    return; // closed
+  }
+  if (r.cancelled || !tabs.includes(t)) return;
+  t.patternsBusy = false;
+  t.patterns = r;
+  const keep = selected === undefined ? -1 : r.patterns.findIndex((p) => p.template === selected);
+  t.patternSel = keep >= 0 ? keep : r.patterns.length ? 0 : undefined;
+  if (t !== active) return;
+  patternsView.render(t);
+  void updateDetail();
+}
+
+function setPatternsShown(t: Tab, on: boolean) {
+  if (!!t.showPatterns === on) return;
+  t.showPatterns = on;
+  if (on) {
+    t.patterns = null;
+    refreshPatternsSoon(t);
+  } else {
+    clearTimeout(patternTimers.get(t));
+    patternTimers.delete(t);
+  }
+  if (t !== active) return;
+  applyPatternsLayout();
+  syncMenu();
+  renderToolbar();
+  void updateDetail();
+}
+
+function applyPatternsLayout() {
+  const on = !!active?.showPatterns;
+  $('#patterns').classList.toggle('hidden', !on);
+  $('#grid').classList.toggle('hidden', on);
+  if (on) {
+    patternsView.render(active);
+    $('#patterns').focus();
+  } else if (active) {
+    grid.invalidate(true);
+  }
+}
+
+function addPatternRule(t: Tab, p: PatternStat, mode: FilterRule['mode']) {
+  t.filter.rules.push({ id: uid(), text: p.template, mode, patternMatch: true, regex: false, caseSensitive: true, wholeWord: false, enabled: true });
+  if (mode === 'include') setPatternsShown(t, false);
+  void applyFilter(t);
+  if (mode === 'include') $('#grid').focus();
+}
+
+// --------------------------------------------------------------- live tail
+
+/** The "↓ N new" pill over the grid while rows arrive and follow is off. */
+function renderPill() {
+  const el = $('#newpill');
+  const t = active;
+  const n = t && !t.follow && !t.showPatterns ? t.newRows ?? 0 : 0;
+  el.classList.toggle('hidden', n <= 0);
+  if (n > 0) el.textContent = `↓ ${fmtNum(n)} new`;
+}
+
+$('#newpill').addEventListener('mousedown', (e) => e.preventDefault());
+$('#newpill').onclick = () => {
+  const t = active;
+  if (!t) return;
+  if (!t.follow) toggleFollow();
+  else if (t.info.viewCount) grid.scrollTo(Number.MAX_SAFE_INTEGER);
+  $('#grid').focus();
+};
 
 async function refreshOverview(tab: Tab) {
   if (tab !== active) return;
@@ -335,6 +521,7 @@ async function setContextMode(t: Tab, on: boolean) {
   t.anchor = t.focus = Math.max(0, Math.min(row ?? 0, t.info.viewCount - 1));
   await resolveBookmarkRows(t);
   refreshFieldsSoon(t);
+  if (t.showPatterns) refreshPatternsSoon(t);
   if (t !== active) return;
   renderBanner();
   grid.invalidate();
@@ -593,11 +780,11 @@ function currentPattern(): TextPattern {
   };
 }
 
-async function runSearch(tab: Tab, jump: boolean) {
-  const pattern = currentPattern();
+/** Searches a tab: the search box for the active tab, else the tab's own last pattern. */
+async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab === active ? currentPattern() : tab.search.pattern) {
   tab.search.pattern = pattern;
   const err = pattern.text ? validatePattern(pattern) : null;
-  searchInput.parentElement!.classList.toggle('error', !!err);
+  if (tab === active) searchInput.parentElement!.classList.toggle('error', !!err);
   if (!pattern.text || err) {
     tab.search.result = null;
     grid.refreshPatterns();
@@ -617,6 +804,24 @@ async function runSearch(tab: Tab, jump: boolean) {
   else grid.render();
   renderSearchCount();
   renderStatus();
+}
+
+/** Puts a pattern into the search box and its toggles. */
+function setSearchBox(p: TextPattern) {
+  searchInput.value = p.text;
+  toggles.case.classList.toggle('on', p.caseSensitive);
+  toggles.word.classList.toggle('on', p.wholeWord);
+  toggles.regex.classList.toggle('on', p.regex);
+}
+
+/** Ctrl+click on a token: search for its text from the clicked row on. */
+function searchToken(row: RowData, text: string) {
+  const t = active;
+  if (!t || !text) return;
+  searchInput.value = text;
+  t.anchor = t.focus = row.row;
+  grid.render();
+  void runSearch(t, true);
 }
 
 function stepSearch(dir: 1 | -1) {
@@ -887,6 +1092,118 @@ async function copyRows(a: number, b: number) {
   toast(`Copied ${fmtNum(parts.length)} ${parts.length === 1 ? 'entry' : 'entries'}${b > end ? ` (limited to ${fmtNum(MAX)})` : ''}`);
 }
 
+// ---------------------------------------------------------------- workspaces
+
+function setWorkspaceTitle(file: string | null) {
+  document.title = file ? `${baseName(file)} — UltraLogViewer` : 'UltraLogViewer';
+}
+
+function rememberWorkspace(file: string) {
+  settings.recentWorkspaces = [file, ...(settings.recentWorkspaces ?? []).filter((p) => p !== file)].slice(0, 10);
+  if (!active) renderRecent();
+}
+
+/** Saves every open tab, its filters, search, bookmarks and columns, and the highlight rules. */
+async function saveWorkspace(file?: string | null) {
+  if (!tabs.length) return toast('Open a file first: a workspace saves the open tabs');
+  file ??= await ulv().workspaceSaveDialog(`${(active?.info.title ?? 'logs').replace(/\.(log|txt|gz)$/i, '')}.ulvw`);
+  if (!file) return;
+  const input = tabs.map((t) => {
+    const fmt = formatName(t);
+    return {
+      paths: t.paths,
+      formatId: t.formatId,
+      encoding: t.encoding ?? 'auto',
+      filter: t.filter,
+      search: t === active ? currentPattern() : t.search.pattern,
+      bookmarks: [...t.bookmarks.values()].map((b) => ({ path: t.info.sources[b.source]?.path ?? t.paths[b.source] ?? t.paths[0], line: b.line, note: b.note })),
+      extraColumns: settings.extraColumns?.[fmt] ?? [],
+      columnOrder: settings.columnOrder?.[fmt] ?? [],
+      hiddenColumns: settings.hiddenColumns ?? [],
+    };
+  });
+  const ws = serializeWorkspace(input, active ? tabs.indexOf(active) : 0, settings.highlights ?? [], file);
+  try {
+    await ulv().writeWorkspace(file, JSON.stringify(ws, null, 2));
+  } catch (e) {
+    return toast((e as Error).message, true);
+  }
+  rememberWorkspace(file);
+  setWorkspaceTitle(file);
+  toast(`Workspace saved (${tabs.length} ${tabs.length === 1 ? 'tab' : 'tabs'})`);
+}
+
+/** Opens the tabs of a workspace (next to the open ones) and restores its highlights. */
+async function openWorkspace(file?: string | null) {
+  file ??= await ulv().workspaceOpenDialog();
+  if (!file) return;
+  let ws;
+  try {
+    ws = parseWorkspace<HighlightRule>(await ulv().readWorkspace(file));
+  } catch (e) {
+    return toast(`${baseName(file)}: ${(e as Error).message}`, true);
+  }
+  const dir = dirName(file);
+  const candidates = [...new Set(ws.tabs.flatMap((t) => [...t.paths, ...t.relPaths.map((r) => resolvePath(dir, r))]))];
+  const found = await ulv().filesExist(candidates);
+  const existing = new Set(candidates.filter((_, i) => found[i]));
+  const r = resolveWorkspace(ws, file, (p) => existing.has(p));
+  settings.highlights = r.highlights.map((x) => ({ ...x }));
+  saveSettings();
+  grid.refreshPatterns();
+  const opened: Tab[] = [];
+  for (const wt of r.tabs) {
+    const tab = await openTab(wt.paths, { format: wt.format, encoding: wt.encoding });
+    tab.filter = { ...defaultFilter(), ...wt.filter, bookmarks: [], clearedBefore: null };
+    tab.search.pattern = wt.search;
+    tab.pending = { bookmarks: wt.bookmarks, columns: { extraColumns: wt.extraColumns, columnOrder: wt.columnOrder, hiddenColumns: wt.hiddenColumns } };
+    opened.push(tab);
+  }
+  if (r.missing) toast(`Skipped ${r.missing} missing file(s)`, true);
+  void ulv().addRecentWorkspace(file);
+  rememberWorkspace(file);
+  setWorkspaceTitle(file);
+  const target = opened[r.active];
+  if (target) {
+    setSearchBox(target.search.pattern);
+    activate(target);
+  } else {
+    renderTabs();
+  }
+}
+
+/** Workspace settings that need the opened document (bookmark keys, the format's column settings). */
+async function applyPending(tab: Tab) {
+  const p = tab.pending!;
+  tab.pending = undefined;
+  if (p.columns) {
+    const fmt = formatName(tab);
+    if (p.columns.extraColumns.length) (settings.extraColumns ??= {})[fmt] = [...p.columns.extraColumns];
+    else delete settings.extraColumns?.[fmt];
+    if (p.columns.columnOrder.length) (settings.columnOrder ??= {})[fmt] = [...p.columns.columnOrder];
+    else delete settings.columnOrder?.[fmt];
+    settings.hiddenColumns = [...new Set([...(settings.hiddenColumns ?? []), ...p.columns.hiddenColumns])];
+    if (tab === active) columnsChanged();
+    else saveSettings();
+  }
+  for (const b of p.bookmarks) {
+    const source = Math.max(0, tab.paths.indexOf(b.path));
+    const key = await engine.keyForLine(tab.id, source, b.line);
+    if (!key) continue;
+    const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key, true)) ?? 0, 1);
+    tab.bookmarks.set(key, { key, line: b.line, source, note: b.note, preview: firstLine(rows[0]?.fields.message || rows[0]?.text || '') });
+  }
+  if (p.bookmarks.length) {
+    persistBookmarks(tab);
+    await resolveBookmarkRows(tab);
+  }
+}
+
+async function openCommandPalette() {
+  const items = await ulv().menuItems();
+  openPalette(items, (c) => void ulv().runMenuItem(c.id), ulv().platform === 'darwin');
+}
+
 async function exportView() {
   const t = active;
   if (!t) return;
@@ -907,6 +1224,8 @@ function toggleFollow() {
   const t = active;
   if (!t) return;
   t.follow = !t.follow;
+  if (t.follow) t.newRows = 0;
+  renderPill();
   if (t.follow && t.info.viewCount) {
     grid.select(t.info.viewCount - 1);
     grid.scrollTo(Number.MAX_SAFE_INTEGER);
@@ -973,6 +1292,7 @@ let detailToken = 0;
 async function updateDetail() {
   const t = active;
   if (settings.showDetail === false) return;
+  if (t?.showPatterns) return detail.renderPattern(patternsView.selected(), t.patterns?.scanned ?? 0);
   if (!t || !t.info.viewCount) return detail.render(t, undefined);
   const token = ++detailToken;
   const get = async (r: number) => grid.getCached(r) ?? (await engine.rows(t.id, r, 1))[0];
@@ -998,8 +1318,11 @@ function renderStatus() {
   const parts: string[] = [];
   if (src) parts.push(`<span title="Detected format">${esc(src.format)}</span>`, `<a class="enc" title="Change encoding">${esc(src.encoding)}</a>${src.compressed ? '<span>gzip</span>' : ''}`);
   parts.push(`<span>${fmtBytes(size)}</span>`, `<span>${fmtNum(lines)} lines · ${fmtNum(i.total)} entries</span>`);
+  const grouped = (t.filter.groupRepeats ?? 'off') !== 'off';
   if (t.contextMode) parts.push(`<span title="Show in context: press C or Esc to go back to the filtered view">All <b>${fmtNum(i.viewCount)}</b> entries (filters ignored)</span>`);
-  else if (i.viewCount !== i.total) parts.push(`<span><b>${fmtNum(i.viewCount)}</b> shown</span>`);
+  else if (i.viewCount !== i.total || grouped) parts.push(`<span><b>${fmtNum(i.viewCount)}</b> shown${grouped ? ' · grouped' : ''}</span>`);
+  const cleared = t.filter.clearedBefore?.reduce((n, c) => n + c, 0);
+  if (cleared != null) parts.push(`<span class="cleared">${fmtNum(cleared)} cleared · <a class="show-cleared" title="Show the cleared entries again">Show</a></span>`);
   const sel = Math.abs(t.focus - t.anchor) + 1;
   if (i.viewCount) parts.push(`<span>Row ${fmtNum(t.focus + 1)}${sel > 1 ? ` · ${fmtNum(sel)} selected` : ''}</span>`);
   parts.push('<span class="sp"></span>');
@@ -1011,12 +1334,18 @@ function renderStatus() {
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);
+  el.querySelector('.show-cleared')?.addEventListener('click', () => {
+    if (!active) return;
+    active.filter.clearedBefore = null;
+    void applyFilter(active);
+  });
 }
 
 function renderToolbar() {
   $('#btn-follow').classList.toggle('on', !!active?.follow);
   $('#btn-hist').classList.toggle('on', settings.showHistogram !== false);
   $('#btn-detail').classList.toggle('on', settings.showDetail !== false);
+  $('#btn-patterns').classList.toggle('on', !!active?.showPatterns);
 }
 
 // -------------------------------------------------------------------- layout
@@ -1037,7 +1366,7 @@ function applyLayout() {
 
 // ------------------------------------------------------------ view settings
 
-type ViewKey = 'tintRows' | 'tokenColors' | 'density' | 'wrap' | 'detailDock' | 'timeMode' | 'timeUtc' | 'gapMs';
+type ViewKey = 'tintRows' | 'tokenColors' | 'density' | 'wrap' | 'detailDock' | 'timeMode' | 'timeUtc' | 'gapMs' | 'foldFrames';
 
 /** Changes a display setting, persists it and redraws what it affects. */
 function setView<K extends ViewKey>(key: K, value: Settings[K]) {
@@ -1049,7 +1378,8 @@ function setView<K extends ViewKey>(key: K, value: Settings[K]) {
     else detail.render(null, undefined);
     return;
   }
-  if (key === 'tintRows' || key === 'density' || key === 'wrap') {
+  if (key === 'foldFrames') void updateDetail();
+  if (key === 'tintRows' || key === 'density' || key === 'wrap' || key === 'foldFrames') {
     grid.applyView();
     if (active) grid.reveal(active.focus);
     return;
@@ -1129,6 +1459,7 @@ async function reformat(t: Tab) {
   t.contextMode = t.info.ignoreFilter;
   renderBanner();
   refreshFieldsSoon(t);
+  if (t.showPatterns) refreshPatternsSoon(t);
   grid.setTab(t);
   sidebar.render(t);
   renderStatus();
@@ -1235,6 +1566,8 @@ async function reopen(t: Tab, encoding: string) {
   t.contextMode = false;
   t.fieldStats = null;
   t.expanded = new Set();
+  t.unfolded = new Set();
+  t.patterns = null;
   if (active === t) activate(t);
 }
 
@@ -1260,6 +1593,11 @@ function showHelp() {
     ['Ctrl+W, Ctrl+Tab', 'Close tab, next tab'],
     ['Alt+Z', 'Wrap long messages'],
     ['→ / ←', 'Expand / collapse a multi-line entry'],
+    ['Ctrl+Shift+P, F1', 'Command palette'],
+    ['Ctrl+Shift+A', 'Patterns view'],
+    ['Ctrl+K', 'Clear (hide everything so far)'],
+    ['Ctrl+click a token', 'Search for it'],
+    ['Ctrl+Alt+S', 'Save workspace'],
     ['Timeline: click / drag', 'Jump to time / filter to a time range'],
   ];
   modal((box, close) => {
@@ -1286,6 +1624,8 @@ $('#btn-follow').onclick = toggleFollow;
 $('#btn-hist').onclick = () => toggleLayout('showHistogram');
 $('#btn-detail').onclick = () => toggleLayout('showDetail');
 $('#btn-help').onclick = showHelp;
+$('#btn-patterns').onclick = () => active && setPatternsShown(active, !active.showPatterns);
+$('#btn-clear').onclick = () => active && clearView(active);
 $('#btn-theme').onclick = () => {
   settings.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   saveSettings();
@@ -1349,6 +1689,25 @@ window.ulv.onMenu((cmd, ...args) => {
       return setView('gapMs', viewSettings(settings).gapMs > 0 ? 0 : 10000);
     case 'help':
       return showHelp();
+    case 'palette':
+      return void openCommandPalette();
+    case 'toggle-patterns':
+      return active && setPatternsShown(active, !active.showPatterns);
+    case 'group-repeats':
+      if (active && (args[0] === 'off' || args[0] === 'exact' || args[0] === 'pattern')) setGroupRepeats(active, args[0]);
+      return;
+    case 'toggle-fold':
+      return setView('foldFrames', !viewSettings(settings).foldFrames);
+    case 'clear-view':
+      return active && clearView(active);
+    case 'clear-filters':
+      return active && clearAllFilters(active);
+    case 'open-workspace':
+      return void openWorkspace();
+    case 'open-workspace-path':
+      return void openWorkspace(String(args[0]));
+    case 'save-workspace':
+      return void saveWorkspace();
   }
 });
 
@@ -1364,9 +1723,19 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     const i = tabs.indexOf(active!);
     activate(tabs[(i + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length]);
-  } else if (e.key === 'F1') {
+  } else if (e.key === 'Escape' && active?.showPatterns && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)) {
     e.preventDefault();
-    showHelp();
+    setPatternsShown(active, false);
+    $('#grid').focus();
+  } else if (e.key === 'F1' || (e.code === 'KeyP' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey)) {
+    e.preventDefault();
+    void openCommandPalette();
+  } else if (e.code === 'KeyA' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    if (active) setPatternsShown(active, !active.showPatterns);
+  } else if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    if (active) clearView(active);
   } else if (e.altKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyZ' || e.key === 'z' || e.key === 'Z')) {
     e.preventDefault();
     setView('wrap', !viewSettings(settings).wrap);
@@ -1408,7 +1777,7 @@ async function init() {
   const files = await ulv().startupFiles();
   if (files.length) await openPaths(files, false);
   // test hook: lets automated UI tests drive the app without native dialogs
-  (window as unknown as Record<string, unknown>).__ulv = { openPaths, state: () => ({ tabs, active }) };
+  (window as unknown as Record<string, unknown>).__ulv = { openPaths, saveWorkspace, openWorkspace, state: () => ({ tabs, active }) };
 }
 
 void init();

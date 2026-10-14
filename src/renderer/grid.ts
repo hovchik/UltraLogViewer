@@ -2,12 +2,13 @@
 // engine on demand. Scroll positions are scaled so tens of millions of rows still fit within
 // the browser's maximum element height.
 
+import { fold, FoldLine } from '../core/folding';
 import { compilePattern, matchRanges } from '../core/query';
 import { formatTimeCell, formatGap } from '../core/timestamp';
 import { tokenize } from '../core/tokenizer';
 import type { ColumnDef, RowData } from '../core/types';
 import { engine } from './api';
-import { DENSITY, HighlightRule, Tab, ViewSettings } from './state';
+import { DENSITY, fmtRepeat, HighlightRule, Tab, ViewSettings } from './state';
 import { esc } from './util';
 
 const MAX_PX = 8_000_000;
@@ -15,6 +16,18 @@ const FETCH_MARGIN = 80;
 const GUTTER_W = 74;
 /** Continuation lines shown when a multi-line entry is expanded inline. */
 const MAX_EXPAND = 40;
+/** Appended rows are tinted with the accent colour, fading out over this many ms. */
+const FLASH_MS = 1500;
+const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform);
+/** Ctrl (Cmd on macOS) turns tokens into search links. */
+const linkMod = (e: MouseEvent | KeyboardEvent) => (isMac ? e.metaKey : e.ctrlKey);
+
+/** Lines of an entry's inline expansion (lines 2..), with framework frames folded unless turned off. */
+export function expansionLines(row: RowData, view: ViewSettings, unfolded: Set<string>): FoldLine[] {
+  const lines = row.text.split('\n').slice(1);
+  if (!view.foldFrames || unfolded.has(row.key)) return lines.map((line) => ({ line, folded: 0 }));
+  return fold(lines, view.frameworkPackages);
+}
 
 export interface GridHost {
   highlights(): HighlightRule[];
@@ -35,6 +48,8 @@ export interface GridHost {
   onKey(e: KeyboardEvent): boolean;
   toggleBookmark(row: RowData): void;
   copyRows(from: number, to: number): void;
+  /** Ctrl+click on a token in the message column or an expanded line. */
+  onTokenClick(row: RowData, text: string): void;
 }
 
 /** Text styling layers, lowest first: tokens, then highlight rules, then search hits. */
@@ -67,6 +82,11 @@ export class Grid {
   private relayout = false;
   private bodyWidth = 0;
   private focusTime: { tab: number; gen: number; row: number; time: number | null } | null = null;
+  /** Folded expansion lines per row key (dropped with the row cache). */
+  private foldCache = new Map<string, FoldLine[]>();
+  /** Appended view rows [from, to) and when they arrived, for the fade-out tint. */
+  private flashes: { from: number; to: number; at: number }[] = [];
+  private flashTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(readonly root: HTMLElement, private host: GridHost) {
     this.header = root.querySelector('.grid-header')!;
@@ -90,6 +110,10 @@ export class Grid {
       this.host.onHeaderMenu(e, key);
     });
     this.rowsEl.addEventListener('contextmenu', (e) => this.onContextMenu(e));
+    this.rowsEl.addEventListener('mousemove', (e) => this.hoverToken(e));
+    this.rowsEl.addEventListener('mouseleave', () => this.clearTokenHover());
+    window.addEventListener('keyup', (e) => !linkMod(e) && this.clearTokenHover());
+    window.addEventListener('blur', () => this.clearTokenHover());
     root.addEventListener('keydown', (e) => this.onKey(e));
     new ResizeObserver(() => {
       if (this.body.clientWidth !== this.bodyWidth) {
@@ -115,6 +139,7 @@ export class Grid {
     this.root.classList.toggle('wrap', v.wrap);
     this.root.classList.toggle('tint', v.tintRows);
     this.heights.clear();
+    this.foldCache.clear();
     if (!redraw) return;
     this.syncScroll();
     this.render();
@@ -124,6 +149,8 @@ export class Grid {
 
   setTab(tab: Tab | null) {
     this.tab = tab;
+    this.flashes = [];
+    this.foldCache.clear();
     this.cache.clear();
     this.heights.clear();
     this.gen++;
@@ -139,6 +166,7 @@ export class Grid {
     if (!keepCache) {
       this.cache.clear();
       this.heights.clear();
+      this.foldCache.clear();
       this.gen++;
     }
     this.syncScroll();
@@ -194,10 +222,60 @@ export class Grid {
     return this.topForBottom(this.count - 1);
   }
 
+  /** Expansion lines of a row (folded), cached per row key. */
+  private expandLines(row: RowData): FoldLine[] {
+    const t = this.tab!;
+    const key = `${row.key}${t.unfolded.has(row.key) ? '+' : ''}`;
+    let lines = this.foldCache.get(key);
+    if (!lines) {
+      lines = expansionLines(row, this.host.view(), t.unfolded);
+      if (this.foldCache.size > 2000) this.foldCache.clear();
+      this.foldCache.set(key, lines);
+    }
+    return lines;
+  }
+
+  /** Shows the framework frames of one entry (click on a "… N framework frames" line). */
+  unfold(key: string) {
+    const t = this.tab;
+    if (!t || t.unfolded.has(key)) return;
+    t.unfolded.add(key);
+    this.heights.clear();
+    this.syncScroll();
+    this.render();
+  }
+
+  /** Tints view rows [from, to) as just appended; the tint fades out over 1.5 s. */
+  flash(from: number, to: number) {
+    if (to <= from) return;
+    this.flashes.push({ from, to, at: performance.now() });
+    if (this.flashTimer) return;
+    this.flashTimer = setInterval(() => {
+      const now = performance.now();
+      this.flashes = this.flashes.filter((f) => now - f.at < FLASH_MS);
+      if (!this.flashes.length && this.flashTimer) {
+        clearInterval(this.flashTimer);
+        this.flashTimer = null;
+      }
+      this.render();
+    }, 50);
+  }
+
+  clearFlash() {
+    this.flashes = [];
+  }
+
+  /** Flash tint opacity (0..0.18) of a view row. */
+  private flashAlpha(r: number, now: number): number {
+    let a = 0;
+    for (const f of this.flashes) if (r >= f.from && r < f.to) a = Math.max(a, 0.18 * (1 - (now - f.at) / FLASH_MS));
+    return a;
+  }
+
   /** Height of the inline expansion of a row (0 when collapsed). */
   private expansionHeight(row: RowData): number {
     if (row.lineCount <= 1 || !this.tab?.expanded.has(row.key)) return 0;
-    const n = row.text.split('\n').length - 1;
+    const n = this.expandLines(row).length;
     if (n <= 0) return 0;
     return (Math.min(n, MAX_EXPAND) + (n > MAX_EXPAND ? 1 : 0)) * this.lineH + 4;
   }
@@ -415,6 +493,10 @@ export class Grid {
     const gutterFont = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--font-size')) || 12.5;
     let expandX = -1;
     let html = '';
+    const now = performance.now();
+    // The ×N badge of grouped rows goes into the message column (or the stretching one).
+    let badgeCol = cols.findIndex((c) => c.key === 'message');
+    if (badgeCol < 0) badgeCol = widths.findIndex((w) => w === 0);
     for (let r = from; r < to; r++) {
       const row = this.cache.get(r);
       if (!row) {
@@ -436,15 +518,22 @@ export class Grid {
       if (isHit) cls.push('hitrow');
       const gap = gapMs && row.time !== null && prevTime !== null && row.time - prevTime >= gapMs ? row.time - prevTime : 0;
       if (gap) cls.push('gap');
-      let rowStyle = '';
+      const styles: string[] = [];
       for (const { rule, re } of this.hlCompiled) {
         if (!rule.row) continue;
         re.lastIndex = 0;
         if (re.test(row.text)) {
-          rowStyle = ` style="background:${rule.color}38"`;
+          styles.push(`background-color:${rule.color}38`);
           break;
         }
       }
+      const fa = this.flashes.length ? this.flashAlpha(r, now) : 0;
+      if (fa > 0) {
+        const tint = `color-mix(in srgb, var(--accent) ${(fa * 100).toFixed(1)}%, transparent)`;
+        styles.push(`background-image:linear-gradient(${tint},${tint})`);
+        cls.push('flash');
+      }
+      const rowStyle = styles.length ? ` style="${styles.join(';')}"` : '';
       // (a tinted Fatal row is white on red: token colours would be unreadable there)
       const tokens = view.tokenColors && !selected && !row.context && !(view.tintRows && row.level === 6);
       const bm = t.bookmarks.has(row.key) ? '<i class="bmk"></i>' : '';
@@ -475,6 +564,7 @@ export class Grid {
         if (isMsg) cc += ' msg';
         if (c.key === '__source') cc += ' src';
         let content = c.key === 'level' ? `<span class="lvtag">${esc(v)}</span>` : this.markup(v, r === curHit, isMsg && tokens);
+        if (i === badgeCol && row.repeat > 1) content = `<span class="rep" title="Repeated ${row.repeat.toLocaleString('en-US')} times">${fmtRepeat(row.repeat)}</span>${content}`;
         if (isMsg && view.wrap) content = `<div class="wr">${content}</div>`;
         html += `<div class="${cc}" data-col="${esc(c.key)}"${style}>${content}</div>`;
       }
@@ -524,9 +614,13 @@ export class Grid {
 
   /** Lines 2.. of a multi-line entry, shown under its row. */
   private expansion(row: RowData, x: number, tokens: boolean): string {
-    const lines = row.text.split('\n').slice(1);
+    const lines = this.expandLines(row);
     let html = `<div class="rx" style="margin-left:${x}px">`;
-    for (const raw of lines.slice(0, MAX_EXPAND)) {
+    for (const { line: raw, folded } of lines.slice(0, MAX_EXPAND)) {
+      if (folded) {
+        html += `<div class="rl fold" title="Click to show all frames of this entry">${esc(raw)}</div>`;
+        continue;
+      }
       const line = raw.length > 2000 ? raw.slice(0, 2000) + '…' : raw;
       html += `<div class="rl">${line ? this.markup(line, false, tokens) : ' '}</div>`;
     }
@@ -701,6 +795,21 @@ export class Grid {
     // default focus handling would then move focus to <body>.
     e.preventDefault();
     this.root.focus();
+    if (linkMod(e) && !e.shiftKey) {
+      const tk = this.tokenAt(e);
+      const r = this.cache.get(row);
+      if (tk && r) {
+        this.clearTokenHover();
+        this.host.onTokenClick(r, tk.text);
+        return;
+      }
+    }
+    const foldEl = (e.target as HTMLElement).closest('.rx .fold');
+    if (foldEl && !e.shiftKey) {
+      const r = this.cache.get(row);
+      if (r) this.unfold(r.key);
+      return;
+    }
     if ((e.target as HTMLElement).closest('.more') && !e.shiftKey) {
       // the "+N" badge expands / collapses the entry inline
       const r = this.cache.get(row);
@@ -738,6 +847,69 @@ export class Grid {
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
+  }
+
+  // ------------------------------------------------------- token links
+
+  /** The token under the pointer in a message cell or an expanded line, with its text range. */
+  private tokenAt(e: MouseEvent): { text: string; range: Range } | null {
+    const cell = (e.target as HTMLElement).closest('.c.msg, .rx .rl:not(.fold):not(.rx-more)') as HTMLElement | null;
+    if (!cell) return null;
+    const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY);
+    if (!caret || !cell.contains(caret.startContainer)) return null;
+    // text nodes of the cell, minus the ×N badge
+    const nodes: { node: Text; start: number }[] = [];
+    let text = '';
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => ((n.parentElement?.closest('.rep') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT)),
+    });
+    let offset = -1;
+    for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+      if (n === caret.startContainer) offset = text.length + caret.startOffset;
+      nodes.push({ node: n, start: text.length });
+      text += n.data;
+    }
+    if (offset < 0) return null;
+    const tokens = tokenize(text);
+    const tk = tokens.find((t) => offset >= t.start && offset < t.start + t.length) ?? tokens.find((t) => offset === t.start + t.length);
+    if (!tk) return null;
+    const locate = (pos: number, end: boolean): [Text, number] => {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const { node, start } = nodes[i];
+        if (end ? pos > start : pos >= start) return [node, Math.min(node.data.length, pos - start)];
+      }
+      return [nodes[0].node, 0];
+    };
+    const range = document.createRange();
+    range.setStart(...locate(tk.start, false));
+    range.setEnd(...locate(tk.start + tk.length, true));
+    // the caret snaps to the nearest character: make sure the pointer is really over the token
+    const hit = [...range.getClientRects()].some((rc) => e.clientX >= rc.left - 1 && e.clientX <= rc.right + 1 && e.clientY >= rc.top - 1 && e.clientY <= rc.bottom + 1);
+    if (!hit) return null;
+    let value = text.slice(tk.start, tk.start + tk.length);
+    if (tk.kind === 'string' && value.length >= 2) value = value.slice(1, -1);
+    return { text: value, range };
+  }
+
+  private hovering = false;
+
+  private hoverToken(e: MouseEvent) {
+    if (!linkMod(e)) {
+      if (this.hovering) this.clearTokenHover();
+      return;
+    }
+    const tk = this.tokenAt(e);
+    if (!tk) return this.clearTokenHover();
+    CSS.highlights?.set('tk-link', new Highlight(tk.range));
+    this.rowsEl.classList.add('tk-link');
+    this.hovering = true;
+  }
+
+  private clearTokenHover() {
+    if (!this.hovering) return;
+    this.hovering = false;
+    CSS.highlights?.delete('tk-link');
+    this.rowsEl.classList.remove('tk-link');
   }
 
   private onContextMenu(e: MouseEvent) {

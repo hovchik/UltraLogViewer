@@ -43,8 +43,12 @@ function entry() {
   const msg = lvl === 'ERROR' || lvl === 'FATAL' ? pick(errMsgs, i) : lvl === 'WARN' ? pick(warnMsgs, i) : pick(msgs, Math.floor(rnd() * msgs.length));
   let s = `${ts(t)} [${pick(threads, Math.floor(rnd() * 5))}] ${lvl.padEnd(5)} ${pick(loggers, Math.floor(rnd() * 5))} - ${msg(i)}\n`;
   if (lvl === 'ERROR' && rnd() < 0.5) {
-    s += `java.lang.IllegalStateException: Connection reset (attempt ${i % 5})\n\tat com.acme.db.ConnectionPool.borrow(ConnectionPool.java:${100 + (i % 50)})\n\tat com.acme.api.OrderController.get(OrderController.java:42)\n\tat java.base/java.lang.Thread.run(Thread.java:1583)\n`;
+    s +=
+      `java.lang.IllegalStateException: Connection reset (attempt ${i % 5})\n\tat com.acme.db.ConnectionPool.borrow(ConnectionPool.java:${100 + (i % 50)})\n\tat com.acme.api.OrderController.get(OrderController.java:42)\n` +
+      `\tat java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1136)\n\tat java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:635)\n\tat java.base/java.lang.Thread.run(Thread.java:1583)\n`;
   }
+  // bursts of identical consecutive lines (for "group repeats")
+  if (i % 25 === 0) for (let k = 0; k < 3; k++) s += `${ts(t)} [scheduler-1] INFO  com.acme.jobs.Scheduler - Heartbeat ok (queue empty)\n`;
   return s;
 }
 
