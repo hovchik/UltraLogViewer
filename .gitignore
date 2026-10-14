@@ -3,3 +3,6 @@ dist/
 release/
 *.tsbuildinfo
 e2e/out/
+dotnet/**/bin/
+dotnet/**/obj/
+dotnet/**/TestResults/
