@@ -27,6 +27,16 @@ const passes = (verdict: GrowU8[], s: number, e: number) => {
   return !!v && e < v.length && v.get(e) === 1;
 };
 
+/**
+ * Makes room in a full value-count table by dropping the rarest values (count ≤ 1, then ≤ 2, …) until it is half
+ * full, so values that only become common later in the view can still reach the top list.
+ */
+function pruneRare(values: Map<string, number>) {
+  for (let limit = 1; values.size > STATS_DISTINCT_CAP / 2; limit++) {
+    for (const [k, n] of values) if (n <= limit) values.delete(k);
+  }
+}
+
 export class LogDocument {
   readonly sources: FileSource[] = [];
   private mergedSrc: GrowU8 | null = null;
@@ -354,18 +364,23 @@ export class LogDocument {
         for (const [k, raw] of Object.entries(row.fields)) {
           const lk = k.toLowerCase();
           if (UNCOUNTED_FIELDS.has(lk)) continue;
-          let v = raw.trim();
+          const v = raw.trim();
           if (!v) continue;
-          const nl = v.indexOf('\n');
-          if (nl >= 0) v = v.slice(0, nl);
-          if (v.length > 200) v = v.slice(0, 200);
           let c = counts.get(lk);
           if (!c) counts.set(lk, (c = { key: k, values: new Map(), present: 0, capped: false }));
           c.present++;
+          // Multi-line or very long values are counted as present but not listed: a shortened value
+          // could not be used as an exact filter.
+          if (v.length > 200 || v.includes('\n')) continue;
           const x = c.values.get(v);
           if (x !== undefined) c.values.set(v, x + 1);
-          else if (c.values.size < STATS_DISTINCT_CAP) c.values.set(v, 1);
-          else c.capped = true;
+          else {
+            if (c.values.size >= STATS_DISTINCT_CAP) {
+              pruneRare(c.values);
+              c.capped = true;
+            }
+            c.values.set(v, 1);
+          }
         }
       }
       scanned += rows.length;

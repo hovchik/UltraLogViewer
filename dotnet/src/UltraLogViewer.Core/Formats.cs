@@ -244,7 +244,8 @@ public sealed class JsonFormat : LogFormat
         {
             if (d.Count >= MaxExtraFields) return;
             var name = prefix + p.Name;
-            if (skip.Contains(name)) continue;
+            // A property already shown as time/level/logger/message/error is skipped, but its children still count.
+            if (skip.Contains(name) && p.Value.ValueKind != JsonValueKind.Object) continue;
             if (p.Value.ValueKind == JsonValueKind.Object && depth < 4)
             {
                 AddExtras(d, p.Value, name + ".", skip, depth + 1);

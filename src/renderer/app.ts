@@ -735,18 +735,8 @@ function quickSuggestions(): Suggestion[] {
 
 const ac = new Autocomplete($('#quick-ac'), quickSuggestions);
 
-/** True while the caret is right after a bare `field:` (applying it now would filter on the literal text). */
-function typingFieldName(): boolean {
-  const text = quickInput.value;
-  const [start, len] = tokenAt(text, quickInput.selectionStart ?? text.length);
-  const [, field, value] = splitToken(text.slice(start, start + len));
-  return field !== null && !value;
-}
-
-const quickSoon = debounce(() => {
-  if (document.activeElement === quickInput && typingFieldName()) return;
-  commitQuick();
-}, 300);
+// A bare `field:` still being typed filters nothing (see parseQuery), so committing as you type is safe.
+const quickSoon = debounce(() => commitQuick(), 300);
 quickInput.addEventListener('input', () => {
   quickSoon();
   ac.update();

@@ -193,7 +193,9 @@ function addExtras(d: Record<string, string>, o: Record<string, unknown>, prefix
   for (const [k, v] of Object.entries(o)) {
     if (count.n >= MAX_FIELDS) return;
     const name = prefix + k;
-    if (skip.has(name) || name === '__proto__') continue;
+    if (name === '__proto__') continue;
+    // A property already shown as time/level/logger/message/error is skipped, but its children still count.
+    if (skip.has(name) && !(v && typeof v === 'object' && !Array.isArray(v))) continue;
     if (v && typeof v === 'object' && !Array.isArray(v) && depth < 4) {
       addExtras(d, v as Record<string, unknown>, name + '.', skip, depth + 1, count);
       continue;

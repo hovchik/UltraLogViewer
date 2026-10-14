@@ -209,4 +209,22 @@ public class DocumentTests
         await d.ApplyFilterAsync(Spec(s => s.Query = "http.status:503"));
         Assert.Equal(1, d.ViewCount);
     }
+
+    [Fact]
+    public async Task KeepsLateCommonValuesSkipsUnlistableOnesAndFlattensCanonicalObjects()
+    {
+        var sb = new System.Text.StringBuilder();
+        var longText = new string('x', 300);
+        for (var i = 0; i < 6000; i++) sb.Append($"{{\"@m\":\"m\",\"id\":\"u{i}\",\"body\":\"{longText}\"}}\n");
+        for (var i = 0; i < 300; i++) sb.Append("{\"@m\":\"m\",\"id\":\"late\",\"error\":{\"code\":\"EHOST\",\"stack\":\"s\"}}\n");
+        using var d = await Doc(sb.ToString());
+        var stats = await d.FieldStatsAsync(maxRows: 1_000_000);
+        var id = stats.Get("id")!;
+        Assert.Equal(("late", 300), id.Top[0]);
+        Assert.True(id.DistinctCapped);
+        var body = stats.Get("body")!;
+        Assert.Equal(6000, body.Present);
+        Assert.Empty(body.Top);
+        Assert.Equal("EHOST", d.GetRows(6000, 1)[0].Field("error.code"));
+    }
 }

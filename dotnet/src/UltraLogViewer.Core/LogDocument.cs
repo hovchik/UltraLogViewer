@@ -375,18 +375,27 @@ public sealed class LogDocument : IDisposable
                     if (UncountedFields.Contains(k)) continue;
                     var v = raw.Trim();
                     if (v.Length == 0) continue;
-                    var nl = v.IndexOf('\n');
-                    if (nl >= 0) v = v[..nl];
-                    if (v.Length > 200) v = v[..200];
                     if (!counts.TryGetValue(k, out var c))
                     {
                         c = (new Dictionary<string, int>(), 0, false);
                         order.Add(k);
                     }
                     c.Present++;
-                    if (c.Values.TryGetValue(v, out var x)) c.Values[v] = x + 1;
-                    else if (c.Values.Count < DistinctCap) c.Values[v] = 1;
-                    else c.Capped = true;
+                    // Multi-line or very long values are counted as present but not listed: a shortened value
+                    // could not be used as an exact filter.
+                    if (v.Length <= 200 && !v.Contains('\n'))
+                    {
+                        if (c.Values.TryGetValue(v, out var x)) c.Values[v] = x + 1;
+                        else
+                        {
+                            if (c.Values.Count >= DistinctCap)
+                            {
+                                PruneRare(c.Values, DistinctCap / 2);
+                                c.Capped = true;
+                            }
+                            c.Values[v] = 1;
+                        }
+                    }
                     counts[k] = c;
                 }
             }
@@ -419,6 +428,17 @@ public sealed class LogDocument : IDisposable
         }).ToList();
         return new FieldStats(scanned, n, sampled, fields);
     }, ct);
+
+    /// <summary>
+    /// Makes room in a full value-count table by dropping the rarest values (count ≤ 1, then ≤ 2, …) until at most
+    /// <paramref name="keep"/> remain, so values that only become common later in the view can still reach the top list.
+    /// </summary>
+    private static void PruneRare(Dictionary<string, int> values, int keep)
+    {
+        for (var limit = 1; values.Count > keep; limit++)
+            foreach (var (k, n) in values.ToList())
+                if (n <= limit) values.Remove(k);
+    }
 
     // ------------------------------------------------------------------- search
 

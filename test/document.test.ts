@@ -192,4 +192,20 @@ describe('LogDocument', () => {
     await d.applyFilter(spec({ query: 'http.status:503' }));
     expect(d.viewCount()).toBe(1);
   });
+
+  it('keeps late common values, skips unlistable ones and flattens canonical objects', async () => {
+    let text = '';
+    const long = 'x'.repeat(300);
+    for (let i = 0; i < 6000; i++) text += `{"@m":"m","id":"u${i}","body":"${long}"}\n`;
+    for (let i = 0; i < 300; i++) text += `{"@m":"m","id":"late","error":{"code":"EHOST","stack":"s"}}\n`;
+    const d = await doc(text);
+    const stats = await d.fieldStats(1_000_000);
+    const id = stats.fields.find((f) => f.key === 'id')!;
+    expect(id.top[0]).toEqual(['late', 300]);
+    expect(id.distinctCapped).toBe(true);
+    const body = stats.fields.find((f) => f.key === 'body')!;
+    expect(body.present).toBe(6000);
+    expect(body.top).toEqual([]);
+    expect(d.getRows(6000, 1)[0].fields['error.code']).toBe('EHOST');
+  });
 });
