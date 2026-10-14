@@ -14,8 +14,8 @@
     "test": "vitest run",
     "test:e2e": "npm run build && node e2e/smoke.mjs",
     "gen:sample": "node scripts/gen-sample.mjs",
-    "dist": "npm run build && electron-builder",
-    "dist:win-dir": "npm run build && electron-builder --win dir --x64"
+    "dist": "node scripts/prepare-wincodesign.mjs && npm run build && electron-builder",
+    "dist:win-dir": "node scripts/prepare-wincodesign.mjs && npm run build && electron-builder --win dir --x64"
   },
   "devDependencies": {
     "@types/node": "22.18.0",

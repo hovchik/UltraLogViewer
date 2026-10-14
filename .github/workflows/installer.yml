@@ -8,12 +8,16 @@ on:
       - installer/**
       - dotnet/**
       - scripts/build-installer.ps1
+      - scripts/prepare-wincodesign.mjs
+      - package.json
       - .github/workflows/installer.yml
   pull_request:
     paths:
       - installer/**
       - dotnet/**
       - scripts/build-installer.ps1
+      - scripts/prepare-wincodesign.mjs
+      - package.json
       - .github/workflows/installer.yml
   workflow_dispatch:
 
@@ -43,6 +47,38 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: UltraLogViewer-Setup-win-x64
+          path: release/installer/*.exe
+          if-no-files-found: error
+
+  # Builds the Electron flavour too, and checks electron-builder reuses the
+  # winCodeSign bundle prepared by scripts/prepare-wincodesign.mjs instead of
+  # extracting its own (which fails on PCs without symlink rights).
+  electron-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+      - name: Build Electron installer
+        shell: pwsh
+        run: |
+          ./scripts/build-installer.ps1 -App Electron *>&1 | Tee-Object -FilePath build.log
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (Select-String -Path build.log -Pattern 'downloading\s+url=.*winCodeSign') { throw 'electron-builder downloaded winCodeSign itself instead of using the prepared copy' }
+          if (-not (Test-Path "$env:LOCALAPPDATA\electron-builder\Cache\winCodeSign\winCodeSign-2.6.0\rcedit-x64.exe")) { throw 'prepared winCodeSign not found' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UltraLogViewer-Setup-win-x64-electron
           path: release/installer/*.exe
           if-no-files-found: error
 
