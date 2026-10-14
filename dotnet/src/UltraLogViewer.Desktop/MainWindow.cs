@@ -342,6 +342,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _work.Children.Add(_detailSplitter);
         _work.Children.Add(detailPane);
         _detailPane = detailPane;
+        // never let a saved pane size (from a bigger window) squeeze the grid out
+        _work.SizeChanged += (_, e) =>
+        {
+            _work.ColumnDefinitions[2].MaxWidth = Math.Max(200, e.NewSize.Width * 0.8);
+            _work.RowDefinitions[2].MaxHeight = Math.Max(80, e.NewSize.Height * 0.8);
+        };
         ApplyHistogramSize();
         ApplyDock();
         ToggleDetail(_settings.ShowDetail, save: false);

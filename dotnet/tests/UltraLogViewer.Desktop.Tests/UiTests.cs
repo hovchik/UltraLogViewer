@@ -382,6 +382,11 @@ public sealed class UiTests : IDisposable
         Assert.Equal("right", settings.DetailDock);
         await Until(() => grid.Bounds.Width < before - 300);
         Screenshot(w, "details-right.png");
+        // a saved width wider than the window still leaves room for the grid
+        w.SetDetailDockForTest(false);
+        settings.DetailWidth = 5000;
+        w.SetDetailDockForTest(true);
+        await Until(() => grid.Bounds.Width > 150);
         w.SetDetailDockForTest(false);
         await Until(() => Math.Abs(grid.Bounds.Width - before) < 1);
         w.Close();
