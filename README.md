@@ -58,6 +58,33 @@ node scripts/gen-sample.mjs live.log 0 --live   # keep appending to a log to try
 npm run dist                                # installers via electron-builder (dmg, nsis, AppImage, deb)
 ```
 
+## Native desktop app (Avalonia UI / .NET 8)
+
+The [`dotnet/`](dotnet) folder holds a second, native build of the same viewer: the engine ported
+to C# (`UltraLogViewer.Core`) and an Avalonia UI (`UltraLogViewer.Desktop`) with the same features
+and keyboard shortcuts as the Electron app. It needs the [.NET 8 SDK](https://dotnet.microsoft.com/download).
+
+```bash
+cd dotnet
+dotnet run --project src/UltraLogViewer.Desktop -- path/to/app.log   # build and launch
+dotnet test                                                          # engine + headless UI tests
+dotnet publish src/UltraLogViewer.Desktop -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
+#   other runtimes: linux-x64, osx-arm64, osx-x64
+```
+
+```
+dotnet/src/UltraLogViewer.Core/      engine: FileSource (index, tail, gzip/UTF-16), formats, LogDocument
+                                     (merge, filters, search, histogram, export), quick-filter language
+dotnet/src/UltraLogViewer.Desktop/   Avalonia app: MainWindow, Sidebar, custom-drawn virtual LogGrid,
+                                     HistogramView, dialogs, settings (JSON in the user's app-data folder)
+dotnet/tests/                        xUnit tests; the UI tests run the real window headless (Skia) and
+                                     save screenshots (set ULV_SCREENSHOTS to choose the folder)
+```
+
+The grid draws only the rows on screen and fetches them from the engine in the background, so it
+stays smooth with millions of entries and shows rows while a large file is still being indexed.
+On the same 300 MB / 2.5 M entry file: full index ~4 s, rule filter ~1.3 s, regex search ~1.1 s.
+
 ## Development
 
 | Command | What it does |
