@@ -1,0 +1,35 @@
+{
+  "name": "ultralogviewer",
+  "productName": "UltraLogViewer",
+  "version": "0.1.0",
+  "description": "Fast desktop log viewer: huge files, live tail, auto-detected formats, filters, highlighting, bookmarks, merged timelines.",
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "npm run build && node e2e/smoke.mjs",
+    "gen:sample": "node scripts/gen-sample.mjs",
+    "dist": "npm run build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "electron": "38.8.6",
+    "electron-builder": "26.0.20",
+    "esbuild": "0.25.12",
+    "playwright": "1.56.1",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  },
+  "build": {
+    "appId": "com.ultralogviewer.app",
+    "files": ["dist/**/*", "package.json"],
+    "fileAssociations": [{ "ext": ["log", "txt", "gz"], "name": "Log file", "role": "Viewer" }],
+    "mac": { "category": "public.app-category.developer-tools", "target": ["dmg"] },
+    "win": { "target": ["nsis", "portable"] },
+    "linux": { "target": ["AppImage", "deb"], "category": "Development" }
+  }
+}
