@@ -190,6 +190,23 @@ public sealed class UiTests : IDisposable
         w.Close();
     }
 
+    [AvaloniaFact]
+    public async Task Search_hits_follow_appended_lines()
+    {
+        var (w, _) = NewWindow();
+        var path = Sample("live.log", 26);
+        var tab = await Open(w, path);
+        var search = w.GetVisualDescendants().OfType<TextBox>().First(t => t.Watermark?.ToString()?.StartsWith("Find") == true);
+        search.Text = "timed out";
+        search.Focus();
+        w.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
+        await Until(() => tab.SearchResult is not null);
+        Assert.Equal(2, tab.SearchResult!.Total);
+        File.AppendAllText(path, "2024-03-01 11:00:00.000 [main] ERROR com.shop.PaymentService - Read timed out again\n");
+        await Until(() => tab.SearchResult?.Total == 3);
+        w.Close();
+    }
+
     [Fact]
     public void Pretty_prints_embedded_json_and_xml()
     {

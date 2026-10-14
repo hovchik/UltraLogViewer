@@ -15,7 +15,7 @@ public sealed class LogDocument : IDisposable
 {
     private const int MaxSearchRows = 2_000_000;
 
-    private sealed record Merge(byte[] Src, int[] Ent, int[][] BasePos);
+    private sealed record Merge(ushort[] Src, int[] Ent, int[][] BasePos);
     private sealed record View(int[] Rows, byte[]? Context);
 
     private readonly List<FileSource> _sources = [];
@@ -45,6 +45,7 @@ public sealed class LogDocument : IDisposable
 
     public async Task AddSourceAsync(string path, SourceOptions opts, IProgress<double>? progress = null, CancellationToken ct = default)
     {
+        if (_sources.Count > ushort.MaxValue) throw new InvalidOperationException($"A merged view supports at most {ushort.MaxValue + 1} files.");
         var src = new FileSource(_sources.Count, path, opts);
         lock (_sources) _sources.Add(src);
         Indexing = true;
@@ -96,7 +97,7 @@ public sealed class LogDocument : IDisposable
         }
         var counts = _sources.Select(s => s.EntryCount).ToArray();
         var total = counts.Sum();
-        var src = new byte[total];
+        var src = new ushort[total];
         var ent = new int[total];
         var basePos = counts.Select(c => new int[c]).ToArray();
         var cur = new int[_sources.Count];
@@ -115,7 +116,7 @@ public sealed class LogDocument : IDisposable
                 }
             }
             basePos[best][cur[best]] = n;
-            src[n] = (byte)best;
+            src[n] = (ushort)best;
             ent[n] = cur[best]++;
         }
         _merge = new Merge(src, ent, basePos);

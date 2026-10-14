@@ -550,11 +550,7 @@ public sealed class MainWindow : Window, ILogGridHost
         UpdateSearchCount();
         UpdateDetail();
         UpdateStatus();
-        if (tab is { Ready: true })
-        {
-            Run(RefreshOverviewAsync);
-            Run(RefreshHistogramAsync);
-        }
+        if (tab is { Ready: true }) Run(() => RefreshDerivedAsync(tab));
         _grid.Focus();
     }
 
@@ -720,10 +716,22 @@ public sealed class MainWindow : Window, ILogGridHost
             }
             UpdateStatus();
         }
+        if (tab is { Ready: true, BusyProgress: null, StaleViews: true } && !_refreshing.Contains(tab) && DateTime.UtcNow - _lastHeavyRefresh > TimeSpan.FromSeconds(1.5))
+            Run(() => RefreshDerivedAsync(tab));
         if (_tickCount % 2 == 0)
             foreach (var t in _tabs.ToList())
                 if (t.Ready && t.BusyProgress is null && !_refreshing.Contains(t) && t.Info.Sources.Any(s => s.Live))
                     _ = TailAsync(t);
+    }
+
+    /// <summary>After new data: recompute the overview, timeline and search hits, at most every 1.5 s.</summary>
+    private async Task RefreshDerivedAsync(DocumentTab tab)
+    {
+        _lastHeavyRefresh = DateTime.UtcNow;
+        tab.StaleViews = false;
+        await RefreshOverviewAsync();
+        await RefreshHistogramAsync();
+        if (tab.SearchResult is not null && tab == _active) await RunSearch(false);
     }
 
     private async Task TailAsync(DocumentTab tab)
@@ -733,18 +741,13 @@ public sealed class MainWindow : Window, ILogGridHost
         {
             if (!await tab.Doc.RefreshAsync() || !_tabs.Contains(tab)) return;
             tab.Info = tab.Doc.Info();
+            tab.StaleViews = true;
             UpdateBookmarkRows(tab);
             if (tab != _active) return;
             _grid.Invalidate();
             if (tab.Follow) _grid.ScrollTo(int.MaxValue);
             _sidebar.UpdateCounts(tab);
             UpdateStatus();
-            if (DateTime.UtcNow - _lastHeavyRefresh > TimeSpan.FromSeconds(1.5))
-            {
-                _lastHeavyRefresh = DateTime.UtcNow;
-                await RefreshOverviewAsync();
-                await RefreshHistogramAsync();
-            }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {

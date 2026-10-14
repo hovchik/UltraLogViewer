@@ -78,7 +78,9 @@ public sealed class FileSource : IDisposable
             _tempFile = await GunzipToTempAsync(Path, progress, ct);
             _readPath = _tempFile;
         }
-        var (enc, bom) = _opts.Encoding is "auto" or "" ? DetectEncoding(_readPath) : (_opts.Encoding, 0);
+        var detected = DetectEncoding(_readPath);
+        // A forced encoding still skips its own byte-order mark.
+        var (enc, bom) = _opts.Encoding is "auto" or "" ? detected : (_opts.Encoding, detected.Encoding == _opts.Encoding ? detected.Bom : 0);
         EncodingName = enc;
         if (enc is "utf-16le" or "utf-16be")
         {
@@ -387,7 +389,8 @@ public sealed class FileSource : IDisposable
 
     public static (string Encoding, int Bom) DetectEncoding(string file)
     {
-        var b = ReadHead(file, 64 * 1024);
+        const int SampleSize = 64 * 1024;
+        var b = ReadHead(file, SampleSize);
         if (b.Length >= 3 && b[0] == 0xef && b[1] == 0xbb && b[2] == 0xbf) return ("utf-8", 3);
         if (b.Length >= 2 && b[0] == 0xff && b[1] == 0xfe) return ("utf-16le", 2);
         if (b.Length >= 2 && b[0] == 0xfe && b[1] == 0xff) return ("utf-16be", 2);
@@ -403,10 +406,24 @@ public sealed class FileSource : IDisposable
             if (zOdd > n / 8 && zEven < n / 64) return ("utf-16le", 0);
             if (zEven > n / 8 && zOdd < n / 64) return ("utf-16be", 0);
         }
-        // Drop a possibly cut multi-byte sequence at the end of the sample before validating.
+        // When the sample stops mid-file, drop a multi-byte sequence the cut left incomplete.
+        // A complete file is validated whole, so a trailing Windows-1252 byte is not ignored.
         var end = b.Length;
-        for (var k = 0; k < 3 && end > 0 && (b[end - 1] & 0xc0) == 0x80; k++) end--;
-        if (end > 0 && b[end - 1] >= 0xc0) end--;
+        if (b.Length == SampleSize)
+        {
+            var i = end - 1;
+            var cont = 0;
+            while (i >= 0 && cont < 3 && (b[i] & 0xc0) == 0x80)
+            {
+                i--;
+                cont++;
+            }
+            if (i >= 0 && b[i] >= 0xc0)
+            {
+                var need = b[i] >= 0xf0 ? 4 : b[i] >= 0xe0 ? 3 : 2;
+                if (cont + 1 < need) end = i;
+            }
+        }
         try
         {
             new UTF8Encoding(false, true).GetString(b, 0, end);

@@ -151,6 +151,29 @@ public class FileSourceTests
     }
 
     [Fact]
+    public void DetectsWindows1252WhenTheOnlyHighByteIsLast()
+    {
+        Assert.Equal("windows-1252", FileSource.DetectEncoding(TestFiles.Write("cafe.log", [.. "caf"u8, 0xE9])).Encoding);
+        Assert.Equal("utf-8", FileSource.DetectEncoding(TestFiles.Write("cafe8.log", "café")).Encoding);
+        // A 64 KB sample cut inside a UTF-8 sequence is still UTF-8.
+        var big = Enumerable.Repeat((byte)'a', 64 * 1024 - 1).Concat("é"u8.ToArray()).ToArray();
+        Assert.Equal("utf-8", FileSource.DetectEncoding(TestFiles.Write("cut.log", big)).Encoding);
+    }
+
+    [Theory]
+    [InlineData("utf-8")]
+    [InlineData("utf-16le")]
+    [InlineData("utf-16be")]
+    public async Task ForcedEncodingSkipsItsByteOrderMark(string enc)
+    {
+        Encoding e = enc switch { "utf-16le" => new UnicodeEncoding(false, true), "utf-16be" => new UnicodeEncoding(true, true), _ => new UTF8Encoding(true) };
+        var bytes = e.GetPreamble().Concat(e.GetBytes("first\nsecond\n")).ToArray();
+        using var s = new FileSource(0, TestFiles.Write($"bom-{enc}.log", bytes), new SourceOptions { Encoding = enc });
+        await s.OpenAsync();
+        Assert.Equal(["first", "second"], s.ReadEntries(0, 2));
+    }
+
+    [Fact]
     public async Task FollowsAppendsContinuationLinesAndTruncation()
     {
         var p = TestFiles.Write("c.log", "2024-01-01 00:00:00 INFO a\n2024-01-01 00:00:01 ERROR b\n");

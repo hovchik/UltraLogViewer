@@ -40,6 +40,8 @@ public sealed class DocumentTab : IDisposable
     public double? BusyProgress { get; set; }
     public string BusyLabel { get; set; } = "";
     public bool Ready { get; set; }
+    /// <summary>New data arrived since the overview, timeline and search hits were computed.</summary>
+    public bool StaleViews { get; set; }
 
     public string Title => Paths.Length == 1 ? Path.GetFileName(Paths[0]) : $"{Path.GetFileName(Paths[0])} + {Paths.Length - 1}";
     public int SelectionStart => Math.Min(Anchor, Focus);
