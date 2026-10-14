@@ -14,6 +14,8 @@ const log = path.join(tmp, 'app.log');
 execFileSync(process.execPath, ['scripts/gen-sample.mjs', log, '5']);
 const other = path.join(tmp, 'other.log');
 fs.writeFileSync(other, '2024-05-01 08:00:00,500 [main] ERROR com.acme.Other - from the other file\n');
+const notes = path.join(tmp, 'notes.txt');
+fs.writeFileSync(notes, 'Release notes for build 4.2\n\nInstalled packages:\n  - libfoo 1.2\nWARNING: disk almost full\nerror: could not copy config.ini\ndone\n');
 
 const app = await electron.launch({
   // a fresh profile so settings from earlier runs (theme, wrap, dock…) don't leak in
@@ -362,6 +364,28 @@ await step('merges two files into one timeline', async () => {
   await win.waitForFunction(() => [...document.querySelectorAll('.grid-header .h')].some((h) => h.textContent === 'Source'), null, { timeout: 30000 });
   await win.waitForSelector('.grid-rows .r:has-text("from the other file")', { timeout: 30000 });
   await shot('06-merged');
+});
+
+await step('names the detected format and opens plain text without timestamps', async () => {
+  assert.match(await win.locator('#status .fmt').innerText(), /Timestamped text\s*auto/);
+  await win.evaluate((p) => window.__ulv.openPaths([p], false), notes);
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 3);
+  await win.waitForSelector('.grid-rows .r:has-text("could not copy")', { timeout: 20000 });
+  await win.waitForFunction(() => /7 entries/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.match(await win.locator('#status .fmt').innerText(), /Plain text\s*auto/);
+  assert.match(await win.locator('#status .fmt').getAttribute('title'), /no known log layout, so each line is one entry/);
+  assert.equal(await win.locator('#format option[value=""]').innerText(), 'Auto: Plain text');
+  assert.deepEqual(await win.locator('.grid-header .h').allInnerTexts(), ['Level', 'Message']);
+  assert.equal((await win.locator('.grid-rows .r:has-text("could not copy") .c[data-col="level"]').innerText()).trim(), 'ERROR');
+  await win.waitForSelector('#histogram.hidden', { state: 'attached' });
+  assert.ok(await win.locator('#btn-hist').isDisabled());
+  assert.match(await win.locator('#sidebar').innerText(), /No timestamps in this file/);
+  await shot('24-plain-text');
+  await win.selectOption('#format', 'timestamped');
+  await win.waitForFunction(() => !/auto/.test(document.querySelector('#status .fmt')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.match(await win.locator('#status .fmt').getAttribute('title'), /chosen by you; 0 of 6 sampled lines start an entry/);
+  await win.selectOption('#format', '');
+  await win.waitForFunction(() => /Plain text\s*auto/.test(document.querySelector('#status .fmt')?.textContent ?? ''), null, { timeout: 20000 });
 });
 
 await step('dark theme renders', async () => {

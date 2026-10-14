@@ -1,3 +1,4 @@
+import { FORMAT_LABELS } from '../core/formats';
 import { fieldToken, splitToken, tokenAt, validatePattern } from '../core/query';
 import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
@@ -210,7 +211,7 @@ function renderTabs() {
     const live = t.info.sources.some((s) => s.live);
     const tabEl = h(
       'div',
-      { class: t === active ? 'tab active' : 'tab', title: t.paths.join('\n'), onclick: () => activate(t) },
+      { class: t === active ? 'tab active' : 'tab', title: [...t.paths, ...(formatSummary(t) ? [`Format: ${formatSummary(t)!.label}`] : [])].join('\n'), onclick: () => activate(t) },
       h('span', { class: live ? 'dot' : 'dot off', title: live ? 'Live: new lines appear automatically' : 'Static (compressed or converted file)' }),
       h('span', { class: 'name' }, t.info.title),
       h('button', { class: 'x', title: 'Close (Ctrl+W)', onclick: (e: Event) => { e.stopPropagation(); void closeTab(t); } }, '×'),
@@ -1316,7 +1317,9 @@ function renderStatus() {
   const lines = i.sources.reduce((n, s) => n + s.lines, 0);
   const src = i.sources[0];
   const parts: string[] = [];
-  if (src) parts.push(`<span title="Detected format">${esc(src.format)}</span>`, `<a class="enc" title="Change encoding">${esc(src.encoding)}</a>${src.compressed ? '<span>gzip</span>' : ''}`);
+  const fmt = formatSummary(t);
+  if (fmt) parts.push(`<a class="fmt" title="${esc(fmt.title)}">${esc(fmt.label)}${fmt.auto ? '<i>auto</i>' : ''}</a>`);
+  if (src) parts.push(`<a class="enc" title="Change encoding">${esc(src.encoding)}</a>${src.compressed ? '<span>gzip</span>' : ''}`);
   parts.push(`<span>${fmtBytes(size)}</span>`, `<span>${fmtNum(lines)} lines · ${fmtNum(i.total)} entries</span>`);
   const grouped = (t.filter.groupRepeats ?? 'off') !== 'off';
   if (t.contextMode) parts.push(`<span title="Show in context: press C or Esc to go back to the filtered view">All <b>${fmtNum(i.viewCount)}</b> entries (filters ignored)</span>`);
@@ -1334,6 +1337,9 @@ function renderStatus() {
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);
+  el.querySelector('.fmt')?.addEventListener('click', openFormatPicker);
+  syncAutoFormatOption();
+  syncTimeless();
   el.querySelector('.show-cleared')?.addEventListener('click', () => {
     if (!active) return;
     active.filter.clearedBefore = null;
@@ -1351,10 +1357,25 @@ function renderToolbar() {
 // -------------------------------------------------------------------- layout
 
 type LayoutKey = 'showHistogram' | 'showDetail' | 'showSidebar';
+/** The open file has no timestamps at all (plain text): the timeline and time filters have nothing to show. */
+const timeless = (t: Tab | null) => !!t && !t.info.indexing && t.info.total > 0 && t.info.timeMin == null;
+let wasTimeless = false;
+
+function syncTimeless() {
+  if (timeless(active) === wasTimeless) return;
+  applyLayout();
+  if (active) sidebar.render(active);
+}
+
 function applyLayout() {
   const v = viewSettings(settings);
-  $('#histogram').classList.toggle('hidden', settings.showHistogram === false);
-  $('#hist-split').classList.toggle('hidden', settings.showHistogram === false);
+  wasTimeless = timeless(active);
+  const hist = settings.showHistogram !== false && !wasTimeless;
+  $('#histogram').classList.toggle('hidden', !hist);
+  $('#hist-split').classList.toggle('hidden', !hist);
+  const histBtn = $<HTMLButtonElement>('#btn-hist');
+  histBtn.disabled = wasTimeless;
+  histBtn.title = wasTimeless ? 'Timeline: this file has no timestamps' : 'Timeline (Ctrl+Shift+H)';
   histogram.setHeight(v.histogramHeight);
   $('#detail').classList.toggle('hidden', settings.showDetail === false);
   $('#sidebar').classList.toggle('hidden', settings.showSidebar === false);
@@ -1426,21 +1447,52 @@ function applyTheme() {
 // ------------------------------------------------------------------- formats
 
 function renderFormatOptions() {
-  const builtins: [string, string][] = [
-    ['', 'Format: auto'],
-    ['timestamped', 'Timestamped text'],
-    ['json', 'JSON lines'],
-    ['syslog', 'Syslog RFC 3164'],
-    ['syslog5424', 'Syslog RFC 5424'],
-    ['access', 'Apache / Nginx'],
-    ['logcat', 'Android logcat'],
-    ['plain', 'Plain text'],
-  ];
   formatSel.innerHTML = '';
-  for (const [v, l] of builtins) formatSel.append(h('option', { value: v }, l));
+  formatSel.append(h('option', { value: '' }, 'Format: auto'));
+  for (const id of ['timestamped', 'json', 'syslog', 'syslog5424', 'access', 'logcat', 'plain']) formatSel.append(h('option', { value: id }, FORMAT_LABELS[id]));
   for (const c of settings.customFormats ?? []) formatSel.append(h('option', { value: `custom:${c.name}` }, `Custom: ${c.name}`));
   formatSel.append(h('option', { value: '__new' }, '+ Custom format…'));
   formatSel.value = active?.formatId ?? '';
+  syncAutoFormatOption();
+}
+
+/** The tab's format: one label (or "Mixed formats" for merged files that differ) and per-file detection details. */
+function formatSummary(t: Tab): { label: string; title: string; auto: boolean } | null {
+  const srcs = t.info.sources;
+  if (!srcs.length) return null;
+  const labels = [...new Set(srcs.map((s) => s.formatLabel))];
+  const lines = srcs.map((s) => {
+    const how = !s.formatAuto
+      ? `chosen by you${s.formatId === 'plain' ? '' : `; ${fmtNum(s.formatMatched)} of ${fmtNum(s.formatSampled)} sampled lines start an entry`}`
+      : s.formatId === 'plain'
+        ? 'detected: no known log layout, so each line is one entry'
+        : `detected: ${fmtNum(s.formatMatched)} of ${fmtNum(s.formatSampled)} sampled lines start an entry`;
+    return `${srcs.length > 1 ? `${s.displayName}: ` : ''}${s.format}\n${srcs.length > 1 ? '  ' : ''}${how}`;
+  });
+  return {
+    label: labels.length > 1 ? 'Mixed formats' : labels[0],
+    title: `Log format\n\n${lines.join('\n')}\n\nClick to choose another format.`,
+    auto: srcs.every((s) => s.formatAuto),
+  };
+}
+
+/** "Format: auto" names what auto-detection picked for the active tab. */
+function syncAutoFormatOption() {
+  const opt = formatSel.querySelector<HTMLOptionElement>('option[value=""]');
+  if (!opt) return;
+  const fmt = active && active.formatId === '' ? formatSummary(active) : null;
+  const text = fmt ? `Auto: ${fmt.label}` : 'Format: auto';
+  if (opt.textContent !== text) opt.textContent = text;
+  formatSel.title = fmt ? fmt.title : 'Log format';
+}
+
+function openFormatPicker() {
+  formatSel.focus();
+  try {
+    formatSel.showPicker();
+  } catch {
+    /* not allowed without a user gesture: focusing it is enough */
+  }
 }
 
 formatSel.onchange = async () => {

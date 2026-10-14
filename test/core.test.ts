@@ -3,11 +3,34 @@ import * as fs from 'node:fs';
 import * as zlib from 'node:zlib';
 import { matchTimestamp, parseTimestamp } from '../src/core/timestamp';
 import { detectLevel, parseLevel } from '../src/core/levels';
-import { detectFormat } from '../src/core/formats';
+import { detectFormat, detectFormatInfo, formatLabel } from '../src/core/formats';
 import { compileQuery, fieldToken, parseQuery, splitToken, tokenAt } from '../src/core/query';
 import { Level } from '../src/core/types';
 import { FileSource } from '../src/core/fileSource';
 import { LOG4J, tmpFile } from './helpers';
+
+describe('format identification', () => {
+  it('reports how the format was chosen and how well the sample fits', () => {
+    const json = detectFormatInfo(['{"level":"info","msg":"a"}', '{"level":"warn","msg":"b"}', 'not json']);
+    expect(json).toMatchObject({ auto: true, matched: 2, sampled: 3 });
+    expect(json.format.id).toBe('json');
+    expect(formatLabel(json.format.id, json.format.name)).toBe('JSON lines');
+    const forced = detectFormatInfo(['hello', '{"level":"info"}'], { force: 'json' });
+    expect(forced).toMatchObject({ auto: false, matched: 1, sampled: 2 });
+    expect(detectFormatInfo(['', '  '])).toMatchObject({ auto: true, matched: 0, sampled: 0 });
+    expect(formatLabel('custom:Mine', 'Mine')).toBe('Custom: Mine');
+  });
+  it('opens text files without timestamps as one entry per line', async () => {
+    const p = tmpFile('notes.txt', 'Release notes\n==========\n\n  - libfoo 1.2\nerror: could not copy config.ini\ndone\n');
+    const src = new FileSource(1, p);
+    await src.open();
+    const info = src.info();
+    expect(info).toMatchObject({ formatId: 'plain', formatLabel: 'Plain text', formatAuto: true, lines: 6, entries: 6 });
+    expect([...Array(src.entryCount)].map((_, i) => src.entryLevel.get(i))).toEqual([0, 0, 0, 0, Level.Error, 0]);
+    expect(Number.isNaN(src.entryTime.get(0))).toBe(true);
+    src.close();
+  });
+});
 
 describe('timestamps', () => {
   it('parses ISO with timezone and fractions', () => {
@@ -32,6 +55,10 @@ describe('levels', () => {
     expect(parseLevel('E')).toBe(Level.Error);
     expect(detectLevel('12:00 [error] something')).toBe(Level.Error);
     expect(detectLevel('nothing here')).toBe(Level.None);
+    // plain text often starts the line with the level
+    expect(detectLevel('error: could not copy config.ini')).toBe(Level.Error);
+    expect(detectLevel('Warning: disk almost full')).toBe(Level.Warn);
+    expect(detectLevel('Errors found: 0')).toBe(Level.None);
   });
 });
 
