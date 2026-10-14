@@ -26,8 +26,9 @@
           <button class="btn icon" id="s-filter" title="Turn this search into a filter">⧩</button>
         </div>
         <div class="tb-group grow">
-          <div class="field grow">
-            <input id="quick" type="text" placeholder="Filter: words, a OR b, -exclude, level:error, logger:Db, /regex/ (Ctrl+L)" spellcheck="false" />
+          <div class="field grow quick-field">
+            <input id="quick" type="text" placeholder="Filter: words, a OR b, -exclude, level:error, logger:Db, /regex/ (Ctrl+L)" spellcheck="false" autocomplete="off" />
+            <div id="quick-ac" class="ac hidden" role="listbox"></div>
           </div>
         </div>
         <div class="tb-group">
@@ -44,6 +45,10 @@
         <aside id="sidebar" class="sidebar"></aside>
         <section class="center">
           <div id="histogram" class="histogram"><canvas></canvas><div class="hist-tip"></div></div>
+          <div id="ctx-banner" class="ctx-banner hidden">
+            <span class="msg"></span>
+            <button id="ctx-exit" class="mini">Back to filtered view (Esc)</button>
+          </div>
           <div id="grid" class="grid" tabindex="0">
             <div class="grid-header"></div>
             <div class="grid-body">

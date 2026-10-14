@@ -4,7 +4,7 @@ import * as zlib from 'node:zlib';
 import { matchTimestamp, parseTimestamp } from '../src/core/timestamp';
 import { detectLevel, parseLevel } from '../src/core/levels';
 import { detectFormat } from '../src/core/formats';
-import { compileQuery, parseQuery } from '../src/core/query';
+import { compileQuery, fieldToken, parseQuery, splitToken, tokenAt } from '../src/core/query';
 import { Level } from '../src/core/types';
 import { FileSource } from '../src/core/fileSource';
 import { LOG4J, tmpFile } from './helpers';
@@ -89,6 +89,29 @@ describe('query language', () => {
     expect(q('timeout', fields('com.acme.App'))).toBe(false);
     expect(compileQuery('/err(or)?\\s+\\d+/')('ERROR 42', () => '')).toBe(true);
     expect(compileQuery('"exact phrase"')('an exact phrase here', () => '')).toBe(true);
+  });
+
+  it('parses quoted field values and autocomplete tokens', () => {
+    const t = parseQuery('logger:"com.acme Db" -thread:"worker 1" http.status:5');
+    expect(t).toHaveLength(3);
+    expect([t[0].any[0].field, t[0].any[0].text, t[0].negate]).toEqual(['logger', 'com.acme Db', false]);
+    expect([t[1].any[0].field, t[1].any[0].text, t[1].negate]).toEqual(['thread', 'worker 1', true]);
+    expect(t[2].any[0].field).toBe('http.status');
+    expect(parseQuery('-/re/')[0]).toMatchObject({ negate: true, any: [{ text: 're', regex: true }] });
+    expect(parseQuery('error logger:')).toHaveLength(1); // a field name being typed is ignored
+    expect(parseQuery('logger:/Db$/')[0].any[0]).toMatchObject({ field: 'logger', text: 'Db$', regex: true });
+    expect(parseQuery('level:"err')[0].any[0]).toMatchObject({ field: 'level', text: 'err' });
+    expect(parseQuery('logger:"" ""')).toHaveLength(0);
+
+    expect(tokenAt('error logger:Db', 15)).toEqual([6, 9]);
+    expect(tokenAt('error level:"a b', 16)).toEqual([6, 10]);
+    expect(tokenAt('abc  ', 5)).toEqual([5, 0]);
+    expect(splitToken('-logger:Db')).toEqual(['-', 'logger', 'Db']);
+    expect(splitToken('plain')).toEqual(['', null, 'plain']);
+    expect(splitToken('level:"a b')).toEqual(['', 'level', 'a b']);
+    expect(fieldToken('logger', 'com.acme')).toBe('logger:com.acme');
+    expect(fieldToken('logger', 'a b')).toBe('logger:"a b"');
+    expect(fieldToken('logger', 'say "hi"')).toBe('logger:"say hi"');
   });
 });
 

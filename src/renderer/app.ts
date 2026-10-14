@@ -1,12 +1,13 @@
-import { validatePattern } from '../core/query';
-import { CustomFormat, DocInfo, Level, RowData, TextPattern } from '../core/types';
+import { fieldToken, splitToken, tokenAt, validatePattern } from '../core/query';
+import { ColumnDef, CustomFormat, DocInfo, FilterRule, Level, LEVEL_NAMES, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
+import { Autocomplete, Suggestion } from './autocomplete';
 import { DetailView } from './detail';
 import { Grid } from './grid';
 import { HistogramView } from './histogram';
 import { Sidebar } from './sidebar';
 import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, Settings, Tab, uid } from './state';
-import { $, ask, debounce, esc, fmtBytes, fmtNum, h, modal, toast } from './util';
+import { $, ask, contextMenu, debounce, esc, fmtBytes, fmtNum, h, MenuItem, modal, toast } from './util';
 
 let settings: Settings = {};
 const tabs: Tab[] = [];
@@ -25,7 +26,9 @@ const grid = new Grid($('#grid'), {
   highlights: () => settings.highlights ?? [],
   columnWidth: (col) => (col.width === 0 ? 0 : settings.columnWidths?.[col.key] ?? col.width),
   hiddenColumns: () => settings.hiddenColumns ?? [],
-  onHeaderMenu: () => editColumns(),
+  columns: (tab) => effectiveColumns(tab),
+  onHeaderMenu: (e, key) => headerMenu(e, key),
+  onRowMenu: (e, row, col) => rowMenu(e, row, col),
   setColumnWidth: (key, w) => {
     (settings.columnWidths ??= {})[key] = w;
     saveSettings();
@@ -54,12 +57,21 @@ const sidebar = new Sidebar($('#sidebar'), {
   jumpToBookmark: (b) => void jumpToBookmark(b),
   removeBookmark: (b) => active && void removeBookmark(active, b.key),
   bookmarkNote: (b) => void editNote(b),
+  columns: (tab) => effectiveColumns(tab),
+  isColumnShown,
+  toggleColumn: (key) => setColumnShown(key, !isColumnShown(key)),
+  filterByValue: (key, value, mode) => active && filterByValue(active, key, value, mode),
+  rescanFields: () => active && void refreshFields(active),
 });
 
-const detail = new DetailView($('#detail'), (height) => {
-  settings.detailHeight = height;
-  saveSettings();
-});
+const detail = new DetailView(
+  $('#detail'),
+  (height) => {
+    settings.detailHeight = height;
+    saveSettings();
+  },
+  (e, row, key) => fieldMenu(e, row, key),
+);
 
 const histogram = new HistogramView($('#histogram'), {
   jumpToTime: async (t) => {
@@ -77,7 +89,7 @@ const histogram = new HistogramView($('#histogram'), {
 // ---------------------------------------------------------------------- tabs
 
 function placeholderInfo(id: number, title: string): DocInfo {
-  return { id, title, sources: [], columns: [], total: 0, viewCount: 0, levelCounts: [0, 0, 0, 0, 0, 0, 0], indexing: true, progress: 0, timeMin: null, timeMax: null, merged: false };
+  return { id, title, sources: [], columns: [], total: 0, viewCount: 0, levelCounts: [0, 0, 0, 0, 0, 0, 0], indexing: true, progress: 0, timeMin: null, timeMax: null, merged: false, ignoreFilter: false };
 }
 
 async function openPaths(paths: string[], merge: boolean) {
@@ -114,9 +126,12 @@ function activate(tab: Tab | null) {
   renderTabs();
   sidebar.render(tab);
   $('#empty').classList.toggle('hidden', !!tab);
+  renderBanner();
+  ac.close();
   if (tab) {
     void refreshOverview(tab);
     void updateDetail();
+    if (!tab.fieldStats && !tab.info.indexing) refreshFieldsSoon(tab);
   } else {
     detail.render(null, undefined);
     histogram.set(null);
@@ -130,6 +145,8 @@ async function closeTab(tab: Tab) {
   const i = tabs.indexOf(tab);
   if (i < 0) return;
   tabs.splice(i, 1);
+  clearTimeout(statsTimers.get(tab));
+  statsTimers.delete(tab);
   await engine.close(tab.id);
   if (active === tab) activate(tabs[Math.min(i, tabs.length - 1)] ?? null);
   else renderTabs();
@@ -196,6 +213,8 @@ window.ulv.onEvent((raw) => {
   }
   refreshOverviewSoon(tab);
   if (tab.search.result && !ev.info.indexing) rerunSearchSoon(tab);
+  // Field stats follow the tail at most every 10 s.
+  if (!ev.info.indexing && !wasIndexing && (ev.reset || Date.now() - (tab.statsAt ?? 0) > 10_000) && !statsTimers.has(tab)) refreshFieldsSoon(tab);
   if (!$('#sidebar').contains(document.activeElement)) sidebar.render(tab);
   renderStatus();
   renderTabs();
@@ -215,6 +234,7 @@ async function onDocReady(tab: Tab) {
   }
   if (!isDefaultFilter(tab)) await applyFilter(tab);
   if (tab.search.pattern.text) void runSearch(tab, false);
+  refreshFieldsSoon(tab);
   if (tab === active) {
     sidebar.render(tab);
     void updateDetail();
@@ -229,8 +249,15 @@ const isDefaultFilter = (t: Tab) =>
 async function applyFilter(tab: Tab) {
   const focusKey = grid.getCached(tab.focus)?.key;
   tab.filter.bookmarks = [...tab.bookmarks.keys()];
+  // Any filter change leaves "show in context" first.
+  const wasContext = !!tab.contextMode;
   let info: DocInfo | null;
   try {
+    if (wasContext) {
+      tab.contextMode = false;
+      if (tab === active) renderBanner();
+      await engine.setIgnoreFilter(tab.id, false);
+    }
     info = await engine.setFilter(tab.id, tab.filter);
   } catch (e) {
     toast((e as Error).message, true);
@@ -239,9 +266,10 @@ async function applyFilter(tab: Tab) {
   if (!info) return; // superseded by a newer filter
   tab.info = info;
   tab.progress = undefined;
-  const row = focusKey ? await engine.rowForKey(tab.id, focusKey) : null;
+  const row = focusKey ? await engine.rowForKey(tab.id, focusKey, wasContext) : null;
   tab.anchor = tab.focus = row ?? Math.min(tab.focus, Math.max(0, info.viewCount - 1));
   await resolveBookmarkRows(tab);
+  refreshFieldsSoon(tab);
   if (tab !== active) return;
   grid.invalidate();
   grid.reveal(tab.focus, 'center');
@@ -270,6 +298,277 @@ function updateHistogramViewport() {
   const a = grid.getCached(t.topRow)?.time;
   const b = grid.getCached(Math.min(t.info.viewCount - 1, t.topRow + grid.visibleRows()))?.time;
   histogram.setViewport(a != null && b != null ? [a, b] : null);
+}
+
+// ----------------------------------------------------------- show in context
+
+/** Shows every entry (rows the filter hides are dimmed), or goes back to the filtered view. */
+async function toggleContext(t: Tab) {
+  if (t.contextMode) return setContextMode(t, false);
+  if (isDefaultFilter(t)) return toast('Show in context needs an active filter');
+  return setContextMode(t, true);
+}
+
+async function setContextMode(t: Tab, on: boolean) {
+  if (!!t.contextMode === on) return;
+  const cur = grid.getCached(t.focus) ?? (t.info.viewCount ? (await engine.rows(t.id, t.focus, 1))[0] : undefined);
+  try {
+    t.info = await engine.setIgnoreFilter(t.id, on);
+  } catch (e) {
+    return toast((e as Error).message, true);
+  }
+  t.contextMode = on;
+  if (on) t.contextLine = cur?.line;
+  // Keep the same entry selected; when leaving, fall back to the nearest following visible row.
+  const row = cur ? await engine.rowForKey(t.id, cur.key, !on) : null;
+  t.anchor = t.focus = Math.max(0, Math.min(row ?? 0, t.info.viewCount - 1));
+  await resolveBookmarkRows(t);
+  refreshFieldsSoon(t);
+  if (t !== active) return;
+  renderBanner();
+  grid.invalidate();
+  grid.reveal(t.focus, 'center');
+  renderStatus();
+  void refreshOverview(t);
+  void updateDetail();
+  if (t.search.pattern.text) void runSearch(t, false);
+  $('#grid').focus();
+}
+
+function renderBanner() {
+  const t = active;
+  const el = $('#ctx-banner');
+  el.classList.toggle('hidden', !t?.contextMode);
+  if (!t?.contextMode) return;
+  $('.msg', el).textContent = `Showing every entry around line ${t.contextLine ?? t.focus + 1}. Rows your filters hide are dimmed.`;
+}
+
+$('#ctx-exit').onclick = () => active && void setContextMode(active, false);
+
+// -------------------------------------------------------------- field stats
+
+const statsTimers = new Map<Tab, ReturnType<typeof setTimeout>>();
+
+/** Recounts field values after ~300 ms of quiet (a newer request cancels the older one). */
+function refreshFieldsSoon(t: Tab, ms = 300) {
+  clearTimeout(statsTimers.get(t));
+  statsTimers.set(
+    t,
+    setTimeout(() => {
+      statsTimers.delete(t);
+      void refreshFields(t);
+    }, ms),
+  );
+}
+
+async function refreshFields(t: Tab) {
+  if (!tabs.includes(t) || t.info.indexing) return;
+  t.statsAt = Date.now();
+  let st;
+  try {
+    st = await engine.fieldStats(t.id);
+  } catch {
+    return; // closed
+  }
+  if (st.cancelled || !tabs.includes(t)) return;
+  t.fieldStats = st;
+  if (t === active) {
+    sidebar.renderFields(t);
+    if (document.activeElement === quickInput && ac.open) ac.update();
+  }
+}
+
+// ------------------------------------------------------------------ columns
+
+const formatName = (t: Tab) => t.info.sources[0]?.format ?? '';
+
+/** Format columns plus extra field columns (before the stretching message column), in the user's order. */
+function effectiveColumns(t: Tab | null): ColumnDef[] {
+  if (!t || !t.info.columns.length) return t?.info.columns ?? [];
+  const fmt = formatName(t);
+  let cols = [...t.info.columns];
+  const extras = (settings.extraColumns?.[fmt] ?? []).filter((k) => !cols.some((c) => c.key === k));
+  if (extras.length) {
+    const at = cols.findIndex((c) => c.width === 0);
+    cols.splice(at < 0 ? cols.length : at, 0, ...extras.map((k) => ({ key: k, title: k, width: 140 })));
+  }
+  const order = settings.columnOrder?.[fmt];
+  if (order?.length) {
+    const first = order.map((k) => cols.find((c) => c.key === k)).filter((c): c is ColumnDef => !!c);
+    cols = [...first, ...cols.filter((c) => !order.includes(c.key))];
+  }
+  return cols;
+}
+
+function isColumnShown(key: string): boolean {
+  return effectiveColumns(active).some((c) => c.key === key) && !(settings.hiddenColumns ?? []).includes(key);
+}
+
+const columnTitle = (t: Tab, key: string) => effectiveColumns(t).find((c) => c.key === key)?.title ?? key;
+
+function columnsChanged() {
+  saveSettings();
+  grid.renderHeader();
+  grid.render();
+  if (active) sidebar.renderFields(active);
+}
+
+/** Shows or hides a column; field keys that aren't format columns are added/removed as extra columns. */
+function setColumnShown(key: string, show: boolean) {
+  const t = active;
+  if (!t) return;
+  const isBase = t.info.columns.some((c) => c.key === key);
+  const fmt = formatName(t);
+  const extras = ((settings.extraColumns ??= {})[fmt] ??= []);
+  if (show) {
+    settings.hiddenColumns = (settings.hiddenColumns ?? []).filter((k) => k !== key);
+    if (!isBase && !extras.includes(key)) extras.push(key);
+  } else if (isBase) {
+    settings.hiddenColumns = [...new Set([...(settings.hiddenColumns ?? []), key])];
+  } else {
+    settings.extraColumns[fmt] = extras.filter((k) => k !== key);
+  }
+  if (!settings.extraColumns[fmt].length) delete settings.extraColumns[fmt];
+  columnsChanged();
+}
+
+function moveColumn(t: Tab, key: string, dir: 1 | -1) {
+  const hidden = settings.hiddenColumns ?? [];
+  const keys = effectiveColumns(t).map((c) => c.key);
+  const visible = keys.filter((k) => !hidden.includes(k));
+  const other = visible[visible.indexOf(key) + dir];
+  if (other === undefined) return;
+  const a = keys.indexOf(key), b = keys.indexOf(other);
+  [keys[a], keys[b]] = [keys[b], keys[a]];
+  (settings.columnOrder ??= {})[formatName(t)] = keys;
+  columnsChanged();
+}
+
+function headerMenu(e: MouseEvent, key: string | null) {
+  const t = active;
+  if (!t) return;
+  const cols = effectiveColumns(t);
+  const hidden = settings.hiddenColumns ?? [];
+  const fmt = formatName(t);
+  const items: MenuItem[] = [];
+  const col = cols.find((c) => c.key === key);
+  if (col) {
+    const visible = cols.filter((c) => !hidden.includes(c.key));
+    const vi = visible.indexOf(col);
+    items.push(
+      { label: `Move "${col.title}" left`, disabled: vi <= 0, action: () => moveColumn(t, col.key, -1) },
+      { label: `Move "${col.title}" right`, disabled: vi < 0 || vi >= visible.length - 1, action: () => moveColumn(t, col.key, 1) },
+      'sep',
+    );
+  }
+  for (const c of cols) items.push({ label: c.title, checked: !hidden.includes(c.key), action: () => setColumnShown(c.key, hidden.includes(c.key)) });
+  items.push(
+    'sep',
+    { label: 'Reset column widths', action: () => { settings.columnWidths = {}; columnsChanged(); } },
+    { label: 'Reset column order', disabled: !settings.columnOrder?.[fmt], action: () => { delete settings.columnOrder?.[fmt]; columnsChanged(); } },
+  );
+  contextMenu(e.clientX, e.clientY, items);
+}
+
+// --------------------------------------------------------------- value menus
+
+const LEVEL_LABELS = ['Other', 'Trace', 'Debug', 'Info', 'Warning', 'Error', 'Fatal'];
+const firstLineTrim = (s: string) => {
+  const i = s.indexOf('\n');
+  return (i < 0 ? s : s.slice(0, i)).trim();
+};
+const quoted = (v: string) => `“${v.length > 40 ? v.slice(0, 40) + '…' : v}”`;
+const cellValue = (t: Tab, row: RowData, key: string) => (key === '__source' ? t.info.sources[row.source]?.displayName ?? '' : row.fields[key] ?? '');
+
+function copyText(text: string, what: string) {
+  void navigator.clipboard.writeText(text).then(() => toast(`${what} copied`));
+}
+
+function addExactRule(t: Tab, key: string, value: string, mode: FilterRule['mode']) {
+  t.filter.rules.push({ id: uid(), text: value, mode, column: key, exact: true, regex: false, caseSensitive: false, wholeWord: false, enabled: true });
+  void applyFilter(t);
+}
+
+/** Click on a value in the Fields section: an exact rule, or the level filter for `level`. */
+function filterByValue(t: Tab, key: string, value: string, mode: FilterRule['mode']) {
+  if (key.toLowerCase() === 'level') {
+    const l = LEVEL_NAMES.indexOf(value.toUpperCase() as (typeof LEVEL_NAMES)[number]);
+    if (l > 0) {
+      if (mode === 'include') t.filter.levels = t.filter.levels.map((_, i) => i === l);
+      else t.filter.levels[l] = false;
+      void applyFilter(t);
+      return;
+    }
+  }
+  addExactRule(t, key, value, mode);
+}
+
+function addHighlight(text: string) {
+  (settings.highlights ??= []).push({ id: uid(), text, regex: false, caseSensitive: false, wholeWord: false, enabled: true, color: '#e8590c', row: false });
+  saveSettings();
+  grid.refreshPatterns();
+  grid.render();
+  sidebar.render(active);
+}
+
+/** "Only …" / "Exclude …" items for a value (levels and times get their own filters). */
+function filterItems(t: Tab, row: RowData, key: string, v: string): MenuItem[] {
+  const f = t.filter;
+  if (key === 'level') {
+    if (row.level === Level.None) return [];
+    const l = row.level;
+    return [
+      { label: `Only ${LEVEL_LABELS[l]}`, action: () => { f.levels = f.levels.map((_, i) => i === l); void applyFilter(t); } },
+      { label: `Hide ${LEVEL_LABELS[l]}`, action: () => { f.levels[l] = false; void applyFilter(t); } },
+    ];
+  }
+  if (key === 'time') {
+    if (row.time === null) return [];
+    const time = row.time;
+    return [
+      { label: 'Show from this time', action: () => { f.timeFrom = time; void applyFilter(t); } },
+      { label: 'Show until this time', action: () => { f.timeTo = time; void applyFilter(t); } },
+    ];
+  }
+  if (key === 'message' || key === '__source' || !v) return [];
+  const title = columnTitle(t, key);
+  return [
+    { label: `Only ${title} = ${quoted(v)}`, action: () => addExactRule(t, key, v, 'include') },
+    { label: `Exclude ${title} = ${quoted(v)}`, action: () => addExactRule(t, key, v, 'exclude') },
+  ];
+}
+
+function rowMenu(e: MouseEvent, row: RowData, key: string | null) {
+  const t = active;
+  if (!t) return;
+  const v = key ? firstLineTrim(cellValue(t, row, key)) : '';
+  const items: MenuItem[] = key ? filterItems(t, row, key, v) : [];
+  items.push('sep');
+  if (t.contextMode) items.push({ label: 'Back to filtered view', shortcut: 'Esc', action: () => void setContextMode(t, false) });
+  else if (!isDefaultFilter(t)) items.push({ label: 'Show in context', shortcut: 'C', action: () => void setContextMode(t, true) });
+  if (v && key !== 'time' && key !== 'message') items.push({ label: `Highlight ${quoted(v)}`, action: () => addHighlight(v) });
+  const missing = Object.keys(row.fields).filter((k) => k.toLowerCase() !== 'message' && !isColumnShown(k));
+  if (missing.length) items.push({ label: 'Add column', submenu: missing.map((k) => ({ label: k, action: () => setColumnShown(k, true) })) });
+  items.push(
+    'sep',
+    { label: 'Copy value', disabled: !key, action: () => key && copyText(cellValue(t, row, key), 'Value') },
+    { label: 'Copy entry', action: () => copyText(row.text, 'Entry') },
+    { label: 'Toggle bookmark', shortcut: 'B', action: () => void toggleBookmark(row) },
+  );
+  contextMenu(e.clientX, e.clientY, items);
+}
+
+/** Right-click on a field in the details pane. */
+function fieldMenu(e: MouseEvent, row: RowData, key: string) {
+  const t = active;
+  if (!t) return;
+  const v = firstLineTrim(row.fields[key] ?? '');
+  const items: MenuItem[] = filterItems(t, row, key, v);
+  items.push('sep');
+  if (v && key !== 'time' && key !== 'message') items.push({ label: `Highlight ${quoted(v)}`, action: () => addHighlight(v) });
+  if (key !== 'message' && !isColumnShown(key)) items.push({ label: 'Add column', action: () => setColumnShown(key, true) });
+  items.push('sep', { label: 'Copy value', action: () => copyText(row.fields[key] ?? '', 'Value') });
+  contextMenu(e.clientX, e.clientY, items);
 }
 
 // -------------------------------------------------------------------- search
@@ -367,14 +666,118 @@ $('#s-filter').onclick = () => {
   toast('Search added as an include filter');
 };
 
-const quickSoon = debounce(() => {
-  if (!active) return;
+/** Applies the quick-filter box (no-op when unchanged). */
+function commitQuick() {
+  if (!active || (active.filter.query ?? '') === quickInput.value) return;
   active.filter.query = quickInput.value;
   void applyFilter(active);
+}
+
+function saveHistory(q: string) {
+  q = q.trim();
+  if (!q) return;
+  settings.queryHistory = [q, ...(settings.queryHistory ?? []).filter((x) => x !== q)].slice(0, 20);
+  saveSettings();
+}
+
+/** Suggestions for the token at the caret: field values, field names, or (empty box) the history. */
+function quickSuggestions(): Suggestion[] {
+  const t = active;
+  const text = quickInput.value;
+  const pick = (q: string) => {
+    quickInput.value = q;
+    commitQuick();
+    saveHistory(q);
+    ac.close();
+  };
+  if (!text.trim()) return (settings.queryHistory ?? []).map((q) => ({ label: q, accept: () => pick(q) }));
+  if (!t) return [];
+  const [start, len] = tokenAt(text, quickInput.selectionStart ?? text.length);
+  const [prefix, field, value] = splitToken(text.slice(start, start + len));
+  const replace = (with_: string) => {
+    quickInput.value = text.slice(0, start) + with_ + text.slice(start + len);
+    const caret = start + with_.length;
+    quickInput.setSelectionRange(caret, caret);
+  };
+  const stats = t.fieldStats?.fields ?? [];
+  if (field !== null) {
+    const lk = field.toLowerCase();
+    const values: [string, number][] =
+      lk === 'level'
+        ? LEVEL_NAMES.map((n, i): [string, number] => [n, t.info.levelCounts[i] ?? 0]).filter(([, c], i) => i > 0 && c > 0)
+        : stats.find((f) => f.key.toLowerCase() === lk)?.top ?? [];
+    const needle = value.toLowerCase();
+    return values
+      .filter(([v]) => v.toLowerCase().includes(needle))
+      .slice(0, 10)
+      .map(([v, c]) => ({
+        label: v,
+        hint: fmtNum(c),
+        accept: () => {
+          replace(prefix + fieldToken(field, v) + ' ');
+          ac.close();
+          commitQuick();
+          saveHistory(quickInput.value);
+        },
+      }));
+  }
+  if (!value) return [];
+  const needle = value.toLowerCase();
+  const names = [...new Set([...stats.map((f) => f.key), 'level'])].filter((k) => k.toLowerCase().startsWith(needle));
+  return names.map((k) => ({
+    label: `${k}:`,
+    accept: () => {
+      replace(prefix + k + ':');
+      ac.update(); // straight on to the values
+    },
+  }));
+}
+
+const ac = new Autocomplete($('#quick-ac'), quickSuggestions);
+
+/** True while the caret is right after a bare `field:` (applying it now would filter on the literal text). */
+function typingFieldName(): boolean {
+  const text = quickInput.value;
+  const [start, len] = tokenAt(text, quickInput.selectionStart ?? text.length);
+  const [, field, value] = splitToken(text.slice(start, start + len));
+  return field !== null && !value;
+}
+
+const quickSoon = debounce(() => {
+  if (document.activeElement === quickInput && typingFieldName()) return;
+  commitQuick();
 }, 300);
-quickInput.addEventListener('input', quickSoon);
+quickInput.addEventListener('input', () => {
+  quickSoon();
+  ac.update();
+});
+quickInput.addEventListener('focus', () => !quickInput.value && ac.update());
+quickInput.addEventListener('blur', () => {
+  ac.close();
+  if (active?.filter.query) saveHistory(active.filter.query);
+});
 quickInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (ac.open) ac.move(1);
+    else ac.update();
+  } else if (e.key === 'ArrowUp') {
+    if (!ac.open) return;
+    e.preventDefault();
+    ac.move(-1);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (ac.open && ac.acceptCurrent()) return;
+    ac.close();
+    commitQuick();
+    saveHistory(quickInput.value);
+  } else if (e.key === 'Tab') {
+    if (ac.open && ac.acceptCurrent()) e.preventDefault();
+  } else if (e.key === 'Escape') {
+    if (ac.open) {
+      ac.close();
+      return;
+    }
     quickInput.value = '';
     quickSoon();
     $('#grid').focus();
@@ -544,6 +947,14 @@ function gridKey(e: KeyboardEvent): boolean {
     case 'f':
       toggleFollow();
       return true;
+    case 'c':
+    case 'C':
+      void toggleContext(t);
+      return true;
+    case 'Escape':
+      if (!t.contextMode) return false;
+      void setContextMode(t, false);
+      return true;
     case '/':
       searchInput.focus();
       searchInput.select();
@@ -586,7 +997,8 @@ function renderStatus() {
   const parts: string[] = [];
   if (src) parts.push(`<span title="Detected format">${esc(src.format)}</span>`, `<a class="enc" title="Change encoding">${esc(src.encoding)}</a>${src.compressed ? '<span>gzip</span>' : ''}`);
   parts.push(`<span>${fmtBytes(size)}</span>`, `<span>${fmtNum(lines)} lines · ${fmtNum(i.total)} entries</span>`);
-  if (i.viewCount !== i.total) parts.push(`<span><b>${fmtNum(i.viewCount)}</b> shown</span>`);
+  if (t.contextMode) parts.push(`<span title="Show in context: press C or Esc to go back to the filtered view">All <b>${fmtNum(i.viewCount)}</b> entries (filters ignored)</span>`);
+  else if (i.viewCount !== i.total) parts.push(`<span><b>${fmtNum(i.viewCount)}</b> shown</span>`);
   const sel = Math.abs(t.focus - t.anchor) + 1;
   if (i.viewCount) parts.push(`<span>Row ${fmtNum(t.focus + 1)}${sel > 1 ? ` · ${fmtNum(sel)} selected` : ''}</span>`);
   parts.push('<span class="sp"></span>');
@@ -667,6 +1079,9 @@ formatSel.onchange = async () => {
 
 async function reformat(t: Tab) {
   t.info = await engine.reformat(t.id, t.formatId || undefined, settings.customFormats);
+  t.contextMode = t.info.ignoreFilter;
+  renderBanner();
+  refreshFieldsSoon(t);
   grid.setTab(t);
   sidebar.render(t);
   renderStatus();
@@ -729,19 +1144,12 @@ function editColumns() {
   modal((box, close) => {
     const hidden = new Set(settings.hiddenColumns ?? []);
     const list = h('div', { class: 'form' });
-    for (const c of t.info.columns) {
+    for (const c of effectiveColumns(t)) {
       const cb = h('input', { type: 'checkbox', checked: !hidden.has(c.key) });
-      cb.onchange = () => {
-        if (cb.checked) hidden.delete(c.key);
-        else hidden.add(c.key);
-        settings.hiddenColumns = [...hidden];
-        saveSettings();
-        grid.renderHeader();
-        grid.render();
-      };
+      cb.onchange = () => setColumnShown(c.key, cb.checked);
       list.append(h('label', {}, cb, c.title));
     }
-    box.append(h('h2', {}, 'Columns'), h('div', { class: 'hint' }, 'Choose which columns to show. Drag a column edge in the header to resize it.'), list, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: close }, 'Done')));
+    box.append(h('h2', {}, 'Columns'), h('div', { class: 'hint' }, 'Choose which columns to show. Drag a column edge in the header to resize it; right-click the header to reorder.'), list, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: close }, 'Done')));
   });
 }
 
@@ -777,6 +1185,8 @@ async function reopen(t: Tab, encoding: string) {
   });
   t.info = placeholderInfo(t.id, t.info.title);
   t.search.result = null;
+  t.contextMode = false;
+  t.fieldStats = null;
   if (active === t) activate(t);
 }
 
@@ -791,6 +1201,8 @@ function showHelp() {
     ['e / E', 'Next / previous error'],
     ['w / W', 'Next / previous warning'],
     ['Ctrl+B, b, double-click', 'Toggle bookmark'],
+    ['C', 'Show in context / back to filtered view'],
+    ['Right-click', 'Filter by a value'],
     ['F2 / Shift+F2', 'Next / previous bookmark'],
     ['Ctrl+G', 'Go to line'],
     ['Ctrl+T, f, End', 'Follow new lines (tail)'],

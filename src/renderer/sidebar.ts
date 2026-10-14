@@ -1,7 +1,7 @@
-// Left panel: levels, filter rules, time range, highlight rules and bookmarks.
+// Left panel: levels, field values, filter rules, time range, highlight rules and bookmarks.
 
 import { validatePattern } from '../core/query';
-import { FilterRule, Level, LEVEL_NAMES } from '../core/types';
+import { ColumnDef, FilterRule, Level, LEVEL_NAMES } from '../core/types';
 import { formatTime } from '../core/timestamp';
 import type { Bookmark, HighlightRule, Settings, Tab } from './state';
 import { uid } from './state';
@@ -15,6 +15,13 @@ export interface SidebarHost {
   jumpToBookmark(b: Bookmark): void;
   removeBookmark(b: Bookmark): void;
   bookmarkNote(b: Bookmark): void;
+  /** Effective columns of the tab (including extra field columns). */
+  columns(tab: Tab): ColumnDef[];
+  isColumnShown(key: string): boolean;
+  toggleColumn(key: string): void;
+  /** Click on a field value (include) or right-click (exclude). */
+  filterByValue(key: string, value: string, mode: 'include' | 'exclude'): void;
+  rescanFields(): void;
 }
 
 const LEVEL_COLORS = ['var(--fg-3)', 'var(--trace)', 'var(--debug)', 'var(--accent)', 'var(--warn)', 'var(--error)', 'var(--fatal-bg)'];
@@ -33,7 +40,8 @@ export class Sidebar {
       this.el.append(this.highlightsSection());
       return;
     }
-    this.el.append(this.levelsSection(tab), this.filtersSection(tab), this.timeSection(tab), this.highlightsSection(), this.bookmarksSection(tab));
+    this.fieldsEl = this.fieldsSection(tab);
+    this.el.append(this.levelsSection(tab), this.fieldsEl, this.filtersSection(tab), this.timeSection(tab), this.highlightsSection(), this.bookmarksSection(tab));
     this.el.scrollTop = scroll;
   }
 
@@ -59,6 +67,79 @@ export class Sidebar {
     return sec;
   }
 
+  // ---------------------------------------------------------------- fields
+
+  private fieldsEl: HTMLElement | null = null;
+
+  /** Re-renders only the Fields section (stats arrive asynchronously). */
+  renderFields(tab: Tab) {
+    if (tab !== this.lastTab || !this.fieldsEl?.isConnected) return;
+    const next = this.fieldsSection(tab);
+    this.fieldsEl.replaceWith(next);
+    this.fieldsEl = next;
+  }
+
+  private fieldsSection(tab: Tab) {
+    const st = tab.fieldStats;
+    const sec = h(
+      'div',
+      { class: 'sec fields-sec' },
+      h('h3', {}, 'Fields', h('button', { class: 'mini', title: 'Count the values again', onclick: () => this.host.rescanFields() }, '↻')),
+    );
+    if (!st) {
+      sec.append(h('div', { class: 'empty-hint' }, 'Counting values…'));
+      return sec;
+    }
+    sec.append(h('div', { class: 'empty-hint' }, `Top values in ${fmtNum(st.scanned)} of ${fmtNum(st.viewCount)} entries${st.sampled ? ' (sample)' : ''}`));
+    if (!st.fields.length) sec.append(h('div', { class: 'empty-hint' }, 'No parsed fields in this view.'));
+    const expanded = (tab.expandedFields ??= new Set());
+    for (const f of st.fields) {
+      const shown = this.host.isColumnShown(f.key);
+      const open = expanded.has(f.key);
+      sec.append(
+        h(
+          'div',
+          {
+            class: open ? 'fld open' : 'fld',
+            title: `${f.key}: ${fmtNum(f.present)} entries have a value`,
+            onclick: () => {
+              if (open) expanded.delete(f.key);
+              else expanded.add(f.key);
+              this.renderFields(tab);
+            },
+          },
+          h('span', { class: 'tw' }, open ? '▾' : '▸'),
+          h('span', { class: 'name' }, f.key),
+          h('span', { class: 'n' }, `${fmtNum(f.distinct)}${f.distinctCapped ? '+' : ''} ${f.distinct === 1 && !f.distinctCapped ? 'value' : 'values'}`),
+          h(
+            'button',
+            { class: shown ? 'mini on' : 'mini', title: shown ? 'Hide this column' : 'Show as a column', onclick: (e: Event) => { e.stopPropagation(); this.host.toggleColumn(f.key); } },
+            shown ? '✓ column' : '+ column',
+          ),
+        ),
+      );
+      if (!open) continue;
+      for (const [v, c] of f.top) {
+        const pct = f.present ? (c / f.present) * 100 : 0;
+        sec.append(
+          h(
+            'div',
+            {
+              class: 'fv',
+              title: `${v}\nClick: only this value · Right-click: exclude it`,
+              onclick: () => this.host.filterByValue(f.key, v, 'include'),
+              oncontextmenu: (e: Event) => { e.preventDefault(); this.host.filterByValue(f.key, v, 'exclude'); },
+            },
+            h('span', { class: 'v' }, v),
+            h('span', { class: 'n' }, fmtNum(c)),
+            h('i', { class: 'bar', style: `width:${pct.toFixed(1)}%` }),
+          ),
+        );
+      }
+    }
+    return sec;
+  }
+
   // --------------------------------------------------------------- filters
 
   private filtersSection(tab: Tab) {
@@ -80,9 +161,13 @@ export class Sidebar {
       h('h3', {}, 'Filters', h('span', {}, presetSel, ' ', h('button', { class: 'mini', title: 'Save current filters as a preset', onclick: () => this.savePreset(tab) }, 'Save'))),
     );
     if (!f.rules.length) sec.append(h('div', { class: 'empty-hint' }, 'Add include (+) or exclude (−) rules. Entries must match any include and no exclude.'));
-    const columns = tab.info.columns.filter((c) => c.key !== '__source');
+    const columns = this.host.columns(tab).filter((c) => c.key !== '__source');
+    const titleOf = (key: string) => columns.find((c) => c.key === key)?.title ?? key;
     for (const r of f.rules) {
-      const colSel = h('select', { class: 'mini', title: 'Match in column' }, h('option', { value: '' }, 'any'), ...columns.map((c) => h('option', { value: c.key, selected: r.column === c.key }, c.title)));
+      const options = columns.map((c) => h('option', { value: c.key, selected: r.column === c.key }, c.title));
+      if (r.column && !columns.some((c) => c.key === r.column)) options.push(h('option', { value: r.column, selected: true }, r.column));
+      const colSel = h('select', { class: 'mini', title: 'Match in column' }, h('option', { value: '' }, 'any'), ...options);
+      const label = r.exact && r.column ? `${titleOf(r.column)} = ${r.text}` : r.regex ? `/${r.text}/` : r.text;
       colSel.onchange = () => {
         r.column = colSel.value || undefined;
         this.host.applyFilter();
@@ -93,9 +178,9 @@ export class Sidebar {
           { class: r.enabled ? 'rule' : 'rule off' },
           h('input', { type: 'checkbox', checked: r.enabled, onchange: () => { r.enabled = !r.enabled; this.host.applyFilter(); } }),
           h('span', { class: `mode ${r.mode === 'include' ? 'inc' : 'exc'}`, title: r.mode }, r.mode === 'include' ? '+' : '−'),
-          h('span', { class: 'txt', title: r.text }, r.regex ? `/${r.text}/` : r.text),
+          h('span', { class: 'txt', title: r.exact ? `${label} (whole value)` : r.text }, label),
           h('span', { class: 'col' }, r.caseSensitive ? 'Aa' : ''),
-          colSel,
+          r.exact ? null : colSel,
           h('button', { class: 'mini danger', title: 'Remove', onclick: () => { f.rules = f.rules.filter((x) => x !== r); this.host.applyFilter(); } }, '×'),
         ),
       );

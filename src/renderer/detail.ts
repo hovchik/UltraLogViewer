@@ -6,7 +6,12 @@ import type { Tab } from './state';
 import { esc, h, prettyEntry, toast } from './util';
 
 export class DetailView {
-  constructor(private el: HTMLElement, private onResize: (height: number) => void) {}
+  constructor(
+    private el: HTMLElement,
+    private onResize: (height: number) => void,
+    /** Right-click on a parsed field row. */
+    private onFieldMenu: (e: MouseEvent, row: RowData, key: string) => void,
+  ) {}
 
   render(tab: Tab | null, row: RowData | undefined, selectionEnd?: RowData) {
     this.el.innerHTML = '';
@@ -35,10 +40,19 @@ export class DetailView {
     );
     const fields = h('div', { class: 'fields' });
     const table = h('table');
-    for (const [k, v] of Object.entries(row.fields)) {
+    // Format columns first, then the extra fields in entry order.
+    const order = tab.info.columns.map((c) => c.key).filter((k) => k in row.fields);
+    for (const k of Object.keys(row.fields)) if (!order.includes(k)) order.push(k);
+    for (const k of order) {
+      const v = row.fields[k];
       if (!v || k === 'message') continue;
       const tr = document.createElement('tr');
+      tr.title = 'Right-click to filter by this value';
       tr.innerHTML = `<td class="k">${esc(k)}</td><td>${esc(v.length > 300 ? v.slice(0, 300) + '…' : v)}</td>`;
+      tr.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        this.onFieldMenu(e, row, k);
+      });
       table.append(tr);
     }
     fields.append(table);

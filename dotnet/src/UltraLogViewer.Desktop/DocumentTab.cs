@@ -42,6 +42,11 @@ public sealed class DocumentTab : IDisposable
     public bool Ready { get; set; }
     /// <summary>New data arrived since the overview, timeline and search hits were computed.</summary>
     public bool StaleViews { get; set; }
+    /// <summary>Top values per field for the Fields panel and quick-filter suggestions.</summary>
+    public FieldStats? FieldStats { get; set; }
+    public DateTime StatsTime { get; set; }
+    /// <summary>Fields expanded in the Fields panel.</summary>
+    public HashSet<string> ExpandedFields { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public string Title => Paths.Length == 1 ? Path.GetFileName(Paths[0]) : $"{Path.GetFileName(Paths[0])} + {Paths.Length - 1}";
     public int SelectionStart => Math.Min(Anchor, Focus);

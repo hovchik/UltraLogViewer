@@ -9,14 +9,23 @@
 import * as fs from 'node:fs';
 import { FileSource, SourceOptions } from './fileSource';
 import { GrowU32, GrowU8, lowerBound } from './grow';
-import { compileMatcher, compileQuery, Matcher } from './query';
-import { CustomFormat, DocInfo, FilterSpec, Histogram, Level, LEVEL_COUNT, RowData, rowKey, SearchResult, TextPattern } from './types';
+import { compileMatcher, compileQuery, Matcher, ruleMatcher } from './query';
+import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, RowData, rowKey, SearchResult, TextPattern } from './types';
 
 export type Progress = (phase: string, fraction: number) => void;
 
 const MAX_SEARCH_ROWS = 2_000_000;
 /** Level names used when matching `level:` queries (WARNING also matches "warn"). */
 const LEVEL_MATCH_NAMES = ['NONE', 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'FATAL'];
+/** Fields never worth counting in fieldStats(): every value differs. */
+const UNCOUNTED_FIELDS = new Set(['message', 'time']);
+const STATS_BLOCK = 1000;
+const STATS_DISTINCT_CAP = 5000;
+
+const passes = (verdict: GrowU8[], s: number, e: number) => {
+  const v = verdict[s];
+  return !!v && e < v.length && v.get(e) === 1;
+};
 
 export class LogDocument {
   readonly sources: FileSource[] = [];
@@ -34,6 +43,11 @@ export class LogDocument {
   private queue: Promise<unknown> = Promise.resolve();
   indexing = false;
   progress = 0;
+  /**
+   * "Show in context": every entry is shown, the current filter is kept (and stays up to date), and entries it
+   * would hide come back with `context: true` so they can be drawn dimmed.
+   */
+  ignoreFilter = false;
 
   constructor(readonly id: number, readonly title: string) {}
 
@@ -71,8 +85,14 @@ export class LogDocument {
     return this.mergedEnt ? this.mergedEnt.length : this.sources[0]?.entryCount ?? 0;
   }
 
+  /** The view that rows are read from: null means every base row. */
+  private get curView(): Uint32Array | null {
+    return this.ignoreFilter ? null : this.view;
+  }
+
   viewCount(): number {
-    return this.view ? this.view.length : this.baseCount();
+    const v = this.curView;
+    return v ? v.length : this.baseCount();
   }
 
   /** base position -> [source, entry] */
@@ -81,7 +101,8 @@ export class LogDocument {
   }
 
   private baseOf(row: number): number {
-    return this.view ? this.view[row] : row;
+    const v = this.curView;
+    return v ? v[row] : row;
   }
 
   private baseForEntry(src: number, entry: number): number {
@@ -175,8 +196,8 @@ export class LogDocument {
       this.verdict = [];
       return true;
     }
-    const includes = spec.rules.filter((r) => r.enabled && r.text && r.mode === 'include').map((r) => ({ m: compileMatcher(r), col: r.column }));
-    const excludes = spec.rules.filter((r) => r.enabled && r.text && r.mode === 'exclude').map((r) => ({ m: compileMatcher(r), col: r.column }));
+    const includes = spec.rules.filter((r) => r.enabled && r.text && r.mode === 'include').map((r) => ({ m: ruleMatcher(r), col: r.column }));
+    const excludes = spec.rules.filter((r) => r.enabled && r.text && r.mode === 'exclude').map((r) => ({ m: ruleMatcher(r), col: r.column }));
     const query = spec.query?.trim() ? compileQuery(spec.query, !!spec.queryCaseSensitive) : null;
     const needsText = includes.length > 0 || excludes.length > 0 || !!query;
     const bookmarks = spec.bookmarksOnly ? new Set(spec.bookmarks ?? []) : null;
@@ -279,6 +300,9 @@ export class LogDocument {
 
   getRows(start: number, count: number): RowData[] {
     const end = Math.min(this.viewCount(), start + count);
+    const viewContext = this.ignoreFilter ? null : this.viewContext;
+    // In "show in context" mode, entries the filter rejects are marked as context.
+    const hidden = this.ignoreFilter && this.view ? this.verdict : null;
     const rows: RowData[] = [];
     let r = start;
     while (r < end) {
@@ -307,12 +331,71 @@ export class LogDocument {
           time: Number.isNaN(t) ? null : t,
           fields: src.format.parse(texts[i] ?? ''),
           text: texts[i] ?? '',
-          context: this.viewContext ? this.viewContext[r + i] === 1 : undefined,
+          context: viewContext ? viewContext[r + i] === 1 : hidden ? !passes(hidden, s, e) : undefined,
         });
       }
       r += len;
     }
     return rows;
+  }
+
+  // ------------------------------------------------------------- field stats
+
+  /**
+   * Top values of every parsed field over the view rows. Views larger than `maxRows` are sampled in evenly
+   * spaced blocks, so the panel stays responsive on huge files.
+   */
+  async fieldStats(maxRows = 100_000, top = 10, cancelled: () => boolean = () => false): Promise<FieldStats> {
+    const n = this.viewCount();
+    const counts = new Map<string, { key: string; values: Map<string, number>; present: number; capped: boolean }>();
+    let scanned = 0;
+    const count = (rows: RowData[]) => {
+      for (const row of rows) {
+        for (const [k, raw] of Object.entries(row.fields)) {
+          const lk = k.toLowerCase();
+          if (UNCOUNTED_FIELDS.has(lk)) continue;
+          let v = raw.trim();
+          if (!v) continue;
+          const nl = v.indexOf('\n');
+          if (nl >= 0) v = v.slice(0, nl);
+          if (v.length > 200) v = v.slice(0, 200);
+          let c = counts.get(lk);
+          if (!c) counts.set(lk, (c = { key: k, values: new Map(), present: 0, capped: false }));
+          c.present++;
+          const x = c.values.get(v);
+          if (x !== undefined) c.values.set(v, x + 1);
+          else if (c.values.size < STATS_DISTINCT_CAP) c.values.set(v, 1);
+          else c.capped = true;
+        }
+      }
+      scanned += rows.length;
+    };
+    const tick = () => new Promise<void>((res) => setImmediate(res));
+    const sampled = n > maxRows;
+    if (!sampled) {
+      for (let r = 0; r < n; r += 2000) {
+        if (cancelled()) break;
+        count(this.getRows(r, 2000));
+        await tick();
+      }
+    } else {
+      const blocks = Math.max(1, Math.floor(maxRows / STATS_BLOCK));
+      const stride = (n - STATS_BLOCK) / Math.max(1, blocks - 1);
+      for (let b = 0; b < blocks; b++) {
+        if (cancelled()) break;
+        count(this.getRows(Math.floor(b * stride), STATS_BLOCK));
+        if (b % 2 === 1) await tick();
+      }
+    }
+    if (cancelled()) return { scanned, viewCount: n, sampled, fields: [], cancelled: true };
+    const fields: FieldStat[] = [...counts.values()].map((c) => ({
+      key: c.key,
+      present: c.present,
+      distinct: c.values.size,
+      distinctCapped: c.capped,
+      top: [...c.values].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)).slice(0, top),
+    }));
+    return { scanned, viewCount: n, sampled, fields };
   }
 
   // ------------------------------------------------------------------- search
@@ -324,6 +407,7 @@ export class LogDocument {
     const hits = this.sources.map((s) => new Uint8Array(s.entryCount));
     const total = this.sources.reduce((n, s) => n + s.entryCount, 0);
     let done = 0;
+    const view = this.curView;
     for (const [si, src] of this.sources.entries()) {
       const inView = this.verdict[si];
       const ctxAll = !!this.viewContext; // context rows may come from non-matching entries
@@ -331,7 +415,7 @@ export class LogDocument {
         if (cancelled()) return false;
         for (let i = 0; i < texts.length; i++) {
           const e = first + i;
-          if (this.view && !ctxAll && inView && (e >= inView.length || inView.get(e) !== 1)) continue;
+          if (view && !ctxAll && inView && (e >= inView.length || inView.get(e) !== 1)) continue;
           if (m(texts[i])) hits[si][e] = 1;
         }
         done += texts.length;
@@ -356,8 +440,8 @@ export class LogDocument {
 
   /** View row for a base position (nearest following row if filtered out). */
   private rowForBase(base: number): number {
-    if (!this.view) return base;
-    const v = this.view;
+    const v = this.curView;
+    if (!v) return base;
     return Math.min(v.length - 1, lowerBound(0, v.length, (i) => v[i] >= base));
   }
 
@@ -368,12 +452,14 @@ export class LogDocument {
     return this.rowForBase(this.baseForEntry(source, e));
   }
 
-  rowForKey(key: string): number | null {
+  /** View row of an entry; null if it is filtered out (or, with `nearest`, the next row that isn't). */
+  rowForKey(key: string, nearest = false): number | null {
     const [s, e] = key.split(':').map(Number);
-    if (!this.sources[s] || e >= this.sources[s].entryCount) return null;
+    if (!this.sources[s] || !(e < this.sources[s].entryCount)) return null;
     const base = this.baseForEntry(s, e);
     const row = this.rowForBase(base);
-    return this.baseOf(row) === base ? row : null;
+    if (row < 0) return null;
+    return nearest || this.baseOf(row) === base ? row : null;
   }
 
   private rowTime(r: number): number {
@@ -488,6 +574,7 @@ export class LogDocument {
       timeMin: range ? range[0] : null,
       timeMax: range ? range[1] : null,
       merged: this.merged,
+      ignoreFilter: this.ignoreFilter,
     };
   }
 

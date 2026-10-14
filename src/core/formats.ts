@@ -162,21 +162,46 @@ const KEYS = {
   thread: ['thread', 'thread_name', 'threadname', 'threadid', 'pid', 'tid'],
 };
 
-function pick(obj: Record<string, unknown>, keys: string[]): unknown {
+const ERROR_KEYS = ['exception', '@x', 'error', 'stack', 'stacktrace', 'err'];
+
+const pick = (obj: Record<string, unknown>, keys: string[]): unknown => pickNamed(obj, keys)[0];
+
+/** The first property matching one of the keys, and its name (a dotted path for nested keys). */
+function pickNamed(obj: Record<string, unknown>, keys: string[]): [unknown, string | null] {
   for (const k of keys) {
-    if (k in obj) return obj[k];
+    if (Object.hasOwn(obj, k)) return [obj[k], k];
   }
-  const lower: Record<string, unknown> = {};
-  for (const k of Object.keys(obj)) lower[k.toLowerCase()] = obj[k];
+  const lower = new Map<string, string>();
+  for (const k of Object.keys(obj)) if (!lower.has(k.toLowerCase())) lower.set(k.toLowerCase(), k);
   for (const k of keys) {
-    if (k in lower) return lower[k];
+    const name = lower.get(k);
+    if (name !== undefined) return [obj[name], name];
     if (k.includes('.')) {
       const [a, b] = k.split('.');
-      const v = lower[a];
-      if (v && typeof v === 'object') return (v as Record<string, unknown>)[b];
+      const pa = lower.get(a);
+      const v = pa === undefined ? undefined : obj[pa];
+      if (v && typeof v === 'object' && Object.hasOwn(v, b)) return [(v as Record<string, unknown>)[b], `${pa}.${b}`];
     }
   }
-  return undefined;
+  return [undefined, null];
+}
+
+const MAX_FIELDS = 60;
+
+/** Adds the remaining properties as fields, nested objects flattened to dotted names (http.request.path). */
+function addExtras(d: Record<string, string>, o: Record<string, unknown>, prefix: string, skip: Set<string>, depth: number, count: { n: number }) {
+  for (const [k, v] of Object.entries(o)) {
+    if (count.n >= MAX_FIELDS) return;
+    const name = prefix + k;
+    if (skip.has(name) || name === '__proto__') continue;
+    if (v && typeof v === 'object' && !Array.isArray(v) && depth < 4) {
+      addExtras(d, v as Record<string, unknown>, name + '.', skip, depth + 1, count);
+      continue;
+    }
+    if (Object.hasOwn(d, name)) continue;
+    d[name] = str(v);
+    count.n++;
+  }
 }
 
 const str = (v: unknown) => (v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
@@ -207,15 +232,22 @@ export function jsonFormat(): LogFormat {
     parse(entry): Record<string, string> {
       const o = tryJson(entry);
       if (!o) return { time: '', level: levelText(detectLevel(entry)), logger: '', message: entry };
-      let message = str(pick(o, KEYS.message));
-      const ex = pick(o, ['exception', '@x', 'error', 'stack', 'stacktrace', 'err']);
+      const [msg, msgKey] = pickNamed(o, KEYS.message);
+      const [ex, errKey] = pickNamed(o, ERROR_KEYS);
+      const [time, timeKey] = pickNamed(o, KEYS.time);
+      const [level, levelKey] = pickNamed(o, KEYS.level);
+      const [logger, loggerKey] = pickNamed(o, KEYS.logger);
+      let message = str(msg);
       if (ex) message += (message ? '\n' : '') + (typeof ex === 'object' ? str((ex as Record<string, unknown>).stack ?? ex) : str(ex));
-      return {
-        time: str(pick(o, KEYS.time)),
-        level: levelText(parseLevel(pick(o, KEYS.level))) || str(pick(o, KEYS.level)),
-        logger: str(pick(o, KEYS.logger)),
+      const d: Record<string, string> = {
+        time: str(time),
+        level: levelText(parseLevel(level)) || str(level),
+        logger: str(logger),
         message: message || entry,
       };
+      const skip = new Set([msgKey, errKey, timeKey, levelKey, loggerKey].filter((k): k is string => k !== null));
+      addExtras(d, o, '', skip, 0, { n: Object.keys(d).length });
+      return d;
     },
   };
 }

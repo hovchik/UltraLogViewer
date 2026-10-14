@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import { LogDocument } from '../src/core/document';
-import { FilterSpec, Level } from '../src/core/types';
+import { FieldStats, FilterSpec, Level } from '../src/core/types';
 import { LOG4J, tmpFile } from './helpers';
 
 const allLevels = () => [true, true, true, true, true, true, true];
 const spec = (over: Partial<FilterSpec> = {}): FilterSpec => ({ levels: allLevels(), rules: [], ...over });
 const rule = (text: string, mode: 'include' | 'exclude', extra = {}) => ({ id: text, text, mode, enabled: true, regex: false, caseSensitive: false, wholeWord: false, ...extra });
+
+const entries = (d: LogDocument) => d.getRows(0, 100).map((r) => r.entry);
 
 async function doc(content = LOG4J) {
   const d = new LogDocument(1, 'test');
@@ -120,5 +122,74 @@ describe('LogDocument', () => {
     fs.appendFileSync(p, '2024-01-01 00:00:02 ERROR boom\n2024-01-01 00:00:03 INFO fine\n');
     await d.refresh();
     expect(d.getRows(0, 5).map((r) => r.entry)).toEqual([1]);
+  });
+
+  it('matches exact rules against the whole value', async () => {
+    const d = await doc();
+    await d.applyFilter(spec({ rules: [rule('com.acme.App', 'include', { column: 'logger', exact: true })] }));
+    expect(entries(d)).toEqual([0, 4, 5]);
+    await d.applyFilter(spec({ rules: [rule('com.acme', 'include', { column: 'logger', exact: true })] }));
+    expect(d.viewCount()).toBe(0);
+    await d.applyFilter(spec({ rules: [rule('worker-1', 'exclude', { column: 'thread', exact: true })] }));
+    expect(entries(d)).toEqual([0, 1, 3, 4, 5]);
+  });
+
+  it('shows all entries in context without losing the filter', async () => {
+    const d = await doc();
+    await d.applyFilter(spec({ rules: [rule('Db', 'include')] }));
+    expect(entries(d)).toEqual([1, 3]);
+    d.ignoreFilter = true;
+    expect(d.viewCount()).toBe(6);
+    expect(d.info().viewCount).toBe(6);
+    expect(d.getRows(0, 10).map((r) => r.context)).toEqual([true, false, true, false, true, true]);
+    expect(d.rowForKey('0:3')).toBe(3);
+    expect((await d.search({ text: 'Cache', regex: false, caseSensitive: false, wholeWord: false })).rows).toEqual([2]);
+    d.ignoreFilter = false;
+    expect(entries(d)).toEqual([1, 3]);
+    expect(d.rowForKey('0:2')).toBeNull();
+    expect(d.rowForKey('0:2', true)).toBe(1);
+  });
+
+  it('counts top field values', async () => {
+    const d = await doc();
+    const stats = await d.fieldStats();
+    const get = (s: FieldStats, k: string) => s.fields.find((f) => f.key.toLowerCase() === k);
+    expect([stats.scanned, stats.viewCount, stats.sampled]).toEqual([6, 6, false]);
+    expect(get(stats, 'message')).toBeUndefined();
+    expect(get(stats, 'time')).toBeUndefined();
+    const logger = get(stats, 'logger')!;
+    expect(logger.top[0]).toEqual(['com.acme.App', 3]);
+    expect(logger.distinct).toBe(3);
+    expect(logger.present).toBe(6);
+    expect(get(stats, 'thread')!.top[0]).toEqual(['main', 4]);
+
+    await d.applyFilter(spec({ rules: [rule('Db', 'include')] }));
+    expect(get(await d.fieldStats(), 'logger')!.top).toEqual([['com.acme.Db', 2]]);
+    const sampled = await d.fieldStats(1);
+    expect(sampled.sampled || sampled.viewCount <= 1000).toBe(true);
+  });
+
+  it('samples large views in blocks', async () => {
+    let text = '';
+    for (let i = 0; i < 5000; i++) text += `2024-01-01 00:00:00 [t${i % 3}] INFO x - m${i}\n`;
+    const d = await doc(text);
+    const stats = await d.fieldStats(2000);
+    expect(stats.sampled).toBe(true);
+    expect(stats.scanned).toBe(2000);
+    expect(stats.fields.find((f) => f.key === 'thread')!.distinct).toBe(3);
+  });
+
+  it('exposes every JSON property as a field', async () => {
+    const d = await doc('{"@t":"2024-01-01T00:00:00Z","@l":"Warning","@m":"slow","Elapsed":812,"http":{"path":"/api","status":503},"tags":["a"]}\n');
+    const row = d.getRows(0, 1)[0];
+    expect(row.fields.level).toBe('WARN');
+    expect(row.fields.message).toBe('slow');
+    expect(row.fields.Elapsed).toBe('812');
+    expect(row.fields['http.path']).toBe('/api');
+    expect(row.fields['http.status']).toBe('503');
+    expect(row.fields.tags).toBe('["a"]');
+    expect('@m' in row.fields).toBe(false);
+    await d.applyFilter(spec({ query: 'http.status:503' }));
+    expect(d.viewCount()).toBe(1);
   });
 });

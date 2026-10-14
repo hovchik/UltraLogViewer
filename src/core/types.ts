@@ -28,6 +28,8 @@ export interface FilterRule extends TextPattern {
   mode: 'include' | 'exclude';
   /** Restrict matching to a single parsed column (e.g. "logger"); empty = whole entry text. */
   column?: string;
+  /** The whole (trimmed) value must equal `text`, e.g. "logger = com.acme.Db" from a click on a cell. */
+  exact?: boolean;
 }
 
 export interface FilterSpec {
@@ -86,6 +88,8 @@ export interface DocInfo {
   timeMin: number | null;
   timeMax: number | null;
   merged: boolean;
+  /** "Show in context": every entry is shown and rows the filter rejects come back with `context: true`. */
+  ignoreFilter: boolean;
 }
 
 export interface RowData {
@@ -109,6 +113,27 @@ export interface SearchResult {
   rows: number[];
   total: number;
   truncated: boolean;
+  cancelled?: boolean;
+}
+
+/** The most common values of one parsed field, counted over the view (or a sample of it). */
+export interface FieldStat {
+  key: string;
+  /** Rows with a non-empty value. */
+  present: number;
+  distinct: number;
+  /** More than the tracked maximum of distinct values: `distinct` is a lower bound. */
+  distinctCapped: boolean;
+  /** [value, count], most common first. */
+  top: [string, number][];
+}
+
+/** `scanned` of `viewCount` rows were read (`sampled` when fewer). */
+export interface FieldStats {
+  scanned: number;
+  viewCount: number;
+  sampled: boolean;
+  fields: FieldStat[];
   cancelled?: boolean;
 }
 

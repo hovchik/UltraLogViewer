@@ -214,22 +214,44 @@ public sealed class JsonFormat : LogFormat
         }
     }
 
-    private static JsonElement? Pick(JsonElement o, string[] keys)
+    private static JsonElement? Pick(JsonElement o, string[] keys) => PickNamed(o, keys).Value;
+
+    /// <summary>The first property matching one of the keys, and its name (a dotted path for nested keys).</summary>
+    private static (JsonElement? Value, string? Name) PickNamed(JsonElement o, string[] keys)
     {
         foreach (var k in keys)
-            if (o.TryGetProperty(k, out var v)) return v;
+            if (o.TryGetProperty(k, out var v)) return (v, k);
         foreach (var p in o.EnumerateObject())
         {
             var lk = p.Name.ToLowerInvariant();
-            if (keys.Contains(lk)) return p.Value;
+            if (keys.Contains(lk)) return (p.Value, p.Name);
         }
         foreach (var k in keys)
         {
             var dot = k.IndexOf('.');
             if (dot > 0 && o.TryGetProperty(k[..dot], out var parent) && parent.ValueKind == JsonValueKind.Object && parent.TryGetProperty(k[(dot + 1)..], out var child))
-                return child;
+                return (child, k);
         }
-        return null;
+        return (null, null);
+    }
+
+    private const int MaxExtraFields = 60;
+
+    /// <summary>Adds the remaining properties as fields, nested objects flattened to dotted names (http.request.path).</summary>
+    private static void AddExtras(Dictionary<string, string> d, JsonElement o, string prefix, HashSet<string> skip, int depth)
+    {
+        foreach (var p in o.EnumerateObject())
+        {
+            if (d.Count >= MaxExtraFields) return;
+            var name = prefix + p.Name;
+            if (skip.Contains(name)) continue;
+            if (p.Value.ValueKind == JsonValueKind.Object && depth < 4)
+            {
+                AddExtras(d, p.Value, name + ".", skip, depth + 1);
+                continue;
+            }
+            d.TryAdd(name, Str(p.Value));
+        }
     }
 
     private static string Str(JsonElement? v) => v is not JsonElement e ? "" : e.ValueKind switch
@@ -253,20 +275,28 @@ public sealed class JsonFormat : LogFormat
     {
         if (TryJson(entry) is not JsonElement o)
             return new() { ["time"] = "", ["level"] = L(Levels.Detect(entry)), ["logger"] = "", ["message"] = entry };
-        var message = Str(Pick(o, MessageKeys));
-        if (Pick(o, ErrorKeys) is JsonElement ex)
+        var (msg, msgKey) = PickNamed(o, MessageKeys);
+        var (err, errKey) = PickNamed(o, ErrorKeys);
+        var (time, timeKey) = PickNamed(o, TimeKeys);
+        var (level, levelKey) = PickNamed(o, LevelKeys);
+        var (logger, loggerKey) = PickNamed(o, LoggerKeys);
+        var message = Str(msg);
+        if (err is JsonElement ex)
         {
             var exText = ex.ValueKind == JsonValueKind.Object && ex.TryGetProperty("stack", out var st) ? Str(st) : Str(ex);
             message += (message.Length > 0 ? "\n" : "") + exText;
         }
-        var lvl = L(LevelOf(Pick(o, LevelKeys)));
-        return new()
+        var lvl = L(LevelOf(level));
+        var d = new Dictionary<string, string>
         {
-            ["time"] = Str(Pick(o, TimeKeys)),
-            ["level"] = lvl.Length > 0 ? lvl : Str(Pick(o, LevelKeys)),
-            ["logger"] = Str(Pick(o, LoggerKeys)),
+            ["time"] = Str(time),
+            ["level"] = lvl.Length > 0 ? lvl : Str(level),
+            ["logger"] = Str(logger),
             ["message"] = message.Length > 0 ? message : entry,
         };
+        var skip = new HashSet<string>(new[] { msgKey, errKey, timeKey, levelKey, loggerKey }.OfType<string>(), StringComparer.Ordinal);
+        AddExtras(d, o, "", skip, 0);
+        return d;
     }
 }
 

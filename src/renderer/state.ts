@@ -1,4 +1,4 @@
-import type { CustomFormat, DocInfo, FilterRule, FilterSpec, SearchResult, TextPattern } from '../core/types';
+import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, SearchResult, TextPattern } from '../core/types';
 
 export interface HighlightRule extends TextPattern {
   id: string;
@@ -38,6 +38,12 @@ export interface Settings {
   bookmarks?: Record<string, { line: number; note: string }[]>;
   columnWidths?: Record<string, number>;
   hiddenColumns?: string[];
+  /** Field keys shown as extra columns, by format name (sources[0].format). */
+  extraColumns?: Record<string, string[]>;
+  /** Column keys in display order, by format name. */
+  columnOrder?: Record<string, string[]>;
+  /** Quick-filter queries, most recent first. */
+  queryHistory?: string[];
 }
 
 export interface Tab {
@@ -56,6 +62,15 @@ export interface Tab {
   encoding?: string;
   error?: string;
   progress?: { phase: string; fraction: number };
+  /** "Show in context": every entry is shown, rows the filter hides are dimmed. */
+  contextMode?: boolean;
+  /** Line of the entry that was focused when context mode was entered (for the banner). */
+  contextLine?: number;
+  fieldStats?: FieldStats | null;
+  /** When the last field-stats run started (ms). */
+  statsAt?: number;
+  /** Fields expanded in the sidebar's Fields section. */
+  expandedFields?: Set<string>;
 }
 
 export const defaultFilter = (): FilterSpec => ({ levels: [true, true, true, true, true, true, true], rules: [], query: '', context: 0 });
