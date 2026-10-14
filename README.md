@@ -85,6 +85,25 @@ The grid draws only the rows on screen and fetches them from the engine in the b
 stays smooth with millions of entries and shows rows while a large file is still being indexed.
 On the same 300 MB / 2.5 M entry file: full index ~4 s, rule filter ~1.3 s, regex search ~1.1 s.
 
+### Windows installer
+
+[`installer/UltraLogViewer.iss`](installer/UltraLogViewer.iss) is an [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+script that packages the self-contained win-x64 build into `UltraLogViewer-Setup-<version>-x64.exe`
+(about 33 MB). It installs per user without admin rights (or for all users, chosen on the first
+page), adds a Start menu shortcut, an optional desktop shortcut, "Open with UltraLogViewer" for
+.log/.txt/.gz files and on the right-click menu, an optional default .log association, and an
+uninstaller.
+
+```powershell
+winget install JRSoftware.InnoSetup                 # once
+pwsh scripts/build-installer.ps1                    # Avalonia app -> release/installer/
+pwsh scripts/build-installer.ps1 -App Electron      # same installer for the Electron app
+```
+
+The [Windows installer workflow](.github/workflows/installer.yml) builds it on every change to the
+app or installer and uploads the setup .exe as an artifact; pushing a `v*` tag also attaches it to
+a GitHub release.
+
 ## Development
 
 | Command | What it does |

@@ -1,0 +1,61 @@
+name: Windows installer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - installer/**
+      - dotnet/**
+      - scripts/build-installer.ps1
+      - .github/workflows/installer.yml
+  pull_request:
+    paths:
+      - installer/**
+      - dotnet/**
+      - scripts/build-installer.ps1
+      - .github/workflows/installer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}'.TrimStart('v') } else { '' }
+          if ($version) { ./scripts/build-installer.ps1 -Version $version } else { ./scripts/build-installer.ps1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UltraLogViewer-Setup-win-x64
+          path: release/installer/*.exe
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: installer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: UltraLogViewer-Setup-win-x64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: '*.exe'
