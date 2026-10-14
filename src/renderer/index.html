@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
+    <title>UltraLogViewer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="toolbar">
+        <div class="tb-group">
+          <button id="btn-open" class="btn" title="Open files (Ctrl+O)">Open</button>
+          <button id="btn-merge" class="btn" title="Open several files merged into one timeline (Ctrl+Shift+O)">Merge…</button>
+        </div>
+        <div class="tb-group search">
+          <div class="field">
+            <input id="search" type="text" placeholder="Find (Ctrl+F)" spellcheck="false" />
+            <button class="tog" id="s-case" title="Match case">Aa</button>
+            <button class="tog" id="s-word" title="Whole word">ab|</button>
+            <button class="tog" id="s-regex" title="Regular expression">.*</button>
+          </div>
+          <span id="search-count" class="muted count"></span>
+          <button class="btn icon" id="s-prev" title="Previous match (Shift+F3)">↑</button>
+          <button class="btn icon" id="s-next" title="Next match (F3)">↓</button>
+          <button class="btn icon" id="s-filter" title="Turn this search into a filter">⧩</button>
+        </div>
+        <div class="tb-group grow">
+          <div class="field grow">
+            <input id="quick" type="text" placeholder="Filter: words, a OR b, -exclude, level:error, logger:Db, /regex/ (Ctrl+L)" spellcheck="false" />
+          </div>
+        </div>
+        <div class="tb-group">
+          <button id="btn-follow" class="btn tog-btn" title="Follow new lines (Ctrl+T)">Follow</button>
+          <button id="btn-hist" class="btn tog-btn" title="Timeline (Ctrl+Shift+H)">Timeline</button>
+          <button id="btn-detail" class="btn tog-btn" title="Details pane (Ctrl+Shift+D)">Details</button>
+          <select id="format" class="btn" title="Log format"></select>
+          <button id="btn-theme" class="btn icon" title="Toggle dark mode">◐</button>
+          <button id="btn-help" class="btn icon" title="Keyboard shortcuts (F1)">?</button>
+        </div>
+      </header>
+      <nav id="tabs" class="tabs"></nav>
+      <main class="main">
+        <aside id="sidebar" class="sidebar"></aside>
+        <section class="center">
+          <div id="histogram" class="histogram"><canvas></canvas><div class="hist-tip"></div></div>
+          <div id="grid" class="grid" tabindex="0">
+            <div class="grid-header"></div>
+            <div class="grid-body">
+              <div class="grid-scroll"><div class="grid-spacer"></div></div>
+              <div class="grid-rows"></div>
+              <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
+            </div>
+          </div>
+          <div id="detail" class="detail"></div>
+          <div id="empty" class="empty">
+            <div class="empty-card">
+              <h1>UltraLogViewer</h1>
+              <p>Drop log files here, or press <kbd>Ctrl</kbd>+<kbd>O</kbd>.</p>
+              <p class="muted">Drop several files at once to merge them into one timeline. Gzip, UTF‑16 and huge files are fine.</p>
+              <div id="recent" class="recent"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+      <footer id="status" class="status"></footer>
+    </div>
+    <div id="modal" class="modal hidden"></div>
+    <div id="toast" class="toast hidden"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
