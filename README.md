@@ -112,6 +112,9 @@ It needs the [.NET 8 SDK](https://dotnet.microsoft.com/download). From a termina
 .\build-installer.cmd -Version 1.0.0                # override the version
 ```
 
+The Electron build needs no admin rights or Developer Mode: `scripts/prepare-wincodesign.mjs` unpacks
+electron-builder's Windows signing tools without the macOS symlinks that Windows refuses to create.
+
 The app icon lives in `dotnet/src/UltraLogViewer.Desktop/Assets/` (`app.ico`, `app.png`) and is
 drawn by `python3 scripts/make-icon.py`; the exe, window, shortcuts, setup and the Electron build all use it.
 
