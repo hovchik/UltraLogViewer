@@ -35,6 +35,11 @@ export interface SourceOptions {
   cacheMinBytes?: number;
   /** Open only the entries in this time window. */
   window?: OpenWindow | null;
+  /**
+   * Free space a decompression leaves on the temp drive (default 1 GB): a compressed file that would take more (a
+   * decompression bomb, or simply too big) fails to open instead of filling the disk.
+   */
+  minFreeDiskBytes?: number;
 }
 
 export interface RefreshResult {
@@ -172,10 +177,18 @@ export class FileSource {
       const temp = (this.tempFile = tempPath(displayName(this.path), '.log'));
       this.readPath = temp;
       const out = fs.openSync(temp, 'w');
+      const minFree = this.opts.minFreeDiskBytes ?? 1024 ** 3;
+      let nextSpaceCheck = 0;
       decompress = (async () => {
         try {
           for await (const c of dec.chunks) {
             if (this.closed) break;
+            if (this.written >= nextSpaceCheck) {
+              nextSpaceCheck = this.written + 64 * 1024 * 1024;
+              const free = freeSpace(temp);
+              if (free !== null && free - c.length < minFree)
+                throw new Error(`Not enough free disk space to decompress ${displayName(this.path)} (${Math.floor(this.written / 1024 ** 2)} MB unpacked so far)`);
+            }
             fs.writeSync(out, c);
             this.written += c.length;
             if (dec.total) report(Math.min(0.99, dec.position() / dec.total));
@@ -846,6 +859,16 @@ export function detectEncoding(file: string): { encoding: Exclude<Encoding, 'aut
     return { encoding: 'utf-8', bom: 0 };
   } catch {
     return { encoding: 'windows-1252', bom: 0 };
+  }
+}
+
+/** Free bytes on the drive of `file`, or null when that cannot be told. */
+function freeSpace(file: string): number | null {
+  try {
+    const s = fs.statfsSync(path.dirname(file));
+    return s.bavail * s.bsize;
+  } catch {
+    return null;
   }
 }
 

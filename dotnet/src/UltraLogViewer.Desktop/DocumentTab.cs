@@ -47,6 +47,8 @@ public sealed class DocumentTab : IDisposable
     public string ScanCost { get; set; } = "";
     /// <summary>The document's <see cref="LogDocument.ViewEpoch"/> the grid shows (rows of a running filter appear as they are found).</summary>
     public int ViewEpoch { get; set; }
+    /// <summary>Counts filter runs, so a run that a newer one superseded leaves the newer one's progress alone.</summary>
+    public int FilterSeq { get; set; }
     public bool Ready { get; set; }
     /// <summary>New data arrived since the overview, timeline and search hits were computed.</summary>
     public bool StaleViews { get; set; }

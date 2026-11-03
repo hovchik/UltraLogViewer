@@ -147,7 +147,8 @@ export class LogDocument {
         onProgress?.('index', f);
       });
     } catch (e) {
-      this.sources.pop();
+      this.sources.splice(this.sources.indexOf(src), 1);
+      src.close(); // its handle, and the temp file of a compressed one
       throw e;
     } finally {
       this.indexing = false;

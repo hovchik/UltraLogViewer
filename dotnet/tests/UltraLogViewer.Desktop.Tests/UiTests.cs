@@ -683,6 +683,27 @@ public sealed class UiTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task A_superseded_filter_leaves_the_newer_one_its_progress()
+    {
+        var (w, _) = NewWindow();
+        var tab = await Open(w, Sample("slow.log", 200_000));
+        tab.Filter.Query = "/Handled request \\d+3 for/";
+        var first = w.ApplyFilterAsync(tab);
+        await Until(() => tab.BusyLabel == "Filtering");
+        tab.Filter.Query = "/Handled request \\d+7 for/";
+        var second = w.ApplyFilterAsync(tab);
+        await first; // returns at once: the second one superseded it
+        Assert.False(second.IsCompleted);
+        // Still filtering: the status shows the progress, and the tick shows the rows found so far.
+        Assert.Equal("Filtering", tab.BusyLabel);
+        await second;
+        Assert.Equal("", tab.BusyLabel);
+        Assert.Null(tab.BusyProgress);
+        Assert.True(tab.Info.ViewCount > 0);
+        w.Close();
+    }
+
+    [AvaloniaFact]
     public async Task Reopens_big_files_from_the_index_cache_and_opens_zips_merged()
     {
         var (w, settings) = NewWindow();

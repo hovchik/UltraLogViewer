@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { PassThrough } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { expandArchives, memberPath } from '../src/core/archives';
+import { displayName, expandArchives, memberPath, splitMember } from '../src/core/archives';
 import { Bzip2Decoder } from '../src/core/bzip2';
 import { LogDocument } from '../src/core/document';
 import { FileSource, SourceOptions } from '../src/core/fileSource';
@@ -365,6 +365,70 @@ describe('compressed files', () => {
     expect(w.entryCount).toBe(1000);
   });
 
+  it('stops decompressing before the disk is full', async () => {
+    // A decompression bomb (or any compressed file too big for the temp drive) fails to open instead of filling it.
+    const gz = tmpFile('bomb.log.gz', zlib.gzipSync(bigLog(2000)));
+    const temps = () => fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith('ultralogviewer-') && f.includes('bomb.log')).length;
+    const before = temps();
+    const doc = new LogDocument(1, 'bomb');
+    const failed = await doc.addSources([gz], () => ({ minFreeDiskBytes: Number.MAX_SAFE_INTEGER }));
+    expect(failed[0].error.message).toContain('Not enough free disk space');
+    expect(doc.sources.length).toBe(0);
+    expect(temps()).toBe(before); // the temp file is gone
+    await expect(doc.addSource(gz, { minFreeDiskBytes: Number.MAX_SAFE_INTEGER })).rejects.toThrow('Not enough free disk space');
+    expect(doc.sources.length).toBe(0);
+    expect(temps()).toBe(before); // also when opened alone
+    expect((await open(gz)).entryCount).toBe(2000);
+  });
+
+  it.skipIf(process.platform !== 'linux')('lets go of the compressed file when closed while decompressing', async () => {
+    const gz = tmpFile('closed.log.gz', zlib.gzipSync(bigLog(400_000), { level: 1 }));
+    const handles = () => fs.readdirSync('/proc/self/fd').filter((fd) => {
+      try {
+        return fs.readlinkSync(`/proc/self/fd/${fd}`) === gz;
+      } catch {
+        return false;
+      }
+    }).length;
+    for (const member of [false, true]) {
+      const file = member ? memberPath(writeZip(gz.replace(/\.gz$/, '.zip'), [['x.log', bigLog(400_000)]]), 'x.log') : gz;
+      const s = new FileSource(0, file);
+      const opened = s.open().catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 30));
+      s.close();
+      await opened;
+      await new Promise((r) => setTimeout(r, 50));
+      if (!member) expect(handles()).toBe(0);
+      else
+        expect(fs.readdirSync('/proc/self/fd').filter((fd) => {
+          try {
+            return fs.readlinkSync(`/proc/self/fd/${fd}`).endsWith('closed.log.zip');
+          } catch {
+            return false;
+          }
+        }).length).toBe(0);
+    }
+  });
+
+  it('refuses a zip whose central directory claims more than the file holds', () => {
+    // A forged size would otherwise allocate (and zero) gigabytes for a tiny file.
+    const zip = writeZip(tmpFile('forged.zip', ''), [['a.log', LOG4J]]);
+    const b = fs.readFileSync(zip);
+    b.writeUInt32LE(0xfffffff0, b.length - 22 + 12);
+    fs.writeFileSync(zip, b);
+    expect(() => expandArchives([zip])).toThrow(/bad zip central directory/);
+  });
+
+  it.skipIf(process.platform === 'win32')('opens a plain file with "::" in its name as a file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ulv-colons-'));
+    fs.writeFileSync(path.join(dir, 'a'), 'not a zip');
+    const file = path.join(dir, 'a::b.log');
+    fs.writeFileSync(file, LOG4J);
+    expect(splitMember(file)).toBeNull();
+    expect(displayName(file)).toBe('a::b.log');
+    expect((await open(file)).entryCount).toBe(6);
+  });
+
   it('fails to open a corrupt gzip file', async () => {
     const gz = zlib.gzipSync(bigLog(20_000));
     for (let i = 0; i < 64; i++) gz[Math.floor(gz.length / 3) + i] = 0xff;
@@ -408,6 +472,27 @@ describe('stdin and the command line', () => {
     s.close();
     cap.dispose();
     expect(fs.existsSync(cap.path)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')('never writes stdin through a planted link', async () => {
+    // The temp folder can be shared: the capture file gets a name nobody can guess and is created new, so a link
+    // planted under the old predictable name (stdin-<time>-<pid>.log) can't redirect the input into another file.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ulv-stdin-'));
+    const victim = path.join(dir, 'victim.txt');
+    fs.writeFileSync(victim, 'keep me');
+    for (let s = 0; s < 5; s++) {
+      const d = new Date(Date.now() + s * 1000);
+      const name = `stdin-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}-${process.pid}.log`;
+      fs.symlinkSync(victim, path.join(dir, name));
+    }
+    const input = new PassThrough();
+    const cap = await captureStdin(input, dir, 1000);
+    input.end('2024-05-01 10:00:00,000 [main] INFO  x - piped\n');
+    await cap.done;
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('keep me');
+    expect(fs.statSync(cap.path).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(cap.path, 'utf-8')).toContain('piped');
+    cap.dispose();
   });
 
   it('parses the command line', () => {

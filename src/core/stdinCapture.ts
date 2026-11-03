@@ -1,6 +1,7 @@
 // "ultralogviewer -": copies standard input (or any readable stream) into a growing temp file. The file is opened like
 // any log, so the normal tail picks up new lines live; it is deleted when the app exits.
 
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,8 +22,10 @@ const p2 = (n: number) => String(n).padStart(2, '0');
 export async function captureStdin(input: NodeJS.ReadableStream, dir = path.join(os.tmpdir(), 'UltraLogViewer'), maxWaitMs = 3000): Promise<StdinCapture> {
   fs.mkdirSync(dir, { recursive: true });
   const d = new Date();
-  const file = path.join(dir, `stdin-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}-${process.pid}.log`);
-  const fd = fs.openSync(file, 'w');
+  const file = path.join(dir, `stdin-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}-${process.pid}-${crypto.randomBytes(5).toString('hex')}.log`);
+  // The temp folder may be shared with other users: a name nobody can guess, created new (never through a link someone
+  // planted there) and readable by this user only, since piped input can hold anything.
+  const fd = fs.openSync(file, 'wx', 0o600);
   let written = 0;
   let firstAt = 0;
   let ready!: () => void;

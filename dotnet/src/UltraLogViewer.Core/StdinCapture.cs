@@ -11,9 +11,12 @@ public sealed class StdinCapture : IDisposable
     private long _written;
     private long _firstData;
 
-    private StdinCapture(Stream input, string path)
+    private readonly FileStream _output;
+
+    private StdinCapture(Stream input, string path, FileStream output)
     {
         _input = input;
+        _output = output;
         Path = path;
     }
 
@@ -30,9 +33,12 @@ public sealed class StdinCapture : IDisposable
     {
         dir ??= System.IO.Path.GetTempPath();
         Directory.CreateDirectory(dir);
-        var path = System.IO.Path.Combine(dir, $"stdin-{DateTime.Now:yyyyMMdd-HHmmss}-{Environment.ProcessId}.log");
-        var c = new StdinCapture(input, path);
-        File.WriteAllBytes(path, []);
+        // The temp folder may be shared with other users: a name nobody can guess, created new (never through a link
+        // someone planted there) and readable by this user only, since piped input can hold anything.
+        var path = System.IO.Path.Combine(dir, $"stdin-{DateTime.Now:yyyyMMdd-HHmmss}-{Environment.ProcessId}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(5)).ToLowerInvariant()}.log");
+        var create = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.ReadWrite | FileShare.Delete, BufferSize = 0 };
+        if (!OperatingSystem.IsWindows()) create.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        var c = new StdinCapture(input, path, new FileStream(path, create));
         c.Completion = Task.Run(c.Copy);
         var deadline = DateTime.UtcNow + (maxWait ?? TimeSpan.FromSeconds(3));
         while (!c._ready.Task.IsCompleted && DateTime.UtcNow < deadline)
@@ -48,7 +54,7 @@ public sealed class StdinCapture : IDisposable
     {
         try
         {
-            using var output = new FileStream(Path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete, 1);
+            using var output = _output;
             var buf = new byte[64 * 1024];
             int n;
             while ((n = _input.Read(buf, 0, buf.Length)) > 0)

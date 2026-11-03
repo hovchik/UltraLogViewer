@@ -753,6 +753,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             // A zip opens as its text members, merged; all files of a merge are indexed in parallel.
             var sources = await Task.Run(() => Archives.Expand(paths));
             var failed = await doc.AddSourcesAsync(sources, _ => SourceOptionsFor(tab, encoding), new SyncProgress(f => tab.BusyProgress = f));
+            if (!_tabs.Contains(tab)) return null; // closed while loading: its files "failed" because they were closed
             foreach (var (path, error) in failed.Take(3))
                 Toast($"Could not open {Archives.DisplayName(path)}: {error.Message}", true);
             if (doc.Sources.Count == 0)
@@ -945,17 +946,26 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.BusyLabel = "Filtering";
         tab.BusyProgress = 0;
         tab.ViewEpoch = tab.Doc.ViewEpoch;
+        var seq = ++tab.FilterSeq;
         UpdateStatus();
         bool applied;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            applied = await tab.Doc.ApplyFilterAsync(spec, new SyncProgress(f => tab.BusyProgress = f));
+            applied = await tab.Doc.ApplyFilterAsync(spec, new SyncProgress(f =>
+            {
+                if (tab.FilterSeq == seq) tab.BusyProgress = f;
+            }));
         }
         finally
         {
-            tab.BusyProgress = null;
-            tab.BusyLabel = "";
+            // A superseded run returns while the newer one is still filtering: that one keeps its progress, and its
+            // partial views (the tick only shows them while "Filtering").
+            if (tab.FilterSeq == seq)
+            {
+                tab.BusyProgress = null;
+                tab.BusyLabel = "";
+            }
         }
         if (!applied || !_tabs.Contains(tab)) return;
         tab.ViewEpoch = tab.Doc.ViewEpoch;

@@ -21,6 +21,11 @@ public sealed class SourceOptions
     public long CacheMinBytes { get; init; } = 1024 * 1024;
     /// <summary>Open only the entries in this time window.</summary>
     public OpenWindow? Window { get; init; }
+    /// <summary>
+    /// Free space a decompression leaves on the temp drive: a compressed file that would take more (a decompression
+    /// bomb, or simply too big) fails to open instead of filling the disk.
+    /// </summary>
+    public long MinFreeDiskBytes { get; init; } = 1024L * 1024 * 1024;
 }
 
 /// <summary>
@@ -258,13 +263,33 @@ public sealed class FileSource : IDisposable
         {
             var buf = new byte[1 << 20];
             int n;
+            long nextSpaceCheck = 0;
             while ((n = input.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false)) > 0 && !Closed)
             {
                 ct.ThrowIfCancellationRequested();
+                if (_written >= nextSpaceCheck)
+                {
+                    nextSpaceCheck = _written + (64 << 20);
+                    if (FreeSpace(temp) is long free && free - n < _opts.MinFreeDiskBytes)
+                        throw new IOException($"Not enough free disk space to decompress {Archives.DisplayName(Path)} ({_written / (1024 * 1024)} MB unpacked so far).");
+                }
                 output.Write(buf, 0, n);
                 Volatile.Write(ref _written, _written + n);
                 if (total > 0) progress.Report(Math.Min(0.99, (double)position() / total));
             }
+        }
+    }
+
+    /// <summary>Free bytes on the drive of <paramref name="file"/>, or null when that cannot be told.</summary>
+    private static long? FreeSpace(string file)
+    {
+        try
+        {
+            return new DriveInfo(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(file))!).AvailableFreeSpace;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
         }
     }
 

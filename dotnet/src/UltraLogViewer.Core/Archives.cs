@@ -21,7 +21,7 @@ public static class Archives
     public static (string Archive, string Member)? SplitMember(string path)
     {
         var i = path.IndexOf(MemberSeparator, StringComparison.Ordinal);
-        if (i <= 0) return null;
+        if (i <= 0 || File.Exists(path)) return null; // a plain file may have "::" in its name
         var archive = path[..i];
         return File.Exists(archive) ? (archive, path[(i + MemberSeparator.Length)..]) : null;
     }

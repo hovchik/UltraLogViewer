@@ -121,7 +121,9 @@ public sealed class LogDocument : IDisposable
                 Progress = added.Average(s => s.Indexing ? s.Progress : 1);
                 progress?.Report(Progress);
             }
-            var tasks = added.Select(s => s.OpenAsync(new SyncProgress(_ => Report()), ct)).ToArray();
+            // On the thread pool: each file's encoding and format detection runs before its first await, and would
+            // otherwise run one file after the other on the caller's (UI) thread.
+            var tasks = added.Select(s => Task.Run(() => s.OpenAsync(new SyncProgress(_ => Report()), ct), ct)).ToArray();
             try
             {
                 await Task.WhenAll(tasks);

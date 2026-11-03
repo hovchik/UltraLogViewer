@@ -21,6 +21,7 @@ export function splitMember(p: string): { archive: string; member: string } | nu
   const archive = p.slice(0, i);
   try {
     if (!fs.statSync(archive).isFile()) return null;
+    if (fs.statSync(p, { throwIfNoEntry: false })?.isFile()) return null; // a plain file may have "::" in its name
   } catch {
     return null;
   }
@@ -99,12 +100,16 @@ export function zipEntries(file: string): ZipEntry[] {
       // zip64: the locator just before the end record points at the zip64 end record.
       const loc = eocd - 20;
       if (loc < 0 || tail.readUInt32LE(loc) !== 0x07064b50) throw new Error('Bad zip64 archive');
-      const rec = readAt(fd, Number(tail.readBigUInt64LE(loc + 8)), 56);
+      const recAt = Number(tail.readBigUInt64LE(loc + 8));
+      if (recAt + 56 > size) throw new Error('Bad zip64 archive');
+      const rec = readAt(fd, recAt, 56);
       if (rec.length < 56 || rec.readUInt32LE(0) !== 0x06064b50) throw new Error('Bad zip64 archive');
       count = Number(rec.readBigUInt64LE(32));
       cdSize = Number(rec.readBigUInt64LE(40));
       cdOffset = Number(rec.readBigUInt64LE(48));
     }
+    // The directory must lie inside the file: a forged size would otherwise allocate gigabytes for a tiny file.
+    if (!(cdOffset >= 0 && cdSize >= 0 && cdOffset + cdSize <= size && count <= cdSize / 46)) throw new Error(`${path.basename(file)} has a bad zip central directory`);
     const cd = readAt(fd, cdOffset, cdSize);
     const out: ZipEntry[] = [];
     let p = 0;
@@ -183,6 +188,8 @@ export function openDecompressed(file: string): Decompressed | null {
     const input = fs.createReadStream(file, { highWaterMark: 1 << 20 });
     const gunzip = zlib.createGunzip({ chunkSize: 1 << 20 });
     input.on('error', (e) => gunzip.destroy(e));
+    // Stopped early (tab closed, or an error): the file stream would otherwise stay open, holding the file.
+    gunzip.on('close', () => input.destroy());
     input.pipe(gunzip);
     return { kind: 'gzip', total: fs.statSync(file).size, position: () => input.bytesRead, chunks: gunzip };
   }
@@ -240,6 +247,7 @@ function openZipMember(archive: string, member: string): Decompressed {
   if (e.method === 8) {
     const inflate = zlib.createInflateRaw({ chunkSize: 1 << 20 });
     raw.on('error', (err) => inflate.destroy(err));
+    inflate.on('close', () => raw.destroy());
     src = raw.pipe(inflate);
   }
   async function* gen() {

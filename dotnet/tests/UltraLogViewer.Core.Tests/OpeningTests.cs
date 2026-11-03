@@ -398,6 +398,37 @@ public class OpeningTests
         await Assert.ThrowsAsync<InvalidDataException>(() => s.OpenAsync());
     }
 
+    [Fact]
+    public async Task DecompressionStopsBeforeFillingTheDisk()
+    {
+        // A decompression bomb (or any compressed file too big for the temp drive) fails to open instead of filling it.
+        var ms = new MemoryStream();
+        using (var gz = new GZipStream(ms, CompressionLevel.Fastest, true)) gz.Write(Encoding.UTF8.GetBytes(BigLog(2000)));
+        var path = TestFiles.Write("bomb.log.gz", ms.ToArray());
+        var temps = Directory.GetFiles(Path.GetTempPath(), "ultralogviewer-*bomb.log*").Length;
+        using var doc = new LogDocument("bomb");
+        var failed = await doc.AddSourcesAsync([path], _ => new SourceOptions { MinFreeDiskBytes = long.MaxValue });
+        Assert.Contains("Not enough free disk space", Assert.Single(failed).Error.Message);
+        Assert.Empty(doc.Sources);
+        Assert.Equal(temps, Directory.GetFiles(Path.GetTempPath(), "ultralogviewer-*bomb.log*").Length); // the temp file is gone
+        using var ok = await Open(path);
+        Assert.Equal(2000, ok.EntryCount);
+    }
+
+    [Fact]
+    public void APlainFileWithTwoColonsInItsNameIsNotAZipMember()
+    {
+        if (OperatingSystem.IsWindows()) return; // ':' cannot be in a file name there
+        var dir = Directory.CreateTempSubdirectory("ulv-colons-").FullName;
+        var prefix = Path.Combine(dir, "a");
+        File.WriteAllText(prefix, "not a zip");
+        var file = prefix + "::b.log";
+        File.WriteAllText(file, "2024-05-01 10:00:00,000 [main] INFO  x - hi\n");
+        Assert.Null(Archives.SplitMember(file));
+        Assert.Equal("a::b.log", Archives.DisplayName(file));
+        Assert.Null(Archives.OpenDecompressed(file, out _, out _, out _));
+    }
+
     // ------------------------------------------------------------ merges
 
     [Fact]
@@ -447,6 +478,25 @@ public class OpeningTests
         s.Dispose();
         cap.Dispose();
         Assert.False(File.Exists(cap.Path));
+    }
+
+    [Fact]
+    public async Task StdinCaptureNeverWritesThroughAPlantedLink()
+    {
+        // The temp folder can be shared: the capture file gets a name nobody can guess and is created new, so a link
+        // planted under the old predictable name (stdin-<time>-<pid>.log) can't redirect the input into another file.
+        if (OperatingSystem.IsWindows()) return;
+        var dir = Directory.CreateTempSubdirectory("ulv-stdin-").FullName;
+        var victim = Path.Combine(dir, "victim.txt");
+        File.WriteAllText(victim, "keep me");
+        var now = DateTime.Now;
+        for (var s = 0; s < 5; s++)
+            File.CreateSymbolicLink(Path.Combine(dir, $"stdin-{now.AddSeconds(s):yyyyMMdd-HHmmss}-{Environment.ProcessId}.log"), victim);
+        using var cap = await StdinCapture.StartAsync(new MemoryStream("2024-05-01 10:00:00,000 [main] INFO  x - piped\n"u8.ToArray()), dir, TimeSpan.FromSeconds(2));
+        await cap.Completion;
+        Assert.Equal("keep me", File.ReadAllText(victim));
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(cap.Path));
+        Assert.Contains("piped", File.ReadAllText(cap.Path));
     }
 
     [Fact]

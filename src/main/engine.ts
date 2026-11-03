@@ -87,7 +87,8 @@ export class Engine {
             this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: false });
           }
         });
-        for (const f of failed.slice(0, 3)) this.emit({ type: 'doc-error', docId: id, message: `${displayName(f.path)}: ${f.error.message}` });
+        // A document closed while loading: its files "failed" because they were closed.
+        if (this.docs.has(id)) for (const f of failed.slice(0, 3)) this.emit({ type: 'doc-error', docId: id, message: `${displayName(f.path)}: ${f.error.message}` });
       } catch (e) {
         this.emit({ type: 'doc-error', docId: id, message: `${path.basename(paths[0])}: ${(e as Error).message}` });
       }
