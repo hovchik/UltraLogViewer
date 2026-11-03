@@ -100,6 +100,7 @@ public static class Dialogs
         ("Alt+Z", "Wrap long messages"),
         ("Ctrl+Shift+P, F1", "Command palette"),
         ("Ctrl+Shift+A", "Patterns view"),
+        ("Ctrl+Shift+Q", "SQL panel (Ctrl+Enter runs the query)"),
         ("Ctrl+K", "Clear (hide everything so far)"),
         ("Ctrl+click a token", "Search for it"),
         ("Ctrl+Alt+S", "Save workspace"),

@@ -218,6 +218,7 @@ public sealed partial class LogDocument : IDisposable
     /// </summary>
     internal void SourcesChanged(int[]? firstChanged)
     {
+        NotifyIndexChanged(firstChanged);
         if (firstChanged is null)
         {
             _verdict = [];
