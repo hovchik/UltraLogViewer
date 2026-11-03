@@ -5,6 +5,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { displayName, expandArchives } from '../core/archives';
 import { LogDocument } from '../core/document';
+import { SourceSet } from '../core/sourceSet';
 import { clearCache } from '../core/indexCache';
 import { OpenWindow } from '../core/timeWindow';
 import { ScanPool } from '../core/scanPool';
@@ -95,6 +96,18 @@ export class Engine {
       if (!this.docs.has(id)) return;
       this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: true });
     })();
+    return id;
+  }
+
+  /**
+   * Opens another document over the same, already indexed files (a duplicated tab or a split pane). It needs no
+   * indexing, starts unfiltered and shares tailing with the original; the files close when the last one is closed.
+   */
+  duplicate(docId: number): number {
+    const src = this.doc(docId);
+    if (src.indexing) throw new Error('The file is still being indexed');
+    const id = this.nextId++;
+    this.docs.set(id, src.duplicate(id));
     return id;
   }
 
@@ -189,18 +202,37 @@ export class Engine {
     await d.reformat(formatId, customFormats);
     const info = d.info();
     this.emit({ type: 'doc-updated', docId, info, reset: true });
+    // The other documents over these files were re-parsed too.
+    for (const [id, other] of this.docs) {
+      if (other === d || other.set !== d.set) continue;
+      await other.sync();
+      this.emit({ type: 'doc-updated', docId: id, info: other.info(), reset: true });
+    }
     return info;
   }
 
-  /** Tail: picks up appended or rotated data for every open document. */
+  /**
+   * Tail: picks up appended or rotated data for every open document. Documents over the same files (duplicated tabs,
+   * split panes) share one set, which is polled once; each document then syncs with what the poll found.
+   */
   private async poll() {
     if (this.polling) return;
     this.polling = true;
     try {
+      const failed = new Map<SourceSet, Error>();
+      for (const set of new Set([...this.docs.values()].map((d) => d.set))) {
+        try {
+          await set.refresh();
+        } catch (e) {
+          failed.set(set, e as Error);
+        }
+      }
       for (const [id, d] of this.docs) {
         if (d.indexing) continue;
+        const err = failed.get(d.set);
         try {
-          if (await d.refresh()) this.emit({ type: 'doc-updated', docId: id, info: d.info(), reset: false });
+          if (err) throw err;
+          if (await d.sync()) this.emit({ type: 'doc-updated', docId: id, info: d.info(), reset: false });
         } catch (e) {
           this.emit({ type: 'doc-error', docId: id, message: (e as Error).message });
         }

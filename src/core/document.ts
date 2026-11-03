@@ -1,4 +1,6 @@
-// A LogDocument is what a tab shows: one file, or several files merged into one timeline.
+// A LogDocument is what a tab (or a split pane) shows: one file, or several files merged into one timeline.
+// The files are a SourceSet, which several documents can share (duplicate()): each has its own filter, view and search,
+// while indexing, merging and tailing happen once for all of them.
 //
 // Row model:
 //   base rows  = every entry of every source (merged by timestamp when there are several sources)
@@ -9,6 +11,7 @@
 
 import * as fs from 'node:fs';
 import { FileSource, SourceOptions } from './fileSource';
+import { Merge, SetMember, SourceSet } from './sourceSet';
 import { GrowU32, GrowU8, lowerBound } from './grow';
 import { compileQueryWithTimeRange } from './query';
 import { compileTextTest, RowsOp, RowsResult } from './entryScan';
@@ -98,12 +101,12 @@ class ViewBuilder {
   }
 }
 
-export class LogDocument {
-  readonly sources: FileSource[] = [];
-  private mergedSrc: GrowU8 | null = null;
-  private mergedEnt: GrowU32 | null = null;
-  /** For merged docs: entry -> base position, per source. */
-  private basePos: Uint32Array[] = [];
+export class LogDocument implements SetMember {
+  /** The merge this document's view was built on; taken from the set when the document syncs. */
+  private merge: Merge | null = null;
+  /** What the set changed since the last sync: 0 nothing, 1 data appended (verdicts truncated), 2 everything. */
+  private resync = 0;
+  private closed = false;
   private filter: FilterSpec | null = null;
   private view: Uint32Array | null = null;
   private viewContext: Uint8Array | null = null;
@@ -127,23 +130,46 @@ export class LogDocument {
   partialViewMs = PARTIAL_VIEW_MS;
   /** Serialises everything that mutates verdicts/view (filtering, tail refresh, re-parsing). */
   private queue: Promise<unknown> = Promise.resolve();
-  indexing = false;
-  progress = 0;
   /**
    * "Show in context": every entry is shown, the current filter is kept (and stays up to date), and entries it
    * would hide come back with `context: true` so they can be drawn dimmed.
    */
   ignoreFilter = false;
 
-  constructor(readonly id: number, readonly title: string) {}
+  /** The files, shared with the document's duplicates. */
+  readonly set: SourceSet;
+
+  constructor(readonly id: number, readonly title: string, set?: SourceSet) {
+    this.set = set ?? new SourceSet();
+    this.set.attach(this);
+    this.merge = this.set.merge;
+  }
+
+  /**
+   * Another document over the same, already indexed files: it opens instantly, starts unfiltered and keeps its own
+   * filter, view and search. The files stay open until every document over them is closed.
+   */
+  duplicate(id: number, title = this.title): LogDocument {
+    return new LogDocument(id, title, this.set);
+  }
+
+  get sources(): FileSource[] {
+    return this.set.sources;
+  }
+  get indexing() {
+    return this.set.indexing;
+  }
+  get progress() {
+    return this.set.progress;
+  }
 
   async addSource(path: string, opts: SourceOptions, onProgress?: Progress): Promise<FileSource> {
     const src = new FileSource(this.sources.length, path, opts);
     this.sources.push(src);
-    this.indexing = true;
+    this.set.indexing = true;
     try {
       await src.open((f) => {
-        this.progress = f;
+        this.set.progress = f;
         onProgress?.('index', f);
       });
     } catch (e) {
@@ -151,10 +177,10 @@ export class LogDocument {
       src.close(); // its handle, and the temp file of a compressed one
       throw e;
     } finally {
-      this.indexing = false;
+      this.set.indexing = false;
     }
-    this.rebuildBase();
-    if (this.filter) await this.applyFilter(this.filter, false, onProgress);
+    await this.set.rebuilt();
+    await this.sync(onProgress);
     return src;
   }
 
@@ -165,12 +191,12 @@ export class LogDocument {
   async addSources(paths: string[], opts: (path: string) => SourceOptions, onProgress?: Progress): Promise<{ path: string; error: Error }[]> {
     const added = paths.map((p, i) => new FileSource(this.sources.length + i, p, opts(p)));
     this.sources.push(...added);
-    this.indexing = true;
+    this.set.indexing = true;
     const failed: { path: string; error: Error }[] = [];
     try {
       const report = () => {
-        this.progress = added.reduce((n, s) => n + (s.indexing ? s.progress : 1), 0) / added.length;
-        onProgress?.('index', this.progress);
+        this.set.progress = added.reduce((n, s) => n + (s.indexing ? s.progress : 1), 0) / added.length;
+        onProgress?.('index', this.set.progress);
       };
       const results = await Promise.allSettled(added.map((s) => s.open(report)));
       results.forEach((r, i) => {
@@ -181,10 +207,10 @@ export class LogDocument {
       });
       this.sources.forEach((s, i) => (s.id = i));
     } finally {
-      this.indexing = false;
+      this.set.indexing = false;
     }
-    this.rebuildBase();
-    if (this.filter) await this.applyFilter(this.filter, false, onProgress);
+    await this.set.rebuilt();
+    await this.sync(onProgress);
     return failed;
   }
 
@@ -199,7 +225,7 @@ export class LogDocument {
   }
 
   baseCount(): number {
-    return this.mergedEnt ? this.mergedEnt.length : this.sources[0]?.entryCount ?? 0;
+    return this.merge ? this.merge.ent.length : this.sources[0]?.entryCount ?? 0;
   }
 
   /** The view that rows are read from: null means every base row. */
@@ -214,7 +240,8 @@ export class LogDocument {
 
   /** base position -> [source, entry] */
   private ref(base: number): [number, number] {
-    return this.mergedEnt ? [this.mergedSrc!.get(base), this.mergedEnt.get(base)] : [0, base];
+    const m = this.merge;
+    return m ? [m.src.get(base), m.ent.get(base)] : [0, base];
   }
 
   private baseOf(row: number): number {
@@ -223,65 +250,55 @@ export class LogDocument {
   }
 
   private baseForEntry(src: number, entry: number): number {
-    return this.mergedEnt ? this.basePos[src][entry] : entry;
-  }
-
-  /** k-way merge of all sources by timestamp (stable: ties keep source order). */
-  private rebuildBase() {
-    if (this.sources.length < 2) {
-      this.mergedSrc = this.mergedEnt = null;
-      this.basePos = [];
-      return;
-    }
-    const total = this.sources.reduce((n, s) => n + s.entryCount, 0);
-    const ms = new GrowU8(total + 1);
-    const me = new GrowU32(total + 1);
-    const cur = this.sources.map(() => 0);
-    this.basePos = this.sources.map((s) => new Uint32Array(s.entryCount));
-    const k = this.sources.length;
-    for (let n = 0; n < total; n++) {
-      let best = -1;
-      let bestT = Infinity;
-      for (let s = 0; s < k; s++) {
-        const src = this.sources[s];
-        if (cur[s] >= src.entryCount) continue;
-        let t = src.time(cur[s]);
-        if (Number.isNaN(t)) t = -Infinity; // entries before the first timestamp go first
-        if (best < 0 || t < bestT) {
-          best = s;
-          bestT = t;
-        }
-      }
-      this.basePos[best][cur[best]] = n;
-      ms.push(best);
-      me.push(cur[best]++);
-    }
-    this.mergedSrc = ms;
-    this.mergedEnt = me;
+    return this.merge ? this.merge.basePos[src][entry] : entry;
   }
 
   // ------------------------------------------------------------------ refresh
 
-  /** Polls all sources for appended/rotated data. Returns true if anything changed. */
-  refresh(): Promise<boolean> {
-    return this.serial(() => this.refreshNow());
+  /**
+   * Polls the files for appended or rotated data (once for every document over them) and brings this document up to
+   * date. Returns true if anything changed for it, also when another document's poll found the change.
+   */
+  async refresh(): Promise<boolean> {
+    await this.set.refresh();
+    return this.sync();
   }
 
-  private async refreshNow(): Promise<boolean> {
-    let changed = false;
-    for (const [i, s] of this.sources.entries()) {
-      const r = await s.refresh();
-      if (!r.changed) continue;
-      changed = true;
-      const keep = r.reset ? 0 : r.firstChangedEntry;
+  /** SetMember: waits until nothing else runs in this document's queue and holds it until the returned function is called. */
+  lock(): Promise<() => void> {
+    return new Promise((held) => void this.serial(() => new Promise<void>((release) => held(release))));
+  }
+
+  /** SetMember: called with this document's queue held after the index changed. */
+  sourcesChanged(firstChanged: number[] | null) {
+    if (!firstChanged) {
+      this.verdict = [];
+      this.repeatHi = [];
+      this.repeatLo = [];
+      this.resync = 2;
+      return;
+    }
+    firstChanged.forEach((keep, i) => {
       this.verdict[i]?.truncate(keep);
       this.repeatHi[i]?.truncate(keep);
       this.repeatLo[i]?.truncate(keep);
-    }
-    if (!changed) return false;
-    this.rebuildBase();
-    if (this.filter) await this.applyFilterNow(this.filter, true, this.filterGen);
-    return true;
+    });
+    this.resync = Math.max(this.resync, 1);
+  }
+
+  /**
+   * Takes up what the files changed since the last call (see SourceSet.refresh): the new merge, and the filter
+   * re-applied to the changed entries. Returns false when nothing changed.
+   */
+  sync(onProgress?: Progress): Promise<boolean> {
+    return this.serial(async () => {
+      const r = this.resync;
+      if (!r) return false;
+      this.resync = 0;
+      this.merge = this.set.merge;
+      if (this.filter) await this.applyFilterNow(this.filter, r === 1, this.filterGen, onProgress);
+      return true;
+    });
   }
 
   // ------------------------------------------------------------------- filter
@@ -708,6 +725,7 @@ export class LogDocument {
     const src = this.sources[source];
     if (!src || !src.entryCount) return 0;
     const e = src.entryForLine(Math.max(0, line1 - 1));
+    if (this.merge && !(e < this.merge.basePos[source].length)) return Math.max(0, this.viewCount() - 1);
     return this.rowForBase(this.baseForEntry(source, e));
   }
 
@@ -715,6 +733,7 @@ export class LogDocument {
   rowForKey(key: string, nearest = false): number | null {
     const [s, e] = key.split(':').map(Number);
     if (!this.sources[s] || !(e < this.sources[s].entryCount)) return null;
+    if (this.merge && !(e < this.merge.basePos[s].length)) return null; // appended since this document last synced
     const base = this.baseForEntry(s, e);
     const row = this.rowForBase(base);
     if (row < 0) return null;
@@ -859,15 +878,10 @@ export class LogDocument {
     return n;
   }
 
-  reformat(formatId: string | undefined, customFormats?: CustomFormat[]): Promise<void> {
-    return this.serial(async () => {
-      for (const s of this.sources) await s.setFormat(formatId, customFormats);
-      this.verdict = [];
-      this.repeatHi = [];
-      this.repeatLo = [];
-      this.rebuildBase();
-      if (this.filter) await this.applyFilterNow(this.filter, false, this.filterGen);
-    });
+  /** Re-parses the files with another format, for every document over them (each one syncs to see it). */
+  async reformat(formatId: string | undefined, customFormats?: CustomFormat[]): Promise<void> {
+    await this.set.reformat((s) => s.setFormat(formatId, customFormats));
+    await this.sync();
   }
 
   /** Stable key of the entry containing a 1-based line (used to restore bookmarks). */
@@ -877,8 +891,11 @@ export class LogDocument {
     return rowKey(source, src.entryForLine(line1 - 1));
   }
 
+  /** Stops this document; the files close when no other document uses them. */
   close() {
+    if (this.closed) return;
+    this.closed = true;
     this.filterGen++;
-    for (const s of this.sources) s.close();
+    this.set.detach(this);
   }
 }

@@ -1,10 +1,13 @@
 using System.Text;
 using System.Text.Json;
+using Merge = UltraLogViewer.Core.SourceSet.Merge;
 
 namespace UltraLogViewer.Core;
 
 /// <summary>
-/// What a tab shows: one file, or several files merged into one timeline.
+/// What a tab (or a split pane) shows: one file, or several files merged into one timeline.
+/// The files are a <see cref="SourceSet"/>, which several documents can share (<see cref="Duplicate"/>): each has its
+/// own filter, view and search, while indexing, merging and tailing happen once for all of them.
 /// Base rows are every entry of every source (merged by timestamp when there are several sources);
 /// view rows are the base rows that pass the current filter (plus context rows), in base order.
 /// Filtering and search run per source in file order and produce bitmaps, which are then walked in base order; that
@@ -16,12 +19,16 @@ public sealed class LogDocument : IDisposable
 {
     private const int MaxSearchRows = 2_000_000;
 
-    private sealed record Merge(ushort[] Src, int[] Ent, int[][] BasePos);
     private sealed record View(int[] Rows, byte[]? Context, int[]? Repeat = null);
 
-    private readonly List<FileSource> _sources = [];
+    private readonly SourceSet _set;
+    private List<FileSource> _sources => _set.List;
     private readonly SemaphoreSlim _queue = new(1, 1);
+    /// <summary>The merge this document's view was built on; taken from the set when the document syncs.</summary>
     private Merge? _merge;
+    /// <summary>What the set changed since the last sync: 0 nothing, 1 data appended (verdicts truncated), 2 everything.</summary>
+    private int _resync;
+    private int _disposed;
     private View? _view;
     private FilterSpec? _filter;
     /// <summary>Per-source filter verdicts of already evaluated entries: 1 = match.</summary>
@@ -39,12 +46,31 @@ public sealed class LogDocument : IDisposable
     private List<Grow<ulong>> _repeatHash = [];
     private string _repeatMode = "";
 
-    public LogDocument(string title) => Title = title;
+    public LogDocument(string title) : this(new SourceSet(), title)
+    {
+    }
+
+    private LogDocument(SourceSet set, string title)
+    {
+        _set = set;
+        Title = title;
+        set.Attach(this);
+        _merge = set.Merged;
+    }
+
+    /// <summary>
+    /// Another document over the same, already indexed files: it opens instantly, starts unfiltered and keeps its own
+    /// filter, view and search. The files stay open until every document over them is disposed.
+    /// </summary>
+    public LogDocument Duplicate(string? title = null) => new(_set, title ?? Title);
 
     public string Title { get; }
     public IReadOnlyList<FileSource> Sources => _sources;
-    public bool Indexing { get; private set; }
-    public double Progress { get; private set; }
+    /// <summary>The files, shared with the document's duplicates.</summary>
+    public SourceSet Set => _set;
+    internal SemaphoreSlim Queue => _queue;
+    public bool Indexing => _set.Indexing;
+    public double Progress => _set.Progress;
     public bool Merged => _sources.Count > 1;
     public FilterSpec? Filter => _filter;
 
@@ -75,12 +101,12 @@ public sealed class LogDocument : IDisposable
         if (_sources.Count > ushort.MaxValue) throw new InvalidOperationException($"A merged view supports at most {ushort.MaxValue + 1} files.");
         var src = new FileSource(_sources.Count, path, opts);
         lock (_sources) _sources.Add(src);
-        Indexing = true;
+        _set.Indexing = true;
         try
         {
             await src.OpenAsync(new SyncProgress(f =>
             {
-                Progress = f;
+                _set.Progress = f;
                 progress?.Report(f);
             }), ct);
         }
@@ -92,13 +118,10 @@ public sealed class LogDocument : IDisposable
         }
         finally
         {
-            Indexing = false;
+            _set.Indexing = false;
         }
-        await Serial(() =>
-        {
-            RebuildBase();
-            return _filter is not null ? ApplyNowAsync(_filter, false, _filterGen, null, ct) : Task.FromResult(true);
-        });
+        await _set.RebuiltAsync();
+        await SyncAsync(ct);
     }
 
     /// <summary>
@@ -112,14 +135,14 @@ public sealed class LogDocument : IDisposable
         if (_sources.Count + paths.Count > ushort.MaxValue + 1) throw new InvalidOperationException($"A merged view supports at most {ushort.MaxValue + 1} files.");
         var added = paths.Select((p, i) => new FileSource(_sources.Count + i, p, opts(p))).ToList();
         lock (_sources) _sources.AddRange(added);
-        Indexing = true;
+        _set.Indexing = true;
         var failed = new List<(string, Exception)>();
         try
         {
             void Report()
             {
-                Progress = added.Average(s => s.Indexing ? s.Progress : 1);
-                progress?.Report(Progress);
+                _set.Progress = added.Average(s => s.Indexing ? s.Progress : 1);
+                progress?.Report(_set.Progress);
             }
             // On the thread pool: each file's encoding and format detection runs before its first await, and would
             // otherwise run one file after the other on the caller's (UI) thread.
@@ -157,13 +180,10 @@ public sealed class LogDocument : IDisposable
         }
         finally
         {
-            Indexing = false;
+            _set.Indexing = false;
         }
-        await Serial(() =>
-        {
-            RebuildBase();
-            return _filter is not null ? ApplyNowAsync(_filter, false, _filterGen, null, ct) : Task.FromResult(true);
-        });
+        await _set.RebuiltAsync();
+        await SyncAsync(ct);
         return failed;
     }
 
@@ -180,59 +200,50 @@ public sealed class LogDocument : IDisposable
         }
     }
 
-    /// <summary>k-way merge of all sources by timestamp (stable: ties keep source order).</summary>
-    private void RebuildBase()
-    {
-        if (_sources.Count < 2)
-        {
-            _merge = null;
-            return;
-        }
-        var counts = _sources.Select(s => s.EntryCount).ToArray();
-        var total = counts.Sum();
-        var src = new ushort[total];
-        var ent = new int[total];
-        var basePos = counts.Select(c => new int[c]).ToArray();
-        var cur = new int[_sources.Count];
-        for (var n = 0; n < total; n++)
-        {
-            var best = -1;
-            var bestT = long.MaxValue;
-            for (var s = 0; s < _sources.Count; s++)
-            {
-                if (cur[s] >= counts[s]) continue;
-                var t = _sources[s].TimeOf(cur[s]); // None (MinValue) sorts first
-                if (best < 0 || t < bestT)
-                {
-                    best = s;
-                    bestT = t;
-                }
-            }
-            basePos[best][cur[best]] = n;
-            src[n] = (ushort)best;
-            ent[n] = cur[best]++;
-        }
-        _merge = new Merge(src, ent, basePos);
-    }
-
     // ------------------------------------------------------------------ refresh
 
-    /// <summary>Polls all sources for appended or rotated data. Returns true if anything changed.</summary>
-    public Task<bool> RefreshAsync() => Serial(async () =>
+    /// <summary>
+    /// Polls the files for appended or rotated data (once for every document over them) and brings this document up to
+    /// date. Returns true if anything changed for it, also when another document's poll found the change.
+    /// </summary>
+    public async Task<bool> RefreshAsync()
     {
-        if (Indexing) return false;
-        var changed = false;
-        for (var i = 0; i < _sources.Count; i++)
+        await _set.RefreshAsync();
+        return await SyncAsync();
+    }
+
+    /// <summary>
+    /// Called by the set, with this document's queue held, after the index changed: <paramref name="firstChanged"/> is
+    /// the first changed entry per source, or null when everything must be filtered again.
+    /// </summary>
+    internal void SourcesChanged(int[]? firstChanged)
+    {
+        if (firstChanged is null)
         {
-            var r = await _sources[i].RefreshAsync();
-            if (!r.Changed) continue;
-            changed = true;
-            if (i < _verdict.Count) _verdict[i].Truncate(r.Reset ? 0 : r.FirstChangedEntry);
-            if (i < _repeatHash.Count) _repeatHash[i].Truncate(r.Reset ? 0 : r.FirstChangedEntry);
+            _verdict = [];
+            _repeatHash = [];
+            _resync = 2;
+            return;
         }
-        if (!changed) return false;
-        RebuildBase();
-        if (_filter is not null) await ApplyNowAsync(_filter, true, _filterGen, null, default);
+        for (var i = 0; i < firstChanged.Length; i++)
+        {
+            if (i < _verdict.Count) _verdict[i].Truncate(Math.Min(_verdict[i].Count, firstChanged[i]));
+            if (i < _repeatHash.Count) _repeatHash[i].Truncate(Math.Min(_repeatHash[i].Count, firstChanged[i]));
+        }
+        _resync = Math.Max(_resync, 1);
+    }
+
+    /// <summary>
+    /// Takes up what the files changed since the last call (see <see cref="SourceSet.RefreshAsync"/>): the new merge,
+    /// and the filter re-applied to the changed entries. Returns false when nothing changed.
+    /// </summary>
+    public Task<bool> SyncAsync(CancellationToken ct = default) => Serial(async () =>
+    {
+        var r = _resync;
+        if (r == 0) return false;
+        _resync = 0;
+        _merge = _set.Merged;
+        if (_filter is not null) await ApplyNowAsync(_filter, r == 1, _filterGen, null, ct);
         return true;
     });
 
@@ -1024,20 +1035,19 @@ public sealed class LogDocument : IDisposable
         return n;
     });
 
-    public Task ReformatAsync(string? formatId, IReadOnlyList<CustomFormat>? custom) => Serial(async () =>
+    /// <summary>Re-parses the files with another format, for every document over them (each one syncs to see it).</summary>
+    public async Task ReformatAsync(string? formatId, IReadOnlyList<CustomFormat>? custom)
     {
-        foreach (var s in _sources) await s.SetFormatAsync(formatId, custom);
-        _verdict = [];
-        _repeatHash = [];
-        RebuildBase();
-        if (_filter is not null) await ApplyNowAsync(_filter, false, _filterGen, null, default);
-        return true;
-    });
+        await _set.ReformatAsync(formatId, custom);
+        await SyncAsync();
+    }
 
+    /// <summary>Stops this document; the files close when no other document uses them.</summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
         Interlocked.Increment(ref _filterGen);
-        foreach (var s in _sources) s.Dispose();
+        _set.Detach(this);
     }
 }
 

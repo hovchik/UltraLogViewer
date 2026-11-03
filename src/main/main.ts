@@ -172,6 +172,8 @@ function buildMenu() {
         { label: 'Export view…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
         { label: 'Use index cache', type: 'checkbox', checked: v.indexCache, click: () => send('toggle-index-cache') },
         { label: 'Clear index cache', click: () => send('clear-index-cache') },
+        // The renderer handles Ctrl+Shift+T and Ctrl+\ itself (so they also work with the menu bar hidden).
+        { label: 'Duplicate tab', accelerator: 'CmdOrCtrl+Shift+T', registerAccelerator: false, click: () => send('duplicate-tab') },
         { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => send('close-tab') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
@@ -203,6 +205,8 @@ function buildMenu() {
         { label: 'Details pane', accelerator: 'CmdOrCtrl+Shift+D', click: () => send('toggle-detail') },
         { label: 'Sidebar', accelerator: 'CmdOrCtrl+Shift+B', click: () => send('toggle-sidebar') },
         { label: 'Details on the right', type: 'checkbox', checked: v.dockRight, click: () => send('toggle-dock') },
+        { label: 'Split right', accelerator: 'CmdOrCtrl+\\', registerAccelerator: false, click: () => send('split-right') },
+        { label: 'Close split', click: () => send('close-split') },
         { label: 'Patterns', type: 'checkbox', checked: tabMenu.patterns, accelerator: 'CmdOrCtrl+Shift+A', registerAccelerator: false, click: () => send('toggle-patterns') },
         {
           label: 'Group repeats',
