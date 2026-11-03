@@ -21,6 +21,16 @@ export interface Bookmark {
   row?: number | null;
 }
 
+/** A row kept in the strip above the grid. */
+export interface Pin {
+  key: string;
+  line: number;
+  source: number;
+  preview: string;
+  /** Position in the current view (null when filtered out); refreshed after each view change. */
+  row?: number | null;
+}
+
 export interface FilterPreset {
   name: string;
   rules: FilterRule[];
@@ -68,6 +78,14 @@ export interface Settings {
   recentWorkspaces?: string[];
   /** Save the index of big files so reopening them is instant (default on). */
   indexCache?: boolean;
+  /** Pinned rows by file path: their 1-based lines. */
+  pins?: Record<string, number[]>;
+  /** Editor for source links: vscode, rider, intellij or custom (default vscode). */
+  editor?: string;
+  /** Command line of the custom editor, with {path}, {line} and {col}. */
+  editorCommand?: string;
+  /** Folders that relative source paths in stack traces are resolved against, first match wins. */
+  sourceRoots?: string[];
 }
 
 /** Display settings with their defaults resolved. */
@@ -155,11 +173,16 @@ export interface Tab {
   patternsBusy?: boolean;
   /** When the last patterns run started (ms). */
   patternsAt?: number;
+  /** Pinned rows, by entry key (see pins.ts). */
+  pins?: Map<string, Pin>;
+  /** The field the timeline is stacked by ('level' when unset). */
+  histogramGroup?: string;
   /** Rows appended to the view while not following (the "↓ N new" pill). */
   newRows?: number;
   /** Settings to apply once the tab's document is ready (workspace load). */
   pending?: {
     bookmarks: { path: string; line: number; note: string }[];
+    pins?: { path: string; line: number }[];
     columns?: { extraColumns: string[]; columnOrder: string[]; hiddenColumns: string[] };
   };
 }

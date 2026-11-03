@@ -4,6 +4,7 @@
 
 import type { LogFormat } from './formats';
 import { compileMatcher, compileQuery, Matcher, ruleMatcher, TIME_FIELD } from './query';
+import { fieldValue, groupValue } from './histogramGroups';
 import { fnv1a64, messageOf, repeatKey, template } from './patterns';
 import { FilterSpec, Level, TextPattern } from './types';
 
@@ -107,9 +108,11 @@ export function rangeEvaluator(op: RangeOp, fmt: LogFormat): (texts: string[], l
 export type RowsOp =
   | { kind: 'patterns' }
   | { kind: 'fields' }
+  /** One field's value per row, as the grouped timeline counts it. */
+  | { kind: 'field'; key: string }
   | { kind: 'export'; format: 'text' | 'csv' | 'jsonl'; columns: string[]; source: string | null };
 
-/** patterns: template and sample of each row. fields: parsed fields. export: one output line per row (with "\n"). */
+/** patterns: template and sample of each row. fields: parsed fields. field: the value. export: one output line per row (with "\n"). */
 export type RowsResult = { templates: string[]; samples: string[] } | Record<string, string>[] | string[];
 
 /** First line of a message, at most 300 characters: what the patterns view shows for a template. */
@@ -137,6 +140,10 @@ export function rowsEvaluator(op: RowsOp, fmt: LogFormat): (texts: string[], lin
       };
     case 'fields':
       return (texts) => texts.map((t) => fmt.parse(t));
+    case 'field': {
+      const key = op.key;
+      return (texts) => texts.map((t) => groupValue(fieldValue(fmt.parse(t), key)));
+    }
     case 'export': {
       const { format, columns, source } = op;
       return (texts, lines) =>

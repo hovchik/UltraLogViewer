@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
+import { editorTemplate, expandCommand, expandUrl, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
 
@@ -58,6 +60,45 @@ function callEngine(method: string, args: unknown[]): Promise<unknown> {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     worker.postMessage({ id, method, args });
+  });
+}
+
+// ------------------------------------------------------------ source links
+
+/**
+ * Opens a source location (from an entry's stack trace) in the configured editor: resolved against the source roots,
+ * then launched as a URL (vscode://, idea://…) or as a command line. With ULV_SOURCE_LAUNCH_LOG set (UI tests) the
+ * launch is written to that file instead.
+ */
+async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unknown; command?: unknown }): Promise<{ ok: boolean; file?: string; target?: string; error?: string }> {
+  if (!ref || typeof ref.path !== 'string' || typeof ref.line !== 'number') return { ok: false, error: 'bad location' };
+  const roots = Array.isArray(opts?.roots) ? opts.roots.filter((r): r is string => typeof r === 'string') : [];
+  const file = resolveSource(ref, roots, isFile, path.join);
+  if (!file) return { ok: false };
+  const template = editorTemplate(typeof opts?.editor === 'string' ? opts.editor : undefined, typeof opts?.command === 'string' ? opts.command : '');
+  if (!template.trim()) return { ok: false, file, error: 'Set the command line of your editor under Edit › Editor and source roots…' };
+  const col = typeof ref.col === 'number' ? ref.col : 0;
+  const log = process.env.ULV_SOURCE_LAUNCH_LOG;
+  if (isUrlTemplate(template)) {
+    const target = expandUrl(template, file, ref.line, col);
+    if (log) fs.appendFileSync(log, target + '\n');
+    else await shell.openExternal(target);
+    return { ok: true, file, target };
+  }
+  const { program, args } = expandCommand(template, file, ref.line, col);
+  if (!program) return { ok: false, file, error: 'The editor command is empty' };
+  const target = [program, ...args].join(' ');
+  if (log) {
+    fs.appendFileSync(log, target + '\n');
+    return { ok: true, file, target };
+  }
+  return new Promise((resolve) => {
+    const child = spawn(program, args, { detached: true, stdio: 'ignore' });
+    child.once('error', (e) => resolve({ ok: false, file, error: `${program}: ${e.message}` }));
+    child.once('spawn', () => {
+      child.unref();
+      resolve({ ok: true, file, target });
+    });
   });
 }
 
@@ -187,6 +228,9 @@ function buildMenu() {
         { label: 'Quick filter', accelerator: 'CmdOrCtrl+L', click: () => send('quick-filter') },
         { label: 'Go to line…', accelerator: 'CmdOrCtrl+G', click: () => send('goto-line') },
         { label: 'Toggle bookmark', accelerator: 'CmdOrCtrl+B', click: () => send('toggle-bookmark') },
+        // The renderer handles Ctrl+P itself, like Ctrl+K.
+        { label: 'Pin row', accelerator: 'CmdOrCtrl+P', registerAccelerator: false, click: () => send('toggle-pin') },
+        { label: 'Editor and source roots…', click: () => send('source-settings') },
         { type: 'separator' },
         // The renderer handles Ctrl+K itself (so it also works with the menu bar hidden).
         { label: 'Clear (hide everything so far)', accelerator: 'CmdOrCtrl+K', registerAccelerator: false, click: () => send('clear-view') },
@@ -391,6 +435,11 @@ if (!app.requestSingleInstanceLock()) {
       });
       return r.canceled ? null : r.filePath;
     });
+    ipcMain.handle('dialog:folder', async () => {
+      const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] });
+      return r.canceled ? null : r.filePaths[0] ?? null;
+    });
+    ipcMain.handle('source:open', (_e, ref: SourceRef, opts: { roots?: unknown; editor?: unknown; command?: unknown }) => openSource(ref, opts));
     ipcMain.handle('startup-files', async () => {
       const piped = await stdin;
       return [...filesFromArgv(process.argv), ...(piped ? [piped.path] : []), ...pendingOpen.splice(0)];

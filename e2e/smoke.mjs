@@ -14,13 +14,15 @@ const log = path.join(tmp, 'app.log');
 execFileSync(process.execPath, ['scripts/gen-sample.mjs', log, '5']);
 const other = path.join(tmp, 'other.log');
 fs.writeFileSync(other, '2024-05-01 08:00:00,500 [main] ERROR com.acme.Other - from the other file\n');
+const launchLog = path.join(tmp, 'launched.txt');
 const notes = path.join(tmp, 'notes.txt');
 fs.writeFileSync(notes, 'Release notes for build 4.2\n\nInstalled packages:\n  - libfoo 1.2\nWARNING: disk almost full\nerror: could not copy config.ini\ndone\n');
 
 const app = await electron.launch({
   // a fresh profile so settings from earlier runs (theme, wrap, dock…) don't leak in
   args: ['--no-sandbox', `--user-data-dir=${path.join(tmp, 'profile')}`, '.', log],
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1' },
+  // source links write what they would open to launchLog instead of starting an editor
+  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', ULV_SOURCE_LAUNCH_LOG: launchLog },
 });
 const win = await app.firstWindow();
 win.on('pageerror', (e) => console.error('pageerror:', e));
@@ -350,6 +352,151 @@ await step('Clear hides every entry so far', async () => {
   await win.waitForFunction(() => !/cleared/.test(document.querySelector('#status')?.textContent ?? '') && document.querySelectorAll('.grid-rows .r .c').length > 20, null, { timeout: 20000 });
 });
 
+await step('pins rows to a strip above the grid that stays while scrolling', async () => {
+  await win.focus('#grid');
+  await win.keyboard.press('Home');
+  await win.keyboard.press('ArrowDown');
+  await win.keyboard.press('ArrowDown');
+  await win.keyboard.press('Control+p');
+  await win.waitForSelector('#pins:not(.hidden) .pin');
+  // the row menu pins too
+  const row = win.locator('.grid-rows .r').nth(8);
+  const rowIndex = Number(await row.getAttribute('data-row'));
+  await row.locator('.c.msg').click({ button: 'right' });
+  await win.locator('.ctxmenu .item', { hasText: 'Pin row' }).click();
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 2);
+  assert.match(await win.locator('#pins .pin').first().innerText(), /^📌\s*\d+\s/);
+  // scrolled far away, the strip is still there and a click jumps back
+  for (let k = 0; k < 6; k++) await win.keyboard.press('PageDown');
+  await win.waitForFunction(() => window.__ulv.state().active.topRow > 60);
+  assert.equal(await win.locator('#pins .pin').count(), 2);
+  await shot('pinned-rows');
+  await win.locator('#pins .pin').nth(1).click();
+  await win.waitForFunction((r) => window.__ulv.state().active.focus === r, rowIndex);
+  // saved per file
+  await win.waitForFunction(async () => JSON.stringify(Object.values((await window.ulv.getSettings()).pins ?? {}).map((l) => l.length)) === '[2]');
+});
+
+await step('groups the timeline by logger and filters from the legend', async () => {
+  // a tab of its own: the main log has lines from 2030 appended by now
+  const groupLog = path.join(tmp, 'group.log');
+  execFileSync(process.execPath, ['scripts/gen-sample.mjs', groupLog, '2']);
+  await win.evaluate((p) => window.__ulv.openPaths([p], false), groupLog);
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 2);
+  await win.waitForFunction(() => !/Indexing/.test(document.querySelector('#status')?.textContent ?? '') && document.querySelectorAll('.grid-rows .r .c').length > 0, null, { timeout: 30000 });
+  await win.click('#histogram .hist-group');
+  await win.locator('.ctxmenu .item', { hasText: 'Logger' }).click();
+  await win.waitForFunction(() => window.__ulv.timelineGroups()?.keys.length === 5, null, { timeout: 20000 });
+  assert.match(await win.locator('#histogram .hist-group').innerText(), /^Group by: Logger/);
+  assert.equal(await win.locator('#histogram .hist-legend .lg').count(), 5);
+  await shot('timeline-grouped');
+  const key = await win.evaluate(() => window.__ulv.timelineGroups().keys[1]);
+  assert.equal(await win.locator('#histogram .hist-legend .lg .k').nth(1).innerText(), key.split('.').pop()); // short names
+  await win.locator('#histogram .hist-legend .lg').nth(1).click();
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.equal(await win.inputValue('#quick'), `logger==${key}`);
+  const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
+  assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === key), `loggers: ${loggers.slice(0, 3)}`);
+  // the grouping follows the filter: one logger left
+  await win.waitForFunction(() => window.__ulv.timelineGroups()?.keys.length === 1, null, { timeout: 20000 });
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.evaluate(() => window.__ulv.setHistogramGroup('level'));
+  await win.waitForFunction(() => window.__ulv.timelineGroups() === null);
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 1);
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 2);
+});
+
+await step('picks several loggers with Ctrl+click and a whole package', async () => {
+  const fld = win.locator('#sidebar .fields-sec .fld', { hasText: 'logger' });
+  if (!(await fld.evaluate((e) => e.classList.contains('open')))) await fld.click();
+  const values = win.locator('#sidebar .fields-sec .fv:not(.pkg)', { hasText: 'com.acme.' });
+  await values.first().waitFor();
+  const a = (await values.nth(0).locator('.v').innerText()).trim();
+  const b = (await values.nth(1).locator('.v').innerText()).trim();
+  await values.nth(0).click({ modifiers: ['Control'] });
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.locator('#sidebar .fields-sec .fv:not(.pkg)', { hasText: b }).click({ modifiers: ['Control'] });
+  await win.waitForFunction((q) => document.querySelector('#quick').value === q, `logger in (${a},${b})`);
+  await win.waitForFunction(() => document.querySelectorAll('#sidebar .fields-sec .fv.picked').length === 2, null, { timeout: 20000 });
+  const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
+  assert.ok(loggers.every((l) => l.trim() === a || l.trim() === b), `loggers: ${loggers.slice(0, 3)}`);
+  await shot('field-picks');
+  // the package node: everything under com.acme
+  await win.locator('#sidebar .fields-sec .fv.pkg', { hasText: 'com.acme.*' }).click();
+  await win.waitForFunction(() => document.querySelector('#quick').value === 'logger:com.acme.*');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.fill('#quick', '');
+  await win.press('#quick', 'Enter');
+});
+
+await step('highlights a double-clicked word and a selection in the details on screen', async () => {
+  const cell = win.locator('.grid-rows .r .c[data-col="thread"]', { hasText: 'main' }).first();
+  await cell.dblclick({ position: { x: 12, y: 8 } });
+  await win.waitForFunction(() => window.__ulv.autoHighlight() === 'main');
+  const marked = await win.evaluate(() => CSS.highlights.get('auto-hl')?.size ?? 0);
+  assert.ok(marked > 1, `marked ${marked}`);
+  assert.match(await win.locator('#sidebar').innerText(), /Bookmarks \(1\)/i); // a word, not a bookmark
+  await shot('auto-highlight');
+  // a single click clears it
+  await win.locator('.grid-rows .r .c.msg').nth(2).click();
+  await win.waitForFunction(() => window.__ulv.autoHighlight() === null);
+  // selecting text in the details pane highlights it until the selection clears
+  await win.evaluate(() => {
+    const pre = document.querySelector('#detail pre');
+    const text = pre.firstChild;
+    const r = document.createRange();
+    const i = text.data.indexOf('[') + 1;
+    r.setStart(text, i);
+    r.setEnd(text, text.data.indexOf(']'));
+    document.getSelection().removeAllRanges();
+    document.getSelection().addRange(r);
+  });
+  await win.waitForFunction(() => !!window.__ulv.autoHighlight());
+  await win.evaluate(() => document.getSelection().removeAllRanges());
+  await win.waitForFunction(() => window.__ulv.autoHighlight() === null);
+});
+
+await step('opens source locations under the source roots in the editor', async () => {
+  await win.fill('#quick', 'level:error');
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.locator('.grid-rows .r', { has: win.locator('.more') }).first().locator('.c.msg').click();
+  const link = win.locator('#detail pre .src-link', { hasText: 'OrderController.java:42' });
+  await link.waitFor();
+  // no source roots yet: a toast says how to set them
+  await link.click();
+  await win.waitForFunction(() => /Editor and source roots/.test(document.querySelector('#toast')?.textContent ?? ''));
+  assert.ok(!fs.existsSync(launchLog));
+  const root = path.join(tmp, 'src', 'main', 'java');
+  fs.mkdirSync(path.join(root, 'com', 'acme', 'api'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'com', 'acme', 'api', 'OrderController.java'), 'class OrderController {}\n');
+  await win.focus('#grid');
+  await win.keyboard.press('F1');
+  await win.keyboard.type('source roots');
+  await win.keyboard.press('Enter');
+  await win.locator('.modal .src-roots').fill(path.join(tmp, 'missing') + '\n' + root);
+  await win.locator('.modal .btn.primary', { hasText: 'Save' }).click();
+  await win.waitForSelector('#modal.hidden', { state: 'attached' });
+  await link.click();
+  await win.waitForFunction(() => /Opening OrderController\.java:42/.test(document.querySelector('#toast')?.textContent ?? ''));
+  const file = path.join(root, 'com', 'acme', 'api', 'OrderController.java');
+  assert.deepEqual(fs.readFileSync(launchLog, 'utf-8').trim().split('\n'), [`vscode://file/${file.replace(/^\//, '')}:42`]);
+  // and from an expanded entry
+  await win.focus('#grid');
+  await win.keyboard.press('ArrowRight');
+  const inline = win.locator('.grid-rows .r.cur.open .rx .src-link', { hasText: 'OrderController.java:42' });
+  await inline.waitFor();
+  await shot('source-links');
+  await inline.click();
+  for (let k = 0; k < 50 && fs.readFileSync(launchLog, 'utf-8').trim().split('\n').length < 2; k++) await new Promise((r) => setTimeout(r, 100));
+  await win.keyboard.press('ArrowLeft');
+  await win.waitForSelector('.grid-rows .r.open', { state: 'detached' });
+  assert.equal(fs.readFileSync(launchLog, 'utf-8').trim().split('\n').length, 2);
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+});
+
 await step('saves a workspace and opens it again', async () => {
   const wsFile = path.join(tmp, 'round trip.ulvw');
   await win.fill('#quick', 'ConnectionPool');
@@ -365,6 +512,7 @@ await step('saves a workspace and opens it again', async () => {
   assert.equal(ws.tabs[0].filter.query, 'ConnectionPool');
   assert.equal(ws.tabs[0].search.text, 'Acquired');
   assert.equal(ws.tabs[0].bookmarks.length, 1);
+  assert.equal(ws.tabs[0].pins.length, 2);
   assert.equal(await win.title(), 'round trip.ulvw — UltraLogViewer');
   // close the tab and reset the boxes, then reopen
   await win.locator('.tab .x').click();
@@ -377,6 +525,7 @@ await step('saves a workspace and opens it again', async () => {
   assert.equal(await win.inputValue('#quick'), 'ConnectionPool');
   assert.equal(await win.inputValue('#search'), 'Acquired');
   await win.waitForFunction(() => /Bookmarks \(1\)/i.test(document.querySelector('#sidebar')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 2, null, { timeout: 20000 });
   await shot('22-workspace');
   await win.fill('#search', '');
   await win.press('#search', 'Escape');
