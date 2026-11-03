@@ -325,6 +325,42 @@ await step('lists patterns and filters to one with a double-click', async () => 
   await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
 });
 
+await step('runs SQL over the entries and jumps to a result row', async () => {
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+Q');
+  await win.waitForSelector('#sql:not(.hidden) .sql-editor');
+  assert.ok(await win.evaluate(() => document.activeElement?.classList.contains('sql-editor')));
+  await win.fill('#sql .sql-editor', "SELECT line, level, logger, message\nFROM view\nWHERE level = 'ERROR'\nORDER BY line DESC\nLIMIT 20");
+  await win.keyboard.press('Control+Enter');
+  await win.waitForSelector('#sql .sql-table tbody tr', { timeout: 30000 });
+  assert.deepEqual(await win.locator('#sql .sql-table th').allInnerTexts(), ['line', 'level', 'logger', 'message']);
+  assert.match(await win.locator('#sql .sql-status').innerText(), /^\d+ rows? in \d+ ms/);
+  assert.ok((await win.locator('#sql .sql-table td:nth-child(2)').allInnerTexts()).every((l) => l === 'ERROR'));
+  const target = win.locator('#sql .sql-table tbody tr').nth(2);
+  const line = (await target.locator('td').first().innerText()).trim();
+  await target.click();
+  await win.waitForFunction((ln) => (document.querySelector('#grid .grid-rows .r.sel .g')?.textContent ?? '').endsWith(ln), line, { timeout: 10000 });
+  assert.ok(await target.evaluate((e) => e.classList.contains('sel')));
+  // a write is refused inline
+  await win.fill('#sql .sql-editor', 'DELETE FROM logs');
+  await win.click('#sql .sql-head .btn.primary');
+  await win.waitForSelector('#sql .sql-error:not(.hidden)');
+  assert.match(await win.locator('#sql .sql-error').innerText(), /read-only/);
+  // an example with a chart
+  await win.locator('#sql .sql-head select').selectOption({ label: 'Errors per minute' });
+  await win.waitForFunction(() => !document.querySelector('#sql .sql-head .tog-btn')?.disabled, null, { timeout: 30000 });
+  await win.click('#sql .sql-head .tog-btn');
+  await win.waitForSelector('#sql .sql-chart:not(.hidden)');
+  await shot('26-sql-chart');
+  await win.click('#sql .sql-head .tog-btn');
+  await win.fill('#sql .sql-editor', "SELECT line, level, logger, message\nFROM view\nWHERE level = 'ERROR'\nORDER BY line DESC\nLIMIT 20");
+  await win.keyboard.press('Control+Enter');
+  await win.waitForSelector('#sql .sql-table tbody tr');
+  await shot('26-sql');
+  await win.keyboard.press('Control+Shift+Q');
+  await win.waitForSelector('#sql.hidden', { state: 'attached' });
+});
+
 await step('shows a new-lines pill while not following and follows on click', async () => {
   await win.focus('#grid');
   await win.keyboard.press('Home');

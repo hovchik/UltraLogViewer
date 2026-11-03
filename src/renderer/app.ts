@@ -14,6 +14,7 @@ import { openPalette } from './palette';
 import { PatternsView } from './patternsView';
 import { Pins } from './pins';
 import { Sidebar } from './sidebar';
+import { SqlPanel } from './sqlPanel';
 import { editSourceSettings, openSourceRef } from './sourceLinksView';
 import type { TimeMode } from '../core/timestamp';
 import { describeWindow, OpenWindow, parseDuration, parsePoint, windowEmpty } from '../core/timeWindow';
@@ -176,6 +177,15 @@ const pins = new Pins($('#pins'), {
   },
 });
 
+const sqlPanel = new SqlPanel($('#sql'), $('#sql-split'), {
+  owner: () => ownerOf(active),
+  jumpTo: (tab, row) => {
+    if (active !== tab) activate(tab); // the result is about the main pane
+    mainGrid.select(row, false, 'center');
+  },
+  shownChanged: () => syncMenu(),
+});
+
 const autoHighlight = new AutoHighlight($('#panes'), $('#detail')) // both panes of a split;
 
 // ---------------------------------------------------------------------- tabs
@@ -253,6 +263,7 @@ function activate(tab: Tab | null) {
   }
   renderStatus();
   renderToolbar();
+  sqlPanel.tabChanged();
 }
 
 /** Closes a tab (with its split pane); for a split pane, closes the split. */
@@ -268,6 +279,7 @@ async function closeTab(tab: Tab) {
     clearTimeout(patternTimers.get(t));
     patternTimers.delete(t);
   }
+  sqlPanel.closed(tab);
   const split = tab.split;
   tab.split = null;
   // The files stay open while another tab (a duplicate) still uses them.
@@ -563,6 +575,7 @@ window.ulv.onEvent((raw) => {
   const ev = raw as EngineEvent;
   const tab = allTabs().find((t) => t.id === ev.docId);
   if (!tab) return;
+  if (ev.type === 'progress' && ev.phase === 'sql') return sqlPanel.progress(tab, ev.fraction);
   if (ev.type === 'progress') {
     tab.progress = ev.fraction >= 1 ? undefined : { phase: ev.phase, fraction: ev.fraction };
     if (tab === active) renderStatus();
@@ -698,7 +711,7 @@ function setGroupRepeats(t: Tab, mode: NonNullable<FilterSpec['groupRepeats']>) 
 
 /** Tells main what the menu should show for the active tab (Group repeats, Patterns). */
 function syncMenu() {
-  void ulv().setMenuState({ groupRepeats: active?.filter.groupRepeats ?? 'off', patterns: !!active?.showPatterns });
+  void ulv().setMenuState({ groupRepeats: active?.filter.groupRepeats ?? 'off', patterns: !!active?.showPatterns, sql: sqlPanel.shown });
 }
 
 async function applyFilter(tab: Tab) {
@@ -2246,6 +2259,7 @@ function showHelp() {
     ['→ / ←', 'Expand / collapse a multi-line entry'],
     ['Ctrl+Shift+P, F1', 'Command palette'],
     ['Ctrl+Shift+A', 'Patterns view'],
+    ['Ctrl+Shift+Q', 'SQL panel (Ctrl+Enter runs the query)'],
     ['Ctrl+K', 'Clear (hide everything so far)'],
     ['Ctrl+click a token', 'Search for it'],
     ['Ctrl+Alt+S', 'Save workspace'],
@@ -2392,6 +2406,8 @@ window.ulv.onMenu((cmd, ...args) => {
       return void openCommandPalette();
     case 'toggle-patterns':
       return active && setPatternsShown(active, !active.showPatterns);
+    case 'toggle-sql':
+      return sqlPanel.toggle();
     case 'group-repeats':
       if (active && (args[0] === 'off' || args[0] === 'exact' || args[0] === 'pattern')) setGroupRepeats(active, args[0]);
       return;
@@ -2438,6 +2454,9 @@ document.addEventListener('keydown', (e) => {
   } else if (e.code === 'KeyA' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
     e.preventDefault();
     if (active) setPatternsShown(active, !active.showPatterns);
+  } else if (e.code === 'KeyQ' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    sqlPanel.toggle();
   } else if (e.code === 'KeyP' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     void togglePinAtFocus();

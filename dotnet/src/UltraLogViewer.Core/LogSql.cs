@@ -83,8 +83,9 @@ public sealed class LogSql : IDisposable
             else if (_dirty is null) _dirty = (int[])first.Clone();
             else
             {
-                if (_dirty.Length < first.Length) Array.Resize(ref _dirty, first.Length);
-                for (var i = 0; i < first.Length; i++) _dirty[i] = i < _dirty.Length && _dirty[i] < first[i] ? _dirty[i] : first[i];
+                var had = _dirty.Length;
+                if (had < first.Length) Array.Resize(ref _dirty, first.Length);
+                for (var i = 0; i < first.Length; i++) _dirty[i] = i < had ? Math.Min(_dirty[i], first[i]) : first[i];
             }
         }
     }
@@ -269,13 +270,26 @@ public sealed class LogSql : IDisposable
             var sources = _doc.Sources.Count;
             var full = !_built || dirtyAll || _builtCap != Cap || !need.IsSubsetOf(_loadedCols) || _loadedPerSource.Length != sources
                 || dirty is not null && _doc.MergedNow;
-            if (full)
+            if (dirtyAll)
             {
-                if (dirtyAll && attempt == 0) schema = await SchemaNowAsync(ct);
-                await LoadAsync(schema, need.Concat(_loadedCols).Where(n => schema.Any(c => c.Name.Equals(n, StringComparison.OrdinalIgnoreCase))).ToHashSet(StringComparer.OrdinalIgnoreCase), null, progress, ct);
+                // Re-parsed (format change) or rotated: the fields may have changed.
+                _schema = null;
+                schema = await SchemaNowAsync(ct);
             }
-            else if (dirty is not null) await LoadAsync(schema, _loadedCols, dirty, progress, ct);
-            else return;
+            try
+            {
+                if (full)
+                    await LoadAsync(schema, need.Concat(_loadedCols).Where(n => schema.Any(c => c.Name.Equals(n, StringComparison.OrdinalIgnoreCase))).ToHashSet(StringComparer.OrdinalIgnoreCase), null, progress, ct);
+                else if (dirty is not null) await LoadAsync(schema, _loadedCols, dirty, progress, ct);
+                else return;
+            }
+            catch
+            {
+                // The load rolled back: the table is as it was, so the changes still need loading next time.
+                if (dirtyAll) lock (_sync) _dirtyAll = true;
+                if (dirty is not null) OnIndexChanged(dirty);
+                throw;
+            }
             // The file changed while loading: catch up (a few times at most, a live file never stops growing).
             lock (_sync)
                 if ((_dirty is null && !_dirtyAll) || attempt >= 2) return;

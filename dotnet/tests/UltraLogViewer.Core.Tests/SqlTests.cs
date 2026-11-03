@@ -212,6 +212,24 @@ public class SqlTests
     }
 
     [Fact]
+    public async Task LoadsAppendedEntriesAfterACancelledAppend()
+    {
+        static string Lines(int n) => string.Concat(Enumerable.Range(0, n).Select(i => $"2024-05-01 10:00:00,000 [main] INFO  com.acme.App - entry {i}\n"));
+        var path = TestFiles.Write("grow-cancel.log", Lines(2000));
+        using var d = new LogDocument("grow-cancel");
+        await d.AddSourceAsync(path, new SourceOptions());
+        using var sql = new LogSql(d) { Slice = 500, Batch = 50 };
+        Assert.Equal(2000L, (await sql.QueryAsync("SELECT count(message) FROM logs")).Rows[0][0]);
+        File.AppendAllText(path, Lines(3000));
+        Assert.True(await d.RefreshAsync());
+        using var cts = new CancellationTokenSource();
+        var progress = new SyncProgress(f => { if (f > 0.2) cts.Cancel(); });
+        var r = await sql.QueryAsync("SELECT count(message) FROM logs", progress, cts.Token);
+        Assert.True(r.Cancelled);
+        Assert.Equal(5000L, (await sql.QueryAsync("SELECT count(message) FROM logs")).Rows[0][0]);
+    }
+
+    [Fact]
     public async Task FollowsAGrowingFileAndANewFormat()
     {
         var path = TestFiles.Write("grow.log", TestFiles.Log4j);
