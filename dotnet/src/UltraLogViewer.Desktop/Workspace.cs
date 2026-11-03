@@ -25,6 +25,8 @@ public sealed class WorkspaceTab
     public FilterSpec Filter { get; set; } = new();
     public WorkspaceSearch Search { get; set; } = new();
     public List<WorkspaceBookmark> Bookmarks { get; set; } = [];
+    /// <summary>Pinned entries (Note unused).</summary>
+    public List<WorkspaceBookmark> Pins { get; set; } = [];
     public List<string> ExtraColumns { get; set; } = [];
     public List<string> ColumnOrder { get; set; } = [];
     public List<string> HiddenColumns { get; set; } = [];

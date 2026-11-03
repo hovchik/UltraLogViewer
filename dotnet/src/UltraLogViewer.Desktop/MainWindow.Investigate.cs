@@ -209,6 +209,7 @@ public sealed partial class MainWindow
             items.Add(Item("Copy value", () => Run(() => CopyText(cv, "Value copied"))));
         items.Add(Item("Copy entry", () => Run(() => CopyText(row.Text, "Entry copied"))));
         items.Add(new MenuItem { Header = "Toggle bookmark", InputGesture = new KeyGesture(Key.B, KeyModifiers.Control), Command = Cmd(() => ToggleBookmark(row)) });
+        items.Add(new MenuItem { Header = IsPinned(row) ? "Unpin row" : "Pin row", InputGesture = new KeyGesture(Key.P, KeyModifiers.Control), Command = Cmd(() => TogglePin(row)) });
         var menu = new ContextMenu { Placement = PlacementMode.Pointer };
         foreach (var c in items) menu.Items.Add(c);
         menu.Open(_grid);
@@ -240,6 +241,7 @@ public sealed partial class MainWindow
         items.Add(Item($"Only {title} = “{Shorten(v)}”".Replace("_", "__"), () => AddValueRule(key, v, RuleMode.Include)));
         items.Add(Item($"Exclude {title} = “{Shorten(v)}”".Replace("_", "__"), () => AddValueRule(key, v, RuleMode.Exclude)));
         items.Add(Item($"Highlight “{Shorten(v)}”".Replace("_", "__"), () => AddHighlight(v)));
+        items.AddRange(PackageItems(key, v));
         return items;
     }
 

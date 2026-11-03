@@ -42,6 +42,10 @@ public sealed class DocumentTab : IDisposable
     public SearchResult? SearchResult { get; set; }
     public int SearchCurrent { get; set; }
     public Dictionary<string, Bookmark> Bookmarks { get; } = [];
+    /// <summary>Entries pinned to the strip above the grid, in the order they were pinned.</summary>
+    public List<Bookmark> Pins { get; } = [];
+    /// <summary>What the timeline stacks by: "level", "__source" (merged views) or a parsed field.</summary>
+    public string HistogramGroup { get; set; } = "level";
     public int Anchor { get; set; }
     public int Focus { get; set; }
     public int TopRow { get; set; }

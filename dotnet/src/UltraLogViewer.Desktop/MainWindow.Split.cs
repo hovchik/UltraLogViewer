@@ -110,6 +110,10 @@ public sealed partial class MainWindow
         {
             if (Focus()) w.SearchFor(text, fromRow);
         }
+        public void OpenSource(SourceRef r)
+        {
+            if (Focus()) w.OpenSource(r);
+        }
     }
 
     /// <summary>Both panes side by side: the main one (with the patterns view and pill over it) and the split.</summary>

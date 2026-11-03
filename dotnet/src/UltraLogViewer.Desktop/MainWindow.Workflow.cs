@@ -426,6 +426,7 @@ public sealed partial class MainWindow
                 Search = new WorkspaceSearch { Text = t.SearchPattern.Text, Regex = t.SearchPattern.Regex, CaseSensitive = t.SearchPattern.CaseSensitive, WholeWord = t.SearchPattern.WholeWord },
                 Bookmarks = t.Bookmarks.Values.Where(b => b.Source < t.Info.Sources.Count)
                     .Select(b => new WorkspaceBookmark { Path = t.Info.Sources[b.Source].Path, Line = b.Line, Note = b.Note }).ToList(),
+                Pins = WorkspacePins(t),
                 ExtraColumns = [.. ExtraColumnsOf(t) ?? []],
                 ColumnOrder = [.. ColumnOrderOf(t) ?? []],
                 HiddenColumns = [.. HiddenColumnsOf(t)],
@@ -478,6 +479,7 @@ public sealed partial class MainWindow
                 saved.AddRange(g.Select(b => new SavedBookmark { Line = b.Line, Note = b.Note }));
                 _settings.Bookmarks[target] = saved;
             }
+            StageWorkspacePins(wt, paths);
             if (wt.FormatKey.Length > 0)
             {
                 if (wt.ExtraColumns.Count > 0) _settings.ExtraColumns[wt.FormatKey] = [.. wt.ExtraColumns];

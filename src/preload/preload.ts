@@ -17,6 +17,12 @@ const api = {
   readWorkspace: (file: string): Promise<string> => ipcRenderer.invoke('workspace:read', file),
   writeWorkspace: (file: string, text: string) => ipcRenderer.invoke('workspace:write', file, text),
   addRecentWorkspace: (file: string) => ipcRenderer.invoke('workspace:recent', file),
+  folderDialog: (): Promise<string | null> => ipcRenderer.invoke('dialog:folder'),
+  /** Opens a source location in the configured editor; ok false without `error` when no source root has the file. */
+  openSource: (
+    ref: { start: number; length: number; path: string; line: number; col: number; pkg?: string },
+    opts: { roots: string[]; editor: string; command: string },
+  ): Promise<{ ok: boolean; file?: string; target?: string; error?: string }> => ipcRenderer.invoke('source:open', ref, opts),
   filesExist: (paths: string[]): Promise<boolean[]> => ipcRenderer.invoke('files:exist', paths),
   startupFiles: (): Promise<string[]> => ipcRenderer.invoke('startup-files'),
   /** Command-line window (--since/--until/--last), its errors, and whether stdin is being read. */

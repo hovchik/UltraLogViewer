@@ -15,7 +15,7 @@ namespace UltraLogViewer.Core;
 /// (see <see cref="InOrder"/>), so the answers are exactly those of a sequential pass.
 /// Snapshots (merge, view) are immutable and swapped atomically, so reads never block.
 /// </summary>
-public sealed class LogDocument : IDisposable
+public sealed partial class LogDocument : IDisposable
 {
     private const int MaxSearchRows = 2_000_000;
 

@@ -1,14 +1,20 @@
 import { FORMAT_LABELS } from '../core/formats';
+import type { SourceRef } from '../core/sourceLinks';
+import { fieldPicks, isDottedName, packagePrefixes, setFieldPicks } from '../core/fieldPicks';
+import { legendClause, SOURCE_FIELD } from '../core/histogramGroups';
 import { fieldToken, OPERATORS, operatorHint, splitToken, tokenAt, validatePattern, validateQuery } from '../core/query';
 import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
+import { AutoHighlight } from './autoHighlight';
 import { DetailView } from './detail';
 import { Grid } from './grid';
 import { HistogramView } from './histogram';
 import { openPalette } from './palette';
 import { PatternsView } from './patternsView';
+import { Pins } from './pins';
 import { Sidebar } from './sidebar';
+import { editSourceSettings, openSourceRef } from './sourceLinksView';
 import type { TimeMode } from '../core/timestamp';
 import { describeWindow, OpenWindow, parseDuration, parsePoint, windowEmpty } from '../core/timeWindow';
 import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, HighlightRule, Settings, Tab, uid, viewSettings } from './state';
@@ -70,6 +76,8 @@ function gridHost(self: () => Grid) {
     toggleBookmark: (row: RowData) => focus() && void toggleBookmark(row),
     copyRows: (a: number, b: number) => focus() && void copyRows(a, b),
     onTokenClick: (row: RowData, text: string) => focus() && searchToken(row, text),
+    onWordDoubleClick: (word: string) => autoHighlight.set(word, true),
+    openSource: (ref: SourceRef) => void openSourceRef(ref, settings),
   };
 }
 
@@ -95,6 +103,8 @@ const sidebar = new Sidebar($('#sidebar'), {
   isColumnShown,
   toggleColumn: (key) => setColumnShown(key, !isColumnShown(key)),
   filterByValue: (key, value, mode) => active && filterByValue(active, key, value, mode),
+  togglePick: (key, value) => active && togglePick(active, key, value),
+  pickPackage: (key, prefix, toggle) => active && pickPackage(active, key, prefix, toggle),
   rescanFields: () => active && void refreshFields(active),
   clearAllFilters: () => active && clearAllFilters(active),
 });
@@ -116,6 +126,7 @@ const detail = new DetailView(
     active.unfolded.add(key);
     void updateDetail();
   },
+  (ref) => void openSourceRef(ref, settings),
 );
 
 const patternsView = new PatternsView($('#patterns'), {
@@ -147,7 +158,25 @@ const histogram = new HistogramView($('#histogram'), {
     saveSettings();
     if (active) void refreshOverview(active);
   },
+  onGroupMenu: (anchor) => active && groupMenu(active, anchor),
+  onLegendClick: (i) => {
+    const g = histogram.shownGroups;
+    if (active && g) addQueryClause(active, legendClause(g, i));
+  },
 }, $('#hist-split'));
+
+const pins = new Pins($('#pins'), {
+  active: () => active,
+  settings: () => settings,
+  saveSettings,
+  isPartial: (t) => isPartial(t),
+  select: (row) => {
+    grid.select(row, false, 'center');
+    grid.root.focus();
+  },
+});
+
+const autoHighlight = new AutoHighlight($('#panes'), $('#detail')) // both panes of a split;
 
 // ---------------------------------------------------------------------- tabs
 
@@ -201,6 +230,8 @@ function activate(tab: Tab | null) {
   quickInput.value = tab?.filter.query ?? '';
   formatSel.value = tab?.formatId ?? '';
   showPanes(tab);
+  pins.render();
+  autoHighlight.set(null);
   renderTabs();
   sidebar.render(tab);
   $('#empty').classList.toggle('hidden', !!tab);
@@ -217,6 +248,7 @@ function activate(tab: Tab | null) {
   } else {
     detail.render(null, undefined);
     histogram.set(null);
+    histogram.setGroups(null, 'Level');
     renderRecent();
   }
   renderStatus();
@@ -524,7 +556,7 @@ function refreshInactivePane(t: Tab) {
 
 // --------------------------------------------------------------- engine events
 
-const refreshOverviewSoon = debounce((tab: Tab) => void refreshOverview(tab), 250);
+const refreshOverviewSoon = debounce((tab: Tab) => void refreshOverview(tab, true), 250);
 const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false, undefined, false), 800);
 
 window.ulv.onEvent((raw) => {
@@ -622,6 +654,7 @@ async function onDocReady(tab: Tab) {
     }
     if (restored) await resolveBookmarkRows(tab);
   }
+  await pins.restore(tab);
   if (!isDefaultFilter(tab)) await applyFilter(tab);
   if (tab.search.pattern.text) void runSearch(tab, false, tab.search.pattern);
   refreshFieldsSoon(tab);
@@ -814,7 +847,8 @@ $('#newpill').onclick = () => {
   grid.root.focus();
 };
 
-async function refreshOverview(tab: Tab) {
+/** `live`: new lines arrived (the grouped timeline then follows at most every few seconds). */
+async function refreshOverview(tab: Tab, live = false) {
   if (tab !== active) return;
   const [ov, hist] = await Promise.all([
     engine.overview(tab.id, Math.max(50, Math.floor(grid.root.querySelector('.grid-body')!.clientHeight))),
@@ -824,6 +858,115 @@ async function refreshOverview(tab: Tab) {
   grid.setOverview([...ov]);
   histogram.set(hist);
   updateHistogramViewport();
+  if (hist) void refreshGroups(tab, live);
+}
+
+// ------------------------------------------------------ timeline grouping
+
+let groupSeq = 0;
+/** When the grouped timeline was last computed, and the refresh waiting for new lines. */
+let groupsAt = 0;
+let groupsTimer: ReturnType<typeof setTimeout> | undefined;
+/** New lines of a live file regroup the timeline at most this often (each run reads every row of the view). */
+const GROUPS_LIVE_MS = 5000;
+
+/**
+ * Stacks the timeline by the tab's group field (computed on the scan pool, cached per view in the engine). For new
+ * lines (`live`) it runs at most every GROUPS_LIVE_MS while the current grouping still fits the bars.
+ */
+async function refreshGroups(tab: Tab, live = false) {
+  const field = tab.histogramGroup ?? 'level';
+  clearTimeout(groupsTimer);
+  if (field === 'level') {
+    ++groupSeq;
+    return histogram.setGroups(null, 'Level');
+  }
+  const wait = groupsAt + GROUPS_LIVE_MS - Date.now();
+  if (live && histogram.shownGroups && wait > 0) {
+    groupsTimer = setTimeout(() => tab === active && void refreshGroups(tab), wait);
+    return;
+  }
+  const seq = ++groupSeq;
+  groupsAt = Date.now();
+  const g = await engine.histogramBy(tab.id, field, histogram.bucketsWanted).catch(() => null);
+  if (seq !== groupSeq || tab !== active) return;
+  // the files of a merged view are not a field the quick filter knows: their legend does not filter
+  histogram.setGroups(g, groupTitle(tab, field), field !== SOURCE_FIELD);
+}
+
+function groupTitle(t: Tab, field: string): string {
+  if (field === 'level') return 'Level';
+  if (field === SOURCE_FIELD) return 'Source file';
+  return effectiveColumns(t).find((c) => c.key === field)?.title ?? field;
+}
+
+/** What the timeline can be grouped by: level, the file of a merged view, the columns, then the other parsed fields. */
+function groupChoices(t: Tab): string[] {
+  const out = ['level'];
+  if (t.info.merged) out.push(SOURCE_FIELD);
+  const skip = new Set(['level', 'time', 'message', SOURCE_FIELD]);
+  for (const k of [...t.info.columns.map((c) => c.key), ...(t.fieldStats?.fields.map((f) => f.key) ?? [])])
+    if (!skip.has(k.toLowerCase()) && !out.includes(k)) out.push(k);
+  return out;
+}
+
+function setHistogramGroup(t: Tab, field: string) {
+  t.histogramGroup = field;
+  if (t !== active) return;
+  histogram.setGroups(null, groupTitle(t, field));
+  void refreshGroups(t);
+}
+
+function groupMenu(t: Tab, anchor: HTMLElement) {
+  const r = anchor.getBoundingClientRect();
+  const cur = t.histogramGroup ?? 'level';
+  contextMenu(r.left, r.bottom + 2, groupChoices(t).map((k) => ({ label: groupTitle(t, k), checked: k === cur, action: () => setHistogramGroup(t, k) })));
+}
+
+// ------------------------------------------------------- query clauses
+
+/** Replaces the quick-filter query of a tab (validated first) and applies it. */
+function applyQuery(t: Tab, q: string) {
+  const err = validateQuery(q, !!t.filter.queryCaseSensitive);
+  if (err) return toast(`Quick filter: ${err}`, true);
+  t.filter.query = q;
+  if (t === active) quickInput.value = q;
+  void applyFilter(t);
+}
+
+/** Adds a clause to the quick-filter query (legend clicks). */
+function addQueryClause(t: Tab, clause: string) {
+  applyQuery(t, `${(t.filter.query ?? '').trim()} ${clause}`.trim());
+}
+
+/** Ctrl+click on a field value in the sidebar: picks it too (or drops it), shown as `field in (a,b)`. */
+function togglePick(t: Tab, key: string, value: string) {
+  const p = fieldPicks(t.filter.query ?? '', key);
+  const values = p.values.includes(value) ? p.values.filter((v) => v !== value) : [...p.values, value];
+  applyQuery(t, setFieldPicks(t.filter.query ?? '', key, values, p.prefixes));
+}
+
+/** A package of dotted names: `field:com.acme.*` alone, or added to / dropped from the picks with `toggle`. */
+function pickPackage(t: Tab, key: string, prefix: string, toggle: boolean) {
+  const p = fieldPicks(t.filter.query ?? '', key);
+  const prefixes = !toggle ? [prefix] : p.prefixes.includes(prefix) ? p.prefixes.filter((x) => x !== prefix) : [...p.prefixes, prefix];
+  applyQuery(t, setFieldPicks(t.filter.query ?? '', key, toggle ? p.values : [], prefixes));
+}
+
+/** "Only package com.acme.*" items for a dotted value (its two nearest packages). */
+function packageItems(t: Tab, key: string, v: string): MenuItem[] {
+  if (!isDottedName(v)) return [];
+  return packagePrefixes(v)
+    .slice(-2)
+    .reverse()
+    .map((p) => ({ label: `Only package ${p}*`, action: () => pickPackage(t, key, p, false) }));
+}
+
+async function togglePinAtFocus() {
+  const t = active;
+  if (!t || !t.info.viewCount) return;
+  const row = grid.getCached(t.focus) ?? (await engine.rows(t.id, t.focus, 1))[0];
+  if (row && t === active) pins.toggle(row);
 }
 
 function updateHistogramViewport() {
@@ -1145,6 +1288,7 @@ function filterItems(t: Tab, row: RowData, key: string, v: string): MenuItem[] {
   return [
     { label: `Only ${title} = ${quoted(v)}`, action: () => addExactRule(t, key, v, 'include') },
     { label: `Exclude ${title} = ${quoted(v)}`, action: () => addExactRule(t, key, v, 'exclude') },
+    ...packageItems(t, key, v),
   ];
 }
 
@@ -1164,6 +1308,7 @@ function rowMenu(e: MouseEvent, row: RowData, key: string | null) {
     { label: 'Copy value', disabled: !key, action: () => key && copyText(cellValue(t, row, key), 'Value') },
     { label: 'Copy entry', action: () => copyText(row.text, 'Entry') },
     { label: 'Toggle bookmark', shortcut: 'B', action: () => void toggleBookmark(row) },
+    { label: pins.has(t, row.key) ? 'Unpin row' : 'Pin row', shortcut: 'Ctrl+P', action: () => pins.toggle(row) },
   );
   contextMenu(e.clientX, e.clientY, items);
 }
@@ -1439,8 +1584,10 @@ function persistBookmarks(tab: Tab) {
   saveSettings();
 }
 
+/** Refreshes the view rows of bookmarks and pinned rows after the view changed. */
 async function resolveBookmarkRows(tab: Tab) {
   await Promise.all([...tab.bookmarks.values()].map(async (b) => (b.row = await engine.rowForKey(tab.id, b.key))));
+  await pins.resolveRows(tab);
 }
 
 async function toggleBookmark(row: RowData) {
@@ -1549,6 +1696,7 @@ async function saveWorkspace(file?: string | null) {
       filter: t.filter,
       search: t === active ? currentPattern() : t.search.pattern,
       bookmarks: [...t.bookmarks.values()].map((b) => ({ path: t.info.sources[b.source]?.path ?? t.paths[b.source] ?? t.paths[0], line: b.line, note: b.note })),
+      pins: pins.workspacePins(t),
       extraColumns: extrasOf(t),
       columnOrder: orderOf(t) ?? [],
       hiddenColumns: hiddenOf(t),
@@ -1588,7 +1736,7 @@ async function openWorkspace(file?: string | null) {
     const tab = await openTab(wt.paths, { format: wt.format, encoding: wt.encoding });
     tab.filter = { ...defaultFilter(), ...wt.filter, bookmarks: [], clearedBefore: null };
     tab.search.pattern = wt.search;
-    tab.pending = { bookmarks: wt.bookmarks, columns: { extraColumns: wt.extraColumns, columnOrder: wt.columnOrder, hiddenColumns: wt.hiddenColumns } };
+    tab.pending = { bookmarks: wt.bookmarks, pins: wt.pins, columns: { extraColumns: wt.extraColumns, columnOrder: wt.columnOrder, hiddenColumns: wt.hiddenColumns } };
     opened.push(tab);
   }
   if (r.missing) toast(`Skipped ${r.missing} missing file(s)`, true);
@@ -1632,6 +1780,7 @@ async function applyPending(tab: Tab) {
     persistBookmarks(tab);
     await resolveBookmarkRows(tab);
   }
+  if (p.pins?.length) await pins.applyWorkspacePins(tab, p.pins);
 }
 
 async function openCommandPalette() {
@@ -2077,7 +2226,11 @@ function showHelp() {
     ['Ctrl+L', 'Quick filter (syntax below)'],
     ['e / E', 'Next / previous error'],
     ['w / W', 'Next / previous warning'],
-    ['Ctrl+B, b, double-click', 'Toggle bookmark'],
+    ['Ctrl+B, b, double-click the line number', 'Toggle bookmark'],
+    ['Ctrl+P', 'Pin the row to the strip above the grid (click a pin to jump back)'],
+    ['Double-click a word, select text in the details', 'Highlight every occurrence on screen'],
+    ['Click Foo.java:42 in the details or an expanded entry', 'Open the source in your editor (Edit › Editor and source roots…)'],
+    ['Ctrl+click field values', 'Pick several values of a field (shown as field in (a,b))'],
     ['C', 'Show in context / back to filtered view'],
     ['Right-click', 'Filter by a value'],
     ['F2 / Shift+F2', 'Next / previous bookmark'],
@@ -2097,6 +2250,7 @@ function showHelp() {
     ['Ctrl+click a token', 'Search for it'],
     ['Ctrl+Alt+S', 'Save workspace'],
     ['Timeline: click / drag', 'Jump to time / filter to a time range'],
+    ['Timeline: Group by', 'Stack by logger, thread, file or any field; click a legend item to filter'],
   ];
   // The quick-filter syntax, shown under the shortcuts.
   const syntax: [string, string][] = [
@@ -2110,6 +2264,7 @@ function showHelp() {
     ['duration>2s', 'Durations with ms, s, m or h; a bare number is read in the unit you typed'],
     ['level>=warn', 'Levels compare by severity'],
     ['user in (alice,bob)', 'The field equals one of the values'],
+    ['logger:com.acme.*, thread:worker-*', 'Wildcards match the whole value; a trailing .* is the package and everything below it'],
     ['exists(traceId), env?=prod', 'The field is present / equals the value or is missing'],
     ['since:-3h, until:-10m', 'Relative to now; also since:2024-05-01T10:00, since:today'],
   ];
@@ -2196,6 +2351,10 @@ window.ulv.onMenu((cmd, ...args) => {
       const row = active && grid.getCached(active.focus);
       return row && void toggleBookmark(row);
     }
+    case 'toggle-pin':
+      return void togglePinAtFocus();
+    case 'source-settings':
+      return editSourceSettings(settings, saveSettings);
     case 'toggle-follow':
       return toggleFollow();
     case 'toggle-histogram':
@@ -2279,6 +2438,9 @@ document.addEventListener('keydown', (e) => {
   } else if (e.code === 'KeyA' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
     e.preventDefault();
     if (active) setPatternsShown(active, !active.showPatterns);
+  } else if (e.code === 'KeyP' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    void togglePinAtFocus();
   } else if (e.code === 'KeyK' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     if (active) clearView(active);
@@ -2331,7 +2493,18 @@ async function init() {
     renderToolbar();
   }
   // test hook: lets automated UI tests drive the app without native dialogs
-  (window as unknown as Record<string, unknown>).__ulv = { openPaths, saveWorkspace, openWorkspace, duplicateTab, splitRight, closeSplit, state: () => ({ tabs, active }) };
+  (window as unknown as Record<string, unknown>).__ulv = {
+    openPaths,
+    saveWorkspace,
+    openWorkspace,
+    duplicateTab,
+    splitRight,
+    closeSplit,
+    state: () => ({ tabs, active }),
+    timelineGroups: () => histogram.shownGroups,
+    setHistogramGroup: (field: string) => active && setHistogramGroup(active, field),
+    autoHighlight: () => autoHighlight.current,
+  };
 }
 
 void init();

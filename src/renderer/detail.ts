@@ -2,9 +2,11 @@
 // fields and pretty-printed JSON/XML.
 
 import { fold } from '../core/folding';
+import type { SourceRef } from '../core/sourceLinks';
 import type { PatternStat, RowData } from '../core/types';
 import { formatDuration, formatTime } from '../core/timestamp';
 import type { Tab, ViewSettings } from './state';
+import { linkifySources, refOfLink } from './sourceLinksView';
 import { esc, fmtNum, h, prettyEntry, toast } from './util';
 
 /** The raw entry as HTML, with runs of framework frames folded into clickable placeholders. */
@@ -42,6 +44,8 @@ export class DetailView {
     private view: () => ViewSettings,
     /** Click on a "… N framework frames" placeholder. */
     private onUnfold: (key: string) => void,
+    /** Click on a source location (Foo.java:42…) in the entry. */
+    private onOpenSource?: (ref: SourceRef) => void,
   ) {}
 
   /** The selected pattern of the patterns view: its template and sample message. */
@@ -121,8 +125,13 @@ export class DetailView {
     fields.append(table);
     const pre = h('pre');
     pre.innerHTML = foldedEntryHtml(row.text, this.view(), tab.unfolded.has(row.key));
+    linkifySources(pre);
     pre.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('.fold')) this.onUnfold(row.key);
+      if ((e.target as HTMLElement).closest('.fold')) return this.onUnfold(row.key);
+      const link = (e.target as HTMLElement).closest('.src-link') as HTMLElement | null;
+      // (not at the end of a drag that selected text)
+      const ref = link && document.getSelection()?.isCollapsed !== false ? refOfLink(link) : null;
+      if (ref) this.onOpenSource?.(ref);
     });
     const body = h('div', { class: 'body' }, table.rows.length ? fields : null, pre);
     this.el.append(bar, body);

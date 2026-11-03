@@ -39,6 +39,7 @@ export class Engine {
   private searchGen = new Map<number, number>();
   private statsGen = new Map<number, number>();
   private patternsGen = new Map<number, number>();
+  private groupsGen = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private progressAt = new Map<string, number>();
@@ -190,6 +191,12 @@ export class Engine {
   }
   histogram(docId: number, buckets: number) {
     return this.doc(docId).histogram(buckets);
+  }
+  /** The timeline stacked by a field; a newer call for the same document cancels the previous one. */
+  async histogramBy(docId: number, field: string, buckets: number) {
+    const gen = (this.groupsGen.get(docId) ?? 0) + 1;
+    this.groupsGen.set(docId, gen);
+    return this.doc(docId).histogramBy(field, buckets, () => this.groupsGen.get(docId) !== gen || !this.docs.has(docId));
   }
   overview(docId: number, buckets: number) {
     return this.doc(docId).overview(buckets);

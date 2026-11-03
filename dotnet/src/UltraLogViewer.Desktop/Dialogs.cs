@@ -108,7 +108,11 @@ public static class Dialogs
         ("↓ in quick filter", "Suggestions: field names, their top values and recent queries"),
         ("e / E", "Next / previous error"),
         ("w / W", "Next / previous warning"),
-        ("Ctrl+B, b, double-click", "Toggle bookmark"),
+        ("Ctrl+B, b, double-click the line number", "Toggle bookmark"),
+        ("Ctrl+P", "Pin the row to the strip above the grid"),
+        ("Double-click a word, select text in the details", "Highlight it everywhere on screen"),
+        ("Click Foo.java:42 in an expanded entry", "Open it in your editor (Edit › Editor and source roots…)"),
+        ("Ctrl+click field values", "Pick several values of a field (logger in (a,b))"),
         ("F2 / Shift+F2", "Next / previous bookmark"),
         ("Ctrl+G", "Go to line"),
         ("Ctrl+T, f, End", "Follow new lines (tail)"),
@@ -119,6 +123,7 @@ public static class Dialogs
         ("Ctrl+Shift+T", "Duplicate tab (same file, no reindexing)"),
         ("Ctrl+\\", "Split right / close split"),
         ("Timeline: click / drag", "Jump to time / filter to a time range"),
+        ("Timeline: Group by", "Stack the bars by level, file or any field; click a legend item to filter to it"),
     ];
 
     /// <summary>The quick-filter syntax, shown under the shortcuts in Help.</summary>
@@ -134,6 +139,7 @@ public static class Dialogs
         ("duration>2s", "Durations with ms, s, m or h; a bare number is read in the unit you typed"),
         ("level>=warn", "Levels compare by severity"),
         ("user in (alice,bob)", "The field equals one of the values"),
+        ("logger:com.acme.*, thread:worker-*", "Wildcard: the whole value matches; a.b.* also matches a.b itself"),
         ("exists(traceId), env?=prod", "The field is present / equals the value or is missing"),
         ("since:-3h, until:-10m", "Relative to now; also since:2024-05-01T10:00, since:today"),
     ];

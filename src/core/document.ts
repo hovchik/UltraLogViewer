@@ -16,6 +16,7 @@ import { GrowU32, GrowU8, lowerBound } from './grow';
 import { compileQueryWithTimeRange } from './query';
 import { compileTextTest, RowsOp, RowsResult, TextFilter } from './entryScan';
 import { RepeatMode } from './patterns';
+import { GroupedHistogram, HistogramGroups, SOURCE_FIELD } from './histogramGroups';
 import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, PatternsResult, PatternStat, RowData, rowKey, SearchResult, TextPattern } from './types';
 
 export type Progress = (phase: string, fraction: number) => void;
@@ -831,6 +832,42 @@ export class LogDocument implements SetMember {
       counts[Math.floor((t - start) / bucketMs)][l >= Level.Error ? 2 : l === Level.Warn ? 1 : 0]++;
     }
     return { start, bucketMs, counts };
+  }
+
+  private groupCache: { key: string; result: GroupedHistogram | null } | null = null;
+
+  /**
+   * The timeline of the view stacked by a field (SOURCE_FIELD = the file of a merged view) instead of by level, over the
+   * same buckets as histogram(). Other fields need the entry texts: the view rows are read and parsed on the scan pool
+   * and counted here in order. The result is kept per view, so redrawing at the same width does not scan again. Null
+   * when the view has no timestamps (or the run was cancelled).
+   */
+  async histogramBy(field: string, buckets: number, cancelled: () => boolean = () => false): Promise<GroupedHistogram | null> {
+    const key = `${this.viewEpoch}:${this.viewCount()}:${this.ignoreFilter}:${this.baseCount()}:${field}:${buckets}`;
+    if (this.groupCache?.key === key) return this.groupCache.result;
+    const epoch = this.viewEpoch;
+    const shape = this.histogram(buckets);
+    if (!shape) return null;
+    const groups = new HistogramGroups(shape.start, shape.bucketMs, shape.counts.length);
+    const n = this.viewCount();
+    if (field === SOURCE_FIELD) {
+      // answered from the index: no entry has to be read
+      const names = this.sources.map((s) => s.info().displayName);
+      for (let r = 0; r < n; r++) {
+        const [s, e] = this.ref(this.baseOf(r));
+        groups.add(this.sources[s].time(e), names[s]);
+      }
+    } else {
+      const blocks: [number, number][] = [];
+      for (let r = 0; r < n; r += 2000) blocks.push([r, 2000]);
+      await this.scanRows(blocks, () => ({ kind: 'field', key: field }), cancelled, (refs, values) => {
+        for (let i = 0; i < refs.length; i++) groups.add(this.sources[refs[i][0]].time(refs[i][1]), values[i] as string);
+      });
+      if (cancelled()) return null;
+    }
+    const result = groups.build(field);
+    if (epoch === this.viewEpoch) this.groupCache = { key, result };
+    return result;
   }
 
   info(): DocInfo {

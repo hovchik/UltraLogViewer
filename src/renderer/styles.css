@@ -408,3 +408,37 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .toast.err { background: var(--error); color: #fff; }
 .status .fmt { cursor: pointer; text-decoration: underline dotted; }
 .status .fmt i { display: inline-block; font-style: normal; margin-left: 5px; padding: 0 4px; border-radius: 3px; background: var(--bg-3); color: var(--fg-2); font-size: 10.5px; }
+
+/* pinned rows: a strip above the grid that stays while scrolling */
+.pins { flex: none; max-height: calc(5 * 22px + 2px); overflow-y: auto; border-bottom: 1px solid var(--border); background: var(--bg-2); font: 12px/22px var(--mono); }
+.pin { display: flex; align-items: center; gap: 8px; padding: 0 6px 0 8px; cursor: pointer; white-space: nowrap; }
+.pin:hover { background: var(--bg-3); }
+.pin.gone { opacity: 0.5; }
+.pin .pi { color: var(--accent); font-size: 10px; flex: none; }
+.pin .ln { color: var(--fg-3); min-width: 56px; text-align: right; flex: none; }
+.pin .t { flex: 1; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pin .x { border: 0; background: transparent; color: var(--fg-3); cursor: pointer; font-size: 14px; padding: 0 4px; line-height: 20px; }
+.pin .x:hover { color: var(--error); }
+
+/* timeline grouping: chooser and legend above the bars */
+.hist-bar { position: absolute; left: 0; right: 0; top: 0; height: 17px; display: flex; align-items: center; gap: 10px; padding: 0 6px; font: 11px var(--sans); color: var(--fg-2); pointer-events: none; z-index: 1; overflow: hidden; white-space: nowrap; }
+.hist-bar > * { pointer-events: auto; }
+.hist-group { border: 0; background: transparent; color: var(--fg-2); font: 11px var(--sans); cursor: pointer; padding: 0 2px; flex: none; }
+.hist-group:hover { color: var(--accent); }
+.hist-legend { display: flex; gap: 10px; overflow: hidden; min-width: 0; }
+.hist-legend .lg { display: flex; align-items: center; gap: 4px; flex: none; max-width: 220px; }
+.hist-legend .lg.click { cursor: pointer; }
+.hist-legend .lg.click:hover .k { text-decoration: underline; }
+.hist-legend .sw { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.hist-legend .k { overflow: hidden; text-overflow: ellipsis; }
+.hist-legend .n { color: var(--fg-3); }
+
+/* auto-highlight of the selected word, and source links */
+::highlight(auto-hl) { background-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+.src-link { color: var(--accent); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent); cursor: pointer; }
+.src-link:hover { text-decoration-color: currentColor; }
+.fv.picked { background: var(--accent-bg); }
+.fv.picked .v { color: var(--accent); font-weight: 600; }
+.fv.pkg .v { color: var(--fg-2); }
+.fv.pkg .v::before { content: '▸ '; color: var(--fg-3); }
+.src-roots { width: 100%; min-height: 90px; font: 12px var(--mono); border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); padding: 4px 6px; }
