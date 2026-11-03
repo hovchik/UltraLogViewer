@@ -392,6 +392,26 @@ await step('names the detected format and opens plain text without timestamps', 
   await win.waitForFunction(() => /Plain text\s*auto/.test(document.querySelector('#status .fmt')?.textContent ?? ''), null, { timeout: 20000 });
 });
 
+await step('opens only a time window, says so, and loads the whole file', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['File › Open last…', 'File › Open time range…', 'File › Use index cache', 'File › Clear index cache']) assert.ok(labels.includes(l), `menu item ${l}`);
+  const windowLog = path.join(tmp, 'window.log');
+  execFileSync(process.execPath, ['scripts/gen-sample.mjs', windowLog, '3']);
+  await win.evaluate((p) => window.__ulv.openPaths([p], false, { last: 600_000 }), windowLog);
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 4);
+  await win.waitForSelector('#partial-banner:not(.hidden)', { timeout: 30000 });
+  assert.match(await win.locator('#partial-banner .msg').innerText(), /^Showing \d{4}-\d{2}-\d{2} \d{2}:\d{2}–\d{2}:\d{2} · partial file · following new lines$/);
+  assert.match(await win.locator('#sidebar .sources').innerText(), /window\.log[\s\S]*partial/);
+  const partial = Number((await status()).match(/([\d,]+) entries/)[1].replace(/,/g, ''));
+  await shot('25-partial');
+  await win.click('#partial-whole');
+  await win.waitForSelector('#partial-banner.hidden', { state: 'attached', timeout: 30000 });
+  await win.waitForFunction((n) => {
+    const m = document.querySelector('#status')?.textContent?.match(/([\d,]+) entries/);
+    return !!m && Number(m[1].replace(/,/g, '')) > n && !/Indexing/.test(document.querySelector('#status')?.textContent ?? '');
+  }, partial, { timeout: 30000 });
+});
+
 await step('dark theme renders', async () => {
   await win.click('#btn-theme');
   await shot('07-dark');

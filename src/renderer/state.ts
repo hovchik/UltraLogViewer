@@ -1,4 +1,5 @@
 import type { TimeMode } from '../core/timestamp';
+import type { OpenWindow } from '../core/timeWindow';
 import { DEFAULT_FRAMEWORK_PACKAGES } from '../core/folding';
 import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, PatternsResult, SearchResult, TextPattern } from '../core/types';
 
@@ -65,6 +66,8 @@ export interface Settings {
   frameworkPackages?: string[];
   /** Workspace files, most recent first. */
   recentWorkspaces?: string[];
+  /** Save the index of big files so reopening them is instant (default on). */
+  indexCache?: boolean;
 }
 
 /** Display settings with their defaults resolved. */
@@ -120,6 +123,8 @@ export interface Tab {
   follow: boolean;
   formatId: string;
   encoding?: string;
+  /** The time window this tab was opened with (null: the whole file). */
+  window?: OpenWindow | null;
   error?: string;
   progress?: { phase: string; fraction: number };
   /** "Show in context": every entry is shown, rows the filter hides are dimmed. */

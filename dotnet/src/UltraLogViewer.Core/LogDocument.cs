@@ -86,6 +86,70 @@ public sealed class LogDocument : IDisposable
         });
     }
 
+    /// <summary>
+    /// Opens several files at once (a merged view): they are indexed in parallel, each reporting its own progress
+    /// (<see cref="FileSource.Progress"/>). A file that fails is left out; the failures are returned. Throws only when
+    /// cancelled.
+    /// </summary>
+    public async Task<List<(string Path, Exception Error)>> AddSourcesAsync(IReadOnlyList<string> paths, Func<string, SourceOptions> opts,
+        IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        if (_sources.Count + paths.Count > ushort.MaxValue + 1) throw new InvalidOperationException($"A merged view supports at most {ushort.MaxValue + 1} files.");
+        var added = paths.Select((p, i) => new FileSource(_sources.Count + i, p, opts(p))).ToList();
+        lock (_sources) _sources.AddRange(added);
+        Indexing = true;
+        var failed = new List<(string, Exception)>();
+        try
+        {
+            void Report()
+            {
+                Progress = added.Average(s => s.Indexing ? s.Progress : 1);
+                progress?.Report(Progress);
+            }
+            var tasks = added.Select(s => s.OpenAsync(new SyncProgress(_ => Report()), ct)).ToArray();
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch
+            {
+                // looked at per file below
+            }
+            ct.ThrowIfCancellationRequested();
+            lock (_sources)
+            {
+                for (var i = 0; i < added.Count; i++)
+                {
+                    if (tasks[i].Exception is not { } e) continue;
+                    failed.Add((added[i].Path, e.InnerException ?? e));
+                    _sources.Remove(added[i]);
+                    added[i].Dispose();
+                }
+                for (var i = 0; i < _sources.Count; i++) _sources[i].Id = i;
+            }
+        }
+        catch
+        {
+            lock (_sources)
+                foreach (var s in added)
+                {
+                    _sources.Remove(s);
+                    s.Dispose();
+                }
+            throw;
+        }
+        finally
+        {
+            Indexing = false;
+        }
+        await Serial(() =>
+        {
+            RebuildBase();
+            return _filter is not null ? ApplyNowAsync(_filter, false, _filterGen, null, ct) : Task.FromResult(true);
+        });
+        return failed;
+    }
+
     private async Task<T> Serial<T>(Func<Task<T>> fn)
     {
         await _queue.WaitAsync();

@@ -55,6 +55,18 @@ public sealed class Grow<T> where T : struct
         Volatile.Write(ref _count, need);
     }
 
+    /// <summary>Takes <paramref name="values"/> as the whole content without copying (only while empty; otherwise appends).</summary>
+    public void Adopt(T[] values)
+    {
+        if (_count > 0)
+        {
+            AddRange(values);
+            return;
+        }
+        _data = values.Length > 0 ? values : _data;
+        Volatile.Write(ref _count, values.Length);
+    }
+
     public void Truncate(int n)
     {
         if (n < _count) Volatile.Write(ref _count, n);

@@ -3,7 +3,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { displayName, expandArchives } from '../core/archives';
 import { LogDocument } from '../core/document';
+import { clearCache } from '../core/indexCache';
+import { OpenWindow } from '../core/timeWindow';
 import { ScanPool } from '../core/scanPool';
 import { Encoding } from '../core/fileSource';
 import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
@@ -12,6 +15,11 @@ export interface OpenOptions {
   encoding?: Encoding;
   format?: string;
   customFormats?: CustomFormat[];
+  /** Use the index cache (when the engine has a cache folder). */
+  cache?: boolean;
+  cacheMaxBytes?: number;
+  /** Open only this time window of the files. */
+  window?: OpenWindow | null;
 }
 
 export type EngineEvent =
@@ -32,7 +40,8 @@ export class Engine {
   /** Scans big files on all cores; absent when the worker script is not built next to this file (unit tests). */
   private scanPool = fs.existsSync(path.join(__dirname, 'scanWorker.js')) ? new ScanPool(path.join(__dirname, 'scanWorker.js')) : undefined;
 
-  constructor(private emit: (e: EngineEvent) => void) {
+  /** `cacheDir`: where the index cache lives (the app's user-data folder); none turns the cache off. */
+  constructor(private emit: (e: EngineEvent) => void, private cacheDir?: string) {
     this.timer = setInterval(() => void this.poll(), POLL_MS);
   }
 
@@ -48,26 +57,33 @@ export class Engine {
     const title = paths.length === 1 ? path.basename(paths[0]) : `${path.basename(paths[0])} + ${paths.length - 1} more`;
     const doc = new LogDocument(id, title);
     this.docs.set(id, doc);
+    const { cache, cacheMaxBytes, ...rest } = opts;
+    const sourceOpts = { ...rest, scanPool: this.scanPool, cacheDir: cache && this.cacheDir ? this.cacheDir : undefined, cacheMaxBytes };
     void (async () => {
       let last = 0;
-      for (const p of paths) {
-        try {
-          await doc.addSource(p, { ...opts, scanPool: this.scanPool }, (phase, fraction) => {
-            this.emit({ type: 'progress', docId: id, phase, fraction });
-            const now = Date.now();
-            if (now - last > 250 && phase === 'index') {
-              last = now;
-              this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: false });
-            }
-          });
-        } catch (e) {
-          this.emit({ type: 'doc-error', docId: id, message: `${path.basename(p)}: ${(e as Error).message}` });
-        }
-        if (!this.docs.has(id)) return;
+      try {
+        // A zip opens as its text members, merged; all files of a merge are indexed in parallel.
+        const failed = await doc.addSources(expandArchives(paths), () => sourceOpts, (phase, fraction) => {
+          this.emit({ type: 'progress', docId: id, phase, fraction });
+          const now = Date.now();
+          if (now - last > 250 && phase === 'index') {
+            last = now;
+            this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: false });
+          }
+        });
+        for (const f of failed.slice(0, 3)) this.emit({ type: 'doc-error', docId: id, message: `${displayName(f.path)}: ${f.error.message}` });
+      } catch (e) {
+        this.emit({ type: 'doc-error', docId: id, message: `${path.basename(paths[0])}: ${(e as Error).message}` });
       }
+      if (!this.docs.has(id)) return;
       this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: true });
     })();
     return id;
+  }
+
+  /** Deletes the saved indexes; returns the bytes freed. */
+  clearIndexCache(): number {
+    return this.cacheDir ? clearCache(this.cacheDir) : 0;
   }
 
   close(docId: number) {

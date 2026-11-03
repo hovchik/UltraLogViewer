@@ -19,6 +19,9 @@ const api = {
   addRecentWorkspace: (file: string) => ipcRenderer.invoke('workspace:recent', file),
   filesExist: (paths: string[]): Promise<boolean[]> => ipcRenderer.invoke('files:exist', paths),
   startupFiles: (): Promise<string[]> => ipcRenderer.invoke('startup-files'),
+  /** Command-line window (--since/--until/--last), its errors, and whether stdin is being read. */
+  startupOptions: (): Promise<{ window: { since?: number | null; until?: number | null; last?: number | null } | null; errors: string[]; stdin: boolean }> =>
+    ipcRenderer.invoke('startup-options'),
   pathForFile: (f: File) => webUtils.getPathForFile(f),
   platform: process.platform,
 };

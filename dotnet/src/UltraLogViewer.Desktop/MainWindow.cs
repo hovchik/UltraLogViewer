@@ -72,7 +72,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     {
     }
 
-    public MainWindow(AppSettings settings, string[] files)
+    public MainWindow(AppSettings settings, string[] files, OpenWindow? window = null, bool stdin = false, IReadOnlyList<string>? cliErrors = null)
     {
         _settings = settings;
         Title = "UltraLogViewer";
@@ -206,6 +206,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                     {
                         Item("_Open…", () => Run(() => PickAndOpen(false)), new KeyGesture(Key.O, KeyModifiers.Control)),
                         Item("Open and _merge…", () => Run(() => PickAndOpen(true)), new KeyGesture(Key.O, KeyModifiers.Control | KeyModifiers.Shift)),
+                        Item("Open _last…", () => Run(() => PickAndOpenWindow(false))),
+                        Item("Open time _range…", () => Run(() => PickAndOpenWindow(true))),
                         _recentMenu,
                         new Separator(),
                         Item("Open _workspace…", () => Run(PickOpenWorkspace)),
@@ -213,6 +215,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         new Separator(),
                         Item("_Export view…", () => Run(Export), new KeyGesture(Key.E, KeyModifiers.Control)),
                         Item("Reopen with _encoding…", () => Run(ChooseEncoding)),
+                        Check("Use index cache", () => _settings.IndexCache, ToggleIndexCache),
+                        Item("Clear index cache", ClearIndexCache),
                         new Separator(),
                         Item("_Close tab", () => CloseTab(_active), new KeyGesture(Key.W, KeyModifiers.Control)),
                         Item("E_xit", Close),
@@ -349,7 +353,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _center.Children.Add(_hist);
         _center.Children.Add(_histSplitter);
         _center.Children.Add(_work);
-        var gridHost = new DockPanel { Children = { _contextBanner, BuildGridArea() } };
+        _partialBanner = BuildPartialBanner();
+        var gridHost = new DockPanel { Children = { _partialBanner, _contextBanner, BuildGridArea() } };
+        DockPanel.SetDock(_partialBanner, Dock.Top);
         DockPanel.SetDock(_contextBanner, Dock.Top);
         _work.Children.Add(gridHost);
         _work.Children.Add(_detailSplitter);
@@ -458,7 +464,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
         Closing += (_, _) => SaveOnClose();
         Opened += (_, _) =>
         {
-            if (files.Length > 0) Run(() => OpenPaths(files, false));
+            if (cliErrors is { Count: > 0 }) Toast(string.Join("\n", cliErrors), true);
+            if (files.Length > 0) Run(() => OpenPaths(files, false, window));
+            if (stdin) Run(() => OpenStdinAsync(window));
         };
 
         _tick = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
@@ -557,7 +565,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                     new TextBlock { Text = "UltraLogViewer", FontSize = 26, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center },
                     new TextBlock
                     {
-                        Text = "Drop log files here, or open them. Hold Shift while dropping several files to merge them into one timeline. Plain text, log4j/logback/NLog/Serilog, JSON lines, syslog, Apache/Nginx, IIS W3C, logcat and .gz files are detected automatically.",
+                        Text = "Drop log files here, or open them. Hold Shift while dropping several files to merge them into one timeline. Plain text, log4j/logback/NLog/Serilog, JSON lines, syslog, Apache/Nginx, IIS W3C, logcat, and .gz, .bz2 and .zip files are detected automatically.",
                         TextWrapping = TextWrapping.Wrap,
                         TextAlignment = TextAlignment.Center,
                         Opacity = 0.7,
@@ -628,6 +636,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _sidebar.Render(tab);
         _hist.Data = null;
         UpdateContextBanner();
+        UpdatePartialBanner();
         UpdateSearchCount();
         UpdateDetail();
         UpdateStatus();
@@ -694,38 +703,40 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             Title = merge ? "Open and merge log files" : "Open log files",
             AllowMultiple = true,
-            FileTypeFilter = [new FilePickerFileType("Log files") { Patterns = ["*.log", "*.txt", "*.json", "*.jsonl", "*.gz", "*.out", "*.err", "*.*"] }, FilePickerFileTypes.All],
+            FileTypeFilter = [new FilePickerFileType("Log files") { Patterns = ["*.log", "*.txt", "*.json", "*.jsonl", "*.gz", "*.bz2", "*.zip", "*.out", "*.err", "*.*"] }, FilePickerFileTypes.All],
         });
         var paths = files.Select(f => f.TryGetLocalPath()).OfType<string>().ToArray();
         if (paths.Length > 0) await OpenPaths(paths, merge && paths.Length > 1);
     }
 
-    public async Task OpenPaths(string[] paths, bool merge)
+    /// <param name="window">Open only this time window of the files (null: everything).</param>
+    public async Task OpenPaths(string[] paths, bool merge, OpenWindow? window = null)
     {
         paths = paths.Select(Path.GetFullPath).ToArray();
         _settings.AddRecent(paths);
         _settings.Save();
+        if (window is { IsEmpty: true }) window = null;
         if (merge)
         {
-            await OpenTab(paths, "auto", null);
+            await OpenTab(paths, "auto", null, t => t.Window = window);
             return;
         }
         foreach (var p in paths)
         {
-            var existing = _tabs.FirstOrDefault(t => t.Paths.Length == 1 && string.Equals(t.Paths[0], p, StringComparison.Ordinal));
+            var existing = window is null ? _tabs.FirstOrDefault(t => t.Paths.Length == 1 && t.Window is null && string.Equals(t.Paths[0], p, StringComparison.Ordinal)) : null;
             if (existing is not null)
             {
                 Activate(existing);
                 continue;
             }
-            await OpenTab([p], "auto", null);
+            await OpenTab([p], "auto", null, t => t.Window = window);
         }
     }
 
     private async Task<DocumentTab?> OpenTab(string[] paths, string encoding, DocumentTab? replacing, Action<DocumentTab>? init = null)
     {
         var doc = new LogDocument(paths.Length == 1 ? Path.GetFileName(paths[0]) : "Merged");
-        var tab = new DocumentTab(paths, doc) { Encoding = encoding, BusyLabel = "Indexing", BusyProgress = 0 };
+        var tab = new DocumentTab(paths, doc) { Encoding = encoding, BusyLabel = "Indexing", BusyProgress = 0, Window = replacing?.Window };
         init?.Invoke(tab);
         if (replacing is not null)
         {
@@ -739,33 +750,30 @@ public sealed partial class MainWindow : Window, ILogGridHost
         Activate(tab);
         try
         {
-            for (var i = 0; i < paths.Length; i++)
-            {
-                var idx = i;
-                var opts = new SourceOptions
-                {
-                    Encoding = encoding,
-                    CustomFormats = _settings.CustomFormats,
-                    Format = tab.FormatId.Length > 0 ? tab.FormatId : null,
-                };
-                await doc.AddSourceAsync(paths[i], opts, new SyncProgress(f => tab.BusyProgress = (idx + f) / paths.Length));
-            }
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException)
-        {
-            Toast($"Could not open {Path.GetFileName(paths[0])}: {e.Message}", true);
+            // A zip opens as its text members, merged; all files of a merge are indexed in parallel.
+            var sources = await Task.Run(() => Archives.Expand(paths));
+            var failed = await doc.AddSourcesAsync(sources, _ => SourceOptionsFor(tab, encoding), new SyncProgress(f => tab.BusyProgress = f));
+            foreach (var (path, error) in failed.Take(3))
+                Toast($"Could not open {Archives.DisplayName(path)}: {error.Message}", true);
             if (doc.Sources.Count == 0)
             {
                 CloseTab(tab);
                 return null;
             }
         }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Toast($"Could not open {Path.GetFileName(paths[0])}: {e.Message}", true);
+            CloseTab(tab);
+            return null;
+        }
         if (!_tabs.Contains(tab)) return null; // closed while loading
         tab.Ready = true;
         tab.BusyProgress = null;
         tab.BusyLabel = "";
         tab.Info = doc.Info();
-        RestoreBookmarks(tab);
+        if (!tab.IsPartial) RestoreBookmarks(tab); // line numbers of a partial view are not the file's
+        if (_active == tab) UpdatePartialBanner();
         if (!tab.Filter.IsTrivial || tab.Bookmarks.Count > 0 && tab.Filter.BookmarksOnly) await ApplyFilterAsync(tab);
         if (_active == tab)
         {
@@ -835,6 +843,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             if (tab.Follow) _grid.ScrollTo(int.MaxValue);
             _sidebar.UpdateCounts(tab);
             UpdateStatus();
+            if (tab.IsPartial) UpdatePartialBanner();
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
@@ -1153,6 +1162,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void SaveBookmarks(DocumentTab tab)
     {
+        if (tab.IsPartial) return;
         for (var i = 0; i < tab.Info.Sources.Count; i++)
         {
             var path = tab.Info.Sources[i].Path;
@@ -1508,6 +1518,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _tick.Stop();
         foreach (var t in _tabs) t.Dispose();
         _tabs.Clear();
+        _stdin?.Dispose();
     }
 
     // ===================================================== overview & timeline

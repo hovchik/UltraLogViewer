@@ -2,6 +2,8 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'e
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
+import { captureStdin, StdinCapture } from '../core/stdinCapture';
+import { OpenWindow, parseCommandLine } from '../core/timeWindow';
 
 let win: BrowserWindow | null = null;
 let worker: Worker;
@@ -31,7 +33,7 @@ function writeSettings(s: Record<string, unknown>) {
 // -------------------------------------------------------------------- engine
 
 function startWorker() {
-  worker = new Worker(path.join(__dirname, 'engineWorker.js'));
+  worker = new Worker(path.join(__dirname, 'engineWorker.js'), { workerData: { cacheDir: path.join(app.getPath('userData'), 'index-cache') } });
   worker.on('message', (msg: { id?: number; result?: unknown; error?: string; event?: unknown }) => {
     if (msg.event) {
       win?.webContents.send('engine-event', msg.event);
@@ -75,6 +77,7 @@ function viewMenuState(s: Record<string, unknown>) {
     timeUtc: s.timeUtc === true,
     gaps: (typeof s.gapMs === 'number' ? s.gapMs : 10000) > 0,
     foldFrames: s.foldFrames !== false,
+    indexCache: s.indexCache !== false,
   };
 }
 let menuState = '';
@@ -155,6 +158,8 @@ function buildMenu() {
       submenu: [
         { label: 'Open…', accelerator: 'CmdOrCtrl+O', click: () => send('open') },
         { label: 'Open and merge files…', accelerator: 'CmdOrCtrl+Shift+O', click: () => send('open-merge') },
+        { label: 'Open last…', click: () => send('open-last') },
+        { label: 'Open time range…', click: () => send('open-range') },
         {
           label: 'Open recent',
           submenu: recentItems.length ? recentItems : [{ label: 'No recent files', enabled: false }],
@@ -165,6 +170,8 @@ function buildMenu() {
         { label: 'Save workspace…', accelerator: 'CmdOrCtrl+Alt+S', click: () => send('save-workspace') },
         { type: 'separator' },
         { label: 'Export view…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
+        { label: 'Use index cache', type: 'checkbox', checked: v.indexCache, click: () => send('toggle-index-cache') },
+        { label: 'Clear index cache', click: () => send('clear-index-cache') },
         { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => send('close-tab') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
@@ -285,8 +292,19 @@ function createWindow() {
   win.on('closed', () => (win = null));
 }
 
-const filesFromArgv = (argv: string[]) =>
-  argv.slice(app.isPackaged ? 1 : 2).filter((a) => !a.startsWith('-') && fs.existsSync(a) && fs.statSync(a).isFile()).map((a) => path.resolve(a));
+const isFile = (a: string) => {
+  try {
+    return fs.statSync(a).isFile();
+  } catch {
+    return false;
+  }
+};
+/** ultralogviewer [files] [-] [--since -1h] [--until 2024-05-01T11:00] [--last 30m] */
+const parseArgv = (argv: string[]) => parseCommandLine(argv.slice(app.isPackaged ? 1 : 2), Date.now(), isFile);
+const filesFromArgv = (argv: string[]) => parseArgv(argv).files.filter(isFile).map((a) => path.resolve(a));
+const cli = parseArgv(process.argv);
+/** Standard input copied into a temp file that is tailed like any log ("ultralogviewer -"). */
+let stdin: Promise<StdinCapture | null> = Promise.resolve(null);
 
 let quitting = false;
 
@@ -294,7 +312,9 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', (_e, argv) => {
-    for (const f of filesFromArgv(argv)) send('open-path', f);
+    const window = parseArgv(argv).window;
+    if (window) send('open-window', filesFromArgv(argv), window);
+    else for (const f of filesFromArgv(argv)) send('open-path', f);
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -307,6 +327,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    if (cli.stdin) stdin = captureStdin(process.stdin).catch(() => null);
     startWorker();
     ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, args));
     ipcMain.handle('settings:get', () => readSettings());
@@ -359,7 +380,7 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('dialog:open', async (_e, multi: boolean) => {
       const r = await dialog.showOpenDialog(win!, {
         properties: multi ? ['openFile', 'multiSelections'] : ['openFile', 'multiSelections'],
-        filters: [{ name: 'Logs', extensions: ['log', 'txt', 'json', 'jsonl', 'gz', 'out', 'err', 'csv'] }, { name: 'All files', extensions: ['*'] }],
+        filters: [{ name: 'Logs', extensions: ['log', 'txt', 'json', 'jsonl', 'gz', 'bz2', 'zip', 'out', 'err', 'csv'] }, { name: 'All files', extensions: ['*'] }],
       });
       return r.canceled ? [] : r.filePaths;
     });
@@ -370,7 +391,11 @@ if (!app.requestSingleInstanceLock()) {
       });
       return r.canceled ? null : r.filePath;
     });
-    ipcMain.handle('startup-files', () => [...filesFromArgv(process.argv), ...pendingOpen.splice(0)]);
+    ipcMain.handle('startup-files', async () => {
+      const piped = await stdin;
+      return [...filesFromArgv(process.argv), ...(piped ? [piped.path] : []), ...pendingOpen.splice(0)];
+    });
+    ipcMain.handle('startup-options', (): { window: OpenWindow | null; errors: string[]; stdin: boolean } => ({ window: cli.window, errors: cli.errors, stdin: cli.stdin }));
     buildMenu();
     createWindow();
     app.on('activate', () => {
@@ -380,6 +405,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     quitting = true;
+    void stdin.then((s) => s?.dispose());
     void worker?.terminate();
   });
   app.on('window-all-closed', () => {

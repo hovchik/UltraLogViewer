@@ -629,8 +629,16 @@ public sealed class Sidebar : ScrollViewer
 
     // ---------------------------------------------------------------- sources
 
-    private static string SourcesText(DocumentTab tab) => string.Join("\n\n", tab.Info.Sources.Select(s =>
-        $"{s.DisplayName}\n{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{(s.Compressed ? " · gzip" : "")}{(s.Live ? "" : " · static")}"));
+    internal static string SourcesText(DocumentTab tab) => string.Join("\n\n", tab.Info.Sources.Select(SourceText));
+
+    /// <summary>One file of the Sources list; while a merge is indexed, each file shows its own progress.</summary>
+    internal static string SourceText(SourceInfo s)
+    {
+        var state = s.Indexing ? $"Indexing {s.Progress:P0} · " : "";
+        var extra = (s.Compression.Length > 0 ? " · " + s.Compression : s.Compressed ? " · gzip" : "") + (s.Live ? "" : " · static")
+            + (s.Partial ? " · partial" : "") + (s.CacheState.Length > 0 ? " · cached index" : "");
+        return $"{s.DisplayName}\n{state}{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{extra}";
+    }
 
     public static string FormatSize(long b) => b switch
     {

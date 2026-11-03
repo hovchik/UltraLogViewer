@@ -35,6 +35,12 @@ class Grow<T extends Float64Array | Uint32Array | Uint8Array> {
     this.data.set(values as never, this.length);
     this.length = need;
   }
+  /** Takes `values` as the whole content without copying (only while empty; otherwise appends). */
+  adopt(values: T) {
+    if (this.length > 0) return this.pushAll(values);
+    if (values.length > 0) this.data = values;
+    this.length = values.length;
+  }
   get(i: number) {
     return this.data[i];
   }
