@@ -64,9 +64,11 @@ public sealed class SourceSet
 
     /// <summary>
     /// Runs <paramref name="change"/> with the index to itself: no attached document is scanning entries meanwhile.
-    /// Then each document gets <paramref name="apply"/> (still under the lock), which tells it what changed.
+    /// Then each document gets <paramref name="apply"/> (still under the lock), which tells it what changed. The version
+    /// moves only when <paramref name="changed"/> says the files did change: a document that sees a new version starts
+    /// over, so a quiet poll must not count.
     /// </summary>
-    internal async Task<T> ExclusiveAsync<T>(Func<Task<T>> change, Action<LogDocument, T> apply)
+    internal async Task<T> ExclusiveAsync<T>(Func<Task<T>> change, Action<LogDocument, T> apply, Func<T, bool>? changed = null)
     {
         await _gate.WaitAsync();
         LogDocument[] docs;
@@ -80,7 +82,7 @@ public sealed class SourceSet
                 held.Add(d);
             }
             var r = await change();
-            Interlocked.Increment(ref _version);
+            if (changed?.Invoke(r) ?? true) Interlocked.Increment(ref _version);
             foreach (var d in docs) apply(d, r);
             return r;
         }
@@ -151,7 +153,7 @@ public sealed class SourceSet
         }, (d, first) =>
         {
             if (first is not null) d.SourcesChanged(first);
-        });
+        }, first => first is not null);
     }
 
     /// <summary>Re-parses every file with another format; every document filters again from scratch.</summary>

@@ -235,6 +235,16 @@ public sealed class RemoteTests : IDisposable
         await UntilAsync(async () => { await doc.RefreshAsync(); return doc.ViewCount == 1; });
         Assert.Equal(["fresh"], Messages(doc));
         Assert.Equal(new FileInfo(file).Length, new FileInfo(r.LocalPath).Length);
+
+        // rotation to a longer file, polled only once the new copy has outgrown the old one: it still starts over
+        File.AppendAllText(file, "2024-05-01 11:00:01,000 [main] INFO  a.B - again\n");
+        await UntilAsync(async () => { await doc.RefreshAsync(); return doc.ViewCount == 2; });
+        var generation = r.Generation;
+        File.Move(file, file + ".2");
+        File.WriteAllText(file, "2024-05-01 12:00:00,000 [main] INFO  a.B - a\n2024-05-01 12:00:01,000 [main] INFO  a.B - b\n2024-05-01 12:00:02,000 [main] INFO  a.B - c\n2024-05-01 12:00:03,000 [main] INFO  a.B - d\n");
+        await Until(() => r.Generation > generation && r.Received == new FileInfo(file).Length);
+        await doc.RefreshAsync();
+        Assert.Equal(["a", "b", "c", "d"], Messages(doc));
     }
 
     [Fact]

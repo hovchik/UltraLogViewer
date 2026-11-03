@@ -48,6 +48,10 @@ public class SharedSourceTests
         Assert.False(await b.SyncAsync());
         Assert.Equal(["bad", "worse"], Messages(a));
         Assert.Equal(["ok", "ok again"], Messages(b));
+        // A quiet poll changes nothing: no view filters again.
+        Assert.Null(await a.Set.RefreshAsync());
+        Assert.False(await a.SyncAsync());
+        Assert.False(await b.SyncAsync());
 
         // RefreshAsync polls and syncs; the other view sees what that poll found.
         File.AppendAllText(p, "2024-01-01 00:00:05 ERROR ok worst\n");

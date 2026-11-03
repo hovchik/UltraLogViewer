@@ -132,6 +132,8 @@ export class RemoteFile {
   attempt = 0;
   /** Ssh processes started so far (tests: a reconnect starts another). */
   starts = 0;
+  /** How many times the local copy started over (rotation, truncation, a smaller file after a drop). */
+  generation = 0;
   private error = '';
   private fd = -1;
   private proc: ChildProcess | null = null;
@@ -220,6 +222,9 @@ export class RemoteFile {
     fs.ftruncateSync(this.fd, 0);
     this.received = 0;
     this.expected = 0; // the new file's size is not known: no copy progress
+    // The local copy keeps its name and inode, so a new file that grows past the old size before the next poll would
+    // look like an append: the viewer compares this number instead.
+    this.generation++;
   }
 
   private streamOnce(): Promise<{ code: number; stderr: string }> {

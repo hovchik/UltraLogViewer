@@ -457,7 +457,14 @@ public sealed class RemoteFile : IDisposable
         _out.Position = 0;
         Interlocked.Exchange(ref _received, 0);
         Interlocked.Exchange(ref _expected, 0); // the new file's size is not known: no copy progress
+        // The local copy keeps its name and identity, so a new file that grows past the old size before the next poll
+        // would look like an append: the viewer compares this number instead.
+        Interlocked.Increment(ref _generation);
     }
+
+    private int _generation;
+    /// <summary>How many times the local copy started over (rotation, truncation, a smaller file after a drop).</summary>
+    public int Generation => Volatile.Read(ref _generation);
 
     private async Task StreamOnceAsync(StringBuilder stderr, CancellationToken ct)
     {

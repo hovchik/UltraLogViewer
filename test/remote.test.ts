@@ -212,6 +212,16 @@ describe.skipIf(!posix)('remote files over the fake ssh', () => {
     fs.writeFileSync(file, line(9, 'fresh'));
     await until(async () => (await doc.refresh(), messages(doc).join() === 'fresh'));
     expect(fs.statSync(r.localPath).size).toBe(fs.statSync(file).size);
+
+    // rotation to a longer file, polled only once the new copy has outgrown the old one: it still starts over
+    fs.appendFileSync(file, line(10, 'again'));
+    await until(async () => (await doc.refresh(), doc.viewCount() === 2));
+    const generation = r.generation;
+    fs.renameSync(file, `${file}.2`);
+    fs.writeFileSync(file, line(11, 'a') + line(12, 'b') + line(13, 'c') + line(14, 'd'));
+    await until(() => r.generation > generation && r.received === fs.statSync(file).size);
+    await doc.refresh();
+    expect(messages(doc)).toEqual(['a', 'b', 'c', 'd']);
     doc.close();
   });
 

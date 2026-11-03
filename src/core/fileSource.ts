@@ -90,6 +90,7 @@ export class FileSource {
   private readPath: string;
   private fd = -1;
   private ino = 0;
+  private remoteGeneration = 0;
   private dataStart = 0;
   private decoder!: TextDecoder;
   /** Decodes entry texts. It keeps a U+FEFF at the start of a batch, so a text never depends on where a batch starts. */
@@ -229,6 +230,7 @@ export class FileSource {
     this.fd = fs.openSync(this.readPath, 'r');
     const st = fs.fstatSync(this.fd);
     this.ino = st.ino;
+    this.remoteGeneration = findRemote(this.path)?.generation ?? 0;
     this.detect(st.mtime.getFullYear(), this.opts.format);
     this.rangeStart = this.dataEnd = this.dataStart;
     await this.exclusive(async () => {
@@ -510,14 +512,17 @@ export class FileSource {
   async refresh(): Promise<RefreshResult> {
     if (!this.live || this.closed) return { changed: false, reset: false, firstChangedEntry: this.entryCount };
     return this.exclusive(async () => {
+      // A remote copy that started over (read before the size, so the size is at least the new file's)
+      const generation = findRemote(this.path)?.generation ?? 0;
       let st: fs.Stats;
       try {
         st = fs.statSync(this.path);
       } catch {
         return { changed: false, reset: false, firstChangedEntry: this.entryCount };
       }
-      if (st.ino !== this.ino || st.size < this.dataEnd) {
+      if (st.ino !== this.ino || st.size < this.dataEnd || generation !== this.remoteGeneration) {
         // Rotated or truncated: start over on the new file.
+        this.remoteGeneration = generation;
         fs.closeSync(this.fd);
         this.fd = fs.openSync(this.readPath, 'r');
         this.ino = fs.fstatSync(this.fd).ino;

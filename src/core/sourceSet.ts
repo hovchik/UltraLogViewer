@@ -61,16 +61,17 @@ export class SourceSet {
 
   /**
    * Runs `change` with the index to itself: no attached document is scanning entries meanwhile. Then each document gets
-   * `apply` (still under the lock), which tells it what changed.
+   * `apply` (still under the lock), which tells it what changed. The version moves only when `changed` says the files
+   * did change: a document that sees a new version starts over, so a quiet poll must not count.
    */
-  exclusive<T>(change: () => Promise<T>, apply: (m: SetMember, r: T) => void): Promise<T> {
+  exclusive<T>(change: () => Promise<T>, apply: (m: SetMember, r: T) => void, changed: (r: T) => boolean = () => true): Promise<T> {
     const run = this.gate.then(async () => {
       const members = [...this.members];
       const releases: (() => void)[] = [];
       try {
         for (const m of members) releases.push(await m.lock());
         const r = await change();
-        this.version++;
+        if (changed(r)) this.version++;
         for (const m of members) apply(m, r);
         return r;
       } finally {
@@ -136,6 +137,7 @@ export class SourceSet {
         return first;
       },
       (m, first) => first && m.sourcesChanged(first),
+      (first) => first !== null,
     );
   }
 

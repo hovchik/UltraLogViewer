@@ -47,6 +47,10 @@ describe('shared sources', () => {
     expect(await b.sync()).toBe(false);
     expect(messages(a)).toEqual(['bad', 'worse']);
     expect(messages(b)).toEqual(['ok', 'ok again']);
+    // A quiet poll changes nothing: no view filters again.
+    expect(await a.set.refresh()).toBeNull();
+    expect(await a.sync()).toBe(false);
+    expect(await b.sync()).toBe(false);
 
     // refresh() polls and syncs; the other view sees what that poll found.
     fs.appendFileSync(p, '2024-01-01 00:00:05 ERROR ok worst\n');
