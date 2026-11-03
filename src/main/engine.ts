@@ -17,9 +17,12 @@ export interface OpenOptions {
 export type EngineEvent =
   | { type: 'doc-updated'; docId: number; info: DocInfo; reset: boolean }
   | { type: 'doc-error'; docId: number; message: string }
-  | { type: 'progress'; docId: number; phase: string; fraction: number };
+  | { type: 'progress'; docId: number; phase: string; fraction: number }
+  /** Rows a running filter has found so far (`seq` as passed to setFilter); see LogDocument.viewEpoch. */
+  | { type: 'view-partial'; docId: number; info: DocInfo; epoch: number; seq: number };
 
 const POLL_MS = 500;
+const PROGRESS_MS = 50;
 
 export class Engine {
   private docs = new Map<number, LogDocument>();
@@ -29,11 +32,24 @@ export class Engine {
   private patternsGen = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  private progressAt = new Map<string, number>();
   /** Scans big files on all cores; absent when the worker script is not built next to this file (unit tests). */
   private scanPool = fs.existsSync(path.join(__dirname, 'scanWorker.js')) ? new ScanPool(path.join(__dirname, 'scanWorker.js')) : undefined;
 
   constructor(private emit: (e: EngineEvent) => void) {
     this.timer = setInterval(() => void this.poll(), POLL_MS);
+  }
+
+  /**
+   * Progress events, at most every 50 ms per document and phase (and always the last one): a scan on all cores
+   * reports a thousand batches a second, and redrawing the status bar for each would take CPU from the scan.
+   */
+  private progress(docId: number, phase: string, fraction: number) {
+    const key = `${docId}:${phase}`;
+    const now = Date.now();
+    if (fraction < 1 && now - (this.progressAt.get(key) ?? 0) < PROGRESS_MS) return;
+    this.progressAt.set(key, now);
+    this.emit({ type: 'progress', docId, phase, fraction });
   }
 
   private doc(id: number): LogDocument {
@@ -53,7 +69,7 @@ export class Engine {
       for (const p of paths) {
         try {
           await doc.addSource(p, { ...opts, scanPool: this.scanPool }, (phase, fraction) => {
-            this.emit({ type: 'progress', docId: id, phase, fraction });
+            this.progress(id, phase, fraction);
             const now = Date.now();
             if (now - last > 250 && phase === 'index') {
               last = now;
@@ -73,6 +89,7 @@ export class Engine {
   close(docId: number) {
     this.docs.get(docId)?.close();
     this.docs.delete(docId);
+    for (const k of this.progressAt.keys()) if (k.startsWith(`${docId}:`)) this.progressAt.delete(k);
   }
 
   info(docId: number): DocInfo {
@@ -83,9 +100,18 @@ export class Engine {
     return this.doc(docId).getRows(start, count);
   }
 
-  async setFilter(docId: number, spec: FilterSpec | null): Promise<DocInfo | null> {
+  /** Applies a filter; while it runs, the rows found so far are pushed as `view-partial` events tagged with `seq`. */
+  async setFilter(docId: number, spec: FilterSpec | null, seq = 0): Promise<DocInfo | null> {
     const d = this.doc(docId);
-    const ok = await d.applyFilter(spec, false, (phase, fraction) => this.emit({ type: 'progress', docId, phase, fraction }));
+    let epoch = d.viewEpoch;
+    let count = d.viewCount();
+    const ok = await d.applyFilter(spec, false, (phase, fraction) => {
+      this.progress(docId, phase, fraction);
+      if (d.viewEpoch === epoch && d.viewCount() === count) return;
+      epoch = d.viewEpoch;
+      count = d.viewCount();
+      this.emit({ type: 'view-partial', docId, info: d.info(), epoch, seq });
+    });
     return ok ? d.info() : null;
   }
 
@@ -94,7 +120,7 @@ export class Engine {
     this.searchGen.set(docId, gen);
     return this.doc(docId).search(
       pattern,
-      (phase, fraction) => this.emit({ type: 'progress', docId, phase, fraction }),
+      (phase, fraction) => this.progress(docId, phase, fraction),
       () => this.searchGen.get(docId) !== gen,
     );
   }
@@ -139,7 +165,7 @@ export class Engine {
     return this.doc(docId).overview(buckets);
   }
   async exportView(docId: number, file: string, format: 'text' | 'csv' | 'jsonl') {
-    return this.doc(docId).export(file, format, (phase, fraction) => this.emit({ type: 'progress', docId, phase, fraction }));
+    return this.doc(docId).export(file, format, (phase, fraction) => this.progress(docId, phase, fraction));
   }
   async reformat(docId: number, formatId: string | undefined, customFormats?: CustomFormat[]) {
     const d = this.doc(docId);

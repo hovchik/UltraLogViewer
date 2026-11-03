@@ -239,7 +239,7 @@ function renderRecent() {
 // --------------------------------------------------------------- engine events
 
 const refreshOverviewSoon = debounce((tab: Tab) => void refreshOverview(tab), 250);
-const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false), 800);
+const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false, undefined, false), 800);
 
 window.ulv.onEvent((raw) => {
   const ev = raw as EngineEvent;
@@ -248,6 +248,10 @@ window.ulv.onEvent((raw) => {
   if (ev.type === 'progress') {
     tab.progress = ev.fraction >= 1 ? undefined : { phase: ev.phase, fraction: ev.fraction };
     if (tab === active) renderStatus();
+    return;
+  }
+  if (ev.type === 'view-partial') {
+    showPartialView(tab, ev);
     return;
   }
   if (ev.type === 'doc-error') {
@@ -284,6 +288,29 @@ window.ulv.onEvent((raw) => {
   renderStatus();
   renderTabs();
 });
+
+/**
+ * Rows a running filter has found so far. Within one epoch the view only gains rows at its end, so the grid keeps its
+ * cache; a new epoch (the first partial view replacing the old one) redraws it. Events of an older run are dropped.
+ */
+function showPartialView(tab: Tab, ev: Extract<EngineEvent, { type: 'view-partial' }>) {
+  if (!tab.filtering || ev.seq !== tab.filterSeq) return;
+  tab.info = ev.info;
+  const sameEpoch = tab.partialEpoch === ev.epoch;
+  tab.partialEpoch = ev.epoch;
+  if (tab !== active) return;
+  if (!sameEpoch && tab.search.result) {
+    // The hits are rows of the old view; the search runs again when the filter is done.
+    tab.search.result = null;
+    grid.refreshPatterns();
+    renderSearchCount();
+  }
+  grid.invalidate(sameEpoch);
+  renderStatus();
+}
+
+/** "Filtered 8,695,680 entries in 0.82 s": makes the cost of a scan visible after it finishes. */
+const scanCost = (verb: string, entries: number, ms: number) => `${verb} ${fmtNum(entries)} ${entries === 1 ? 'entry' : 'entries'} in ${(ms / 1000).toFixed(2)} s`;
 
 async function onDocReady(tab: Tab) {
   tab.progress = undefined;
@@ -350,19 +377,26 @@ async function applyFilter(tab: Tab) {
   // Any filter change leaves "show in context" first.
   const wasContext = !!tab.contextMode;
   let info: DocInfo | null;
+  const seq = (tab.filterSeq = (tab.filterSeq ?? 0) + 1);
+  const started = performance.now();
   try {
     if (wasContext) {
       tab.contextMode = false;
       if (tab === active) renderBanner();
       await engine.setIgnoreFilter(tab.id, false);
     }
-    info = await engine.setFilter(tab.id, tab.filter);
+    tab.filtering = true;
+    tab.partialEpoch = undefined;
+    info = await engine.setFilter(tab.id, tab.filter, seq);
   } catch (e) {
     toast((e as Error).message, true);
     return;
+  } finally {
+    if (tab.filterSeq === seq) tab.filtering = false;
   }
   if (!info) return; // superseded by a newer filter
   tab.info = info;
+  tab.scanCost = isDefaultFilter(tab) ? undefined : scanCost('Filtered', info.total, performance.now() - started);
   tab.progress = undefined;
   tab.newRows = 0;
   if (tab.showPatterns) refreshPatternsSoon(tab);
@@ -380,7 +414,7 @@ async function applyFilter(tab: Tab) {
   renderStatus();
   void refreshOverview(tab);
   void updateDetail();
-  if (tab.search.pattern.text) void runSearch(tab, false);
+  if (tab.search.pattern.text) void runSearch(tab, false, undefined, false); // keep showing what the filter cost
 }
 
 // ------------------------------------------------------------------ patterns
@@ -782,7 +816,7 @@ function currentPattern(): TextPattern {
 }
 
 /** Searches a tab: the search box for the active tab, else the tab's own last pattern. */
-async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab === active ? currentPattern() : tab.search.pattern) {
+async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab === active ? currentPattern() : tab.search.pattern, showCost = true) {
   tab.search.pattern = pattern;
   const err = pattern.text ? validatePattern(pattern) : null;
   if (tab === active) searchInput.parentElement!.classList.toggle('error', !!err);
@@ -793,9 +827,11 @@ async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab ===
     renderSearchCount();
     return;
   }
+  const started = performance.now();
   const result = await engine.search(tab.id, pattern);
   if (result.cancelled || tab.search.pattern !== pattern) return;
   tab.search.result = result;
+  if (showCost) tab.scanCost = scanCost('Searched', tab.info.total, performance.now() - started);
   tab.progress = undefined;
   const idx = result.rows.findIndex((r) => r >= tab.focus);
   tab.search.current = idx < 0 ? 0 : idx;
@@ -1333,7 +1369,7 @@ function renderStatus() {
   if (busy) {
     const label = { index: 'Indexing', filter: 'Filtering', search: 'Searching', export: 'Exporting' }[busy.phase] ?? busy.phase;
     parts.push(`<span>${label} ${Math.round(busy.fraction * 100)}%</span><span class="prog"><i style="width:${(busy.fraction * 100).toFixed(1)}%"></i></span>`);
-  }
+  } else if (t.scanCost) parts.push(`<span class="scan-cost muted">${esc(t.scanCost)}</span>`);
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);

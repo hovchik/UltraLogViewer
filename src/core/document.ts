@@ -3,21 +3,22 @@
 // Row model:
 //   base rows  = every entry of every source (merged by timestamp when there are several sources)
 //   view rows  = base rows that pass the current filter (plus context rows), ascending base order
-// Filtering and search work per source in file order (sequential reads) and produce bitmaps,
-// which are then walked in base order. That keeps merged views fast too.
+// Filtering and search work per source in file order and produce bitmaps, which are then walked in base order. That
+// keeps merged views fast too. The texts are read and tested in batches on the scan pool's threads (entryScan.ts) and
+// merged in entry order, so the answers are exactly those of a sequential pass.
 
 import * as fs from 'node:fs';
 import { FileSource, SourceOptions } from './fileSource';
 import { GrowU32, GrowU8, lowerBound } from './grow';
-import { compileMatcher, compileQuery, Matcher, ruleMatcher } from './query';
-import { fnv1a64, messageOf, RepeatMode, repeatKey, template } from './patterns';
+import { compileTextTest, RowsOp, RowsResult } from './entryScan';
+import { RepeatMode } from './patterns';
 import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, PatternsResult, PatternStat, RowData, rowKey, SearchResult, TextPattern } from './types';
 
 export type Progress = (phase: string, fraction: number) => void;
 
 const MAX_SEARCH_ROWS = 2_000_000;
-/** Level names used when matching `level:` queries (WARNING also matches "warn"). */
-const LEVEL_MATCH_NAMES = ['NONE', 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'FATAL'];
+/** How often a running filter publishes the rows it has found so far. */
+const PARTIAL_VIEW_MS = 200;
 /** Fields never worth counting in fieldStats(): every value differs. */
 const UNCOUNTED_FIELDS = new Set(['message', 'time']);
 const STATS_BLOCK = 1000;
@@ -25,6 +26,8 @@ const STATS_DISTINCT_CAP = 5000;
 const PATTERNS_CAP = 20_000;
 const SPARK_BUCKETS = 24;
 const OTHER_PATTERN = '(other)';
+/** View-row blocks being read at once for field stats, patterns and export (two per scan thread). */
+const ROWS_IN_FLIGHT = 8;
 
 const passes = (verdict: GrowU8[], s: number, e: number) => {
   const v = verdict[s];
@@ -41,10 +44,57 @@ function pruneRare(values: Map<string, number>) {
   }
 }
 
-function newPattern(tpl: string, msg: string): PatternStat {
-  const i = msg.indexOf('\n');
-  const first = i < 0 ? msg : msg.slice(0, i);
-  return { template: tpl, count: 0, levels: new Array(LEVEL_COUNT).fill(0), sample: first.length > 300 ? first.slice(0, 300) : first, spark: new Array(SPARK_BUCKETS).fill(0) };
+function newPattern(tpl: string, sample: string): PatternStat {
+  return { template: tpl, count: 0, levels: new Array(LEVEL_COUNT).fill(0), sample, spark: new Array(SPARK_BUCKETS).fill(0) };
+}
+
+/**
+ * Builds the view rows (matches plus `context` rows around them) in one pass over the base rows, and can resume where
+ * it stopped. While a filter runs it is extended over the base rows whose verdicts are known so far, so each partial
+ * view costs only the new rows. A row is added when it matches, when it is within `context` rows before a match, or
+ * within `context` rows after the latest match before it. That depends only on rows above it and the next `context`
+ * rows, and leading context never reaches back before the last row added, so the view only ever gains rows at its end:
+ * every partial view is a prefix of the final one.
+ */
+class ViewBuilder {
+  private rows = new GrowU32(1024);
+  private ctx = new GrowU8(1024);
+  private next = 0;
+  private lastAdded = -1;
+  private lastHit = -Infinity;
+
+  constructor(private context: number) {}
+
+  /**
+   * Extends the view over base rows [next, n): `verdict(b)` is 1 (match), 0 (no match) or -1 (not known yet). With
+   * `partial` it stops at the first unknown row; otherwise unknown rows count as not matching.
+   */
+  extend(n: number, verdict: (b: number) => number, partial: boolean): { rows: Uint32Array; ctx: Uint8Array | null } {
+    const { rows, ctx, context } = this;
+    let b = this.next;
+    for (; b < n; b++) {
+      const v = verdict(b);
+      if (v < 0 && partial) break;
+      const hit = v === 1;
+      if (context <= 0) {
+        if (hit) rows.push(b);
+      } else if (hit) {
+        for (let c = Math.max(this.lastAdded + 1, b - context); c < b; c++) {
+          rows.push(c);
+          ctx.push(1);
+        }
+        rows.push(b);
+        ctx.push(0);
+        this.lastAdded = this.lastHit = b;
+      } else if (b - this.lastHit <= context) {
+        rows.push(b);
+        ctx.push(1);
+        this.lastAdded = b;
+      }
+    }
+    this.next = b;
+    return { rows: rows.view().slice(), ctx: context > 0 ? ctx.view().slice() : null };
+  }
 }
 
 export class LogDocument {
@@ -65,6 +115,15 @@ export class LogDocument {
   /** Per-source filter verdicts for already evaluated entries: 1 = match. */
   private verdict: GrowU8[] = [];
   private filterGen = 0;
+  /**
+   * Changes whenever the view is replaced by one with different rows. The partial views a running filter publishes keep
+   * the epoch: each one only appends rows, so a grid can keep what it has cached.
+   */
+  viewEpoch = 0;
+  /** Entries per batch when scanning entry texts (tests vary it). */
+  scanBatch = 8192;
+  /** How often a running filter publishes partial views (tests set 0). */
+  partialViewMs = PARTIAL_VIEW_MS;
   /** Serialises everything that mutates verdicts/view (filtering, tail refresh, re-parsing). */
   private queue: Promise<unknown> = Promise.resolve();
   indexing = false;
@@ -222,21 +281,23 @@ export class LogDocument {
     if (!incremental) this.verdict = [];
     this.filter = spec;
     if (!spec || LogDocument.isTrivial(spec)) {
-      this.view = this.viewContext = this.viewRepeat = null;
+      this.setView(null, null, null);
       this.verdict = [];
       return true;
     }
-    const compiled = (mode: 'include' | 'exclude') =>
-      spec.rules.filter((r) => r.enabled && r.text && r.mode === mode).map((r) => ({ m: ruleMatcher(r), col: r.patternMatch ? undefined : r.column, pattern: !!r.patternMatch }));
-    const includes = compiled('include');
-    const excludes = compiled('exclude');
     const cleared = spec.clearedBefore ?? null;
-    const query = spec.query?.trim() ? compileQuery(spec.query, !!spec.queryCaseSensitive) : null;
-    const needsText = includes.length > 0 || excludes.length > 0 || !!query;
     const bookmarks = spec.bookmarksOnly ? new Set(spec.bookmarks ?? []) : null;
     const from = spec.timeFrom ?? -Infinity;
     const to = spec.timeTo ?? Infinity;
     const hasTime = spec.timeFrom != null || spec.timeTo != null;
+    const allLevels = spec.levels.every(Boolean);
+    const group = spec.groupRepeats ?? 'off';
+    // A full (not tail) text filter publishes partial views as it goes. Each one is a prefix of the next and of the
+    // final view (see ViewBuilder), so rows never move once shown. Grouping folds rows at the end, so it waits.
+    const progressive = !incremental && group === 'off';
+    const builder = new ViewBuilder(spec.context ?? 0);
+    let published = false;
+    let lastPublish = Date.now();
 
     const total = this.sources.reduce((n, s) => n + s.entryCount, 0);
     let done = 0;
@@ -255,52 +316,61 @@ export class LogDocument {
         }
         return true;
       };
-      if (!needsText || bookmarks) {
+      const text = bookmarks ? null : compileTextTest(spec, src.format);
+      if (!text) {
         for (let e = start; e < src.entryCount; e++) v.push(cheap(e) ? 1 : 0);
         done += src.entryCount - start;
         continue;
       }
-      const fmt = src.format;
-      await src.forEachEntryBatch(start, src.entryCount, (first, texts) => {
-        if (gen !== this.filterGen) return false;
-        for (let i = 0; i < texts.length; i++) {
-          const e = first + i;
-          let ok = cheap(e);
-          if (ok) {
-            const text = texts[i];
-            let parsed: Record<string, string> | null = null;
-            let tpl: string | null = null;
-            const test = (r: { m: Matcher; col: string | undefined; pattern: boolean }) =>
-              r.pattern ? r.m((tpl ??= template(messageOf(text, (parsed ??= fmt.parse(text)))))) : r.col ? r.m(field(r.col)) : r.m(text);
-            const field = (k: string): string => {
-              // The level is already indexed: answer without parsing the entry.
-              if (k === 'level') return LEVEL_MATCH_NAMES[src.level(e)];
-              const f = (parsed ??= fmt.parse(text));
-              if (k in f) return f[k];
-              const lk = k.toLowerCase();
-              const alias = lk === 'timestamp' ? 'time' : lk;
-              return f[alias] ?? f[Object.keys(f).find((x) => x.toLowerCase() === lk) ?? ''] ?? '';
-            };
-            if (includes.length && !includes.some(test)) ok = false;
-            else if (excludes.some(test)) ok = false;
-            else if (query && !query(text, field)) ok = false;
+      const needsCheap = clearedAt > start || !allLevels || hasTime;
+      await src.scanEntries(
+        start,
+        src.entryCount,
+        { kind: 'filter', filter: { rules: spec.rules, query: spec.query, queryCaseSensitive: spec.queryCaseSensitive } },
+        needsCheap ? cheap : null,
+        (_first, result) => {
+          if (gen !== this.filterGen) return false;
+          const r = result as Uint8Array;
+          v.pushAll(r);
+          done += r.length;
+          onProgress?.('filter', total ? done / total : 1);
+          // Show the rows found so far while the rest of the file is filtered.
+          if (progressive && Date.now() - lastPublish >= this.partialViewMs) {
+            const view = builder.extend(this.baseCount(), (b) => this.verdictOf(b), true);
+            this.setView(view.rows, view.ctx, null, published);
+            published = true;
+            lastPublish = Date.now();
           }
-          v.push(ok ? 1 : 0);
-        }
-        done += texts.length;
-        onProgress?.('filter', total ? done / total : 1);
-      });
+        },
+        this.scanBatch,
+      );
       if (gen !== this.filterGen) return false;
     }
-    const group = spec.groupRepeats ?? 'off';
     if (group !== this.repeatMode) {
       this.repeatHi = [];
       this.repeatLo = [];
       this.repeatMode = group;
     }
     if (group !== 'off' && !(await this.updateRepeatKeys(group, gen))) return false;
-    this.buildView(spec.context ?? 0, group !== 'off');
+    const view = builder.extend(this.baseCount(), (b) => Math.max(0, this.verdictOf(b)), false);
+    if (group !== 'off') this.setView(...this.groupView(view.rows, view.ctx));
+    else this.setView(view.rows, view.ctx, null, published);
     return true;
+  }
+
+  /** Verdict of a base row: 1 = passes, 0 = filtered out, -1 = not evaluated yet. */
+  private verdictOf(b: number): number {
+    const [s, e] = this.ref(b);
+    const v = this.verdict[s];
+    return v && e < v.length ? v.data[e] : -1;
+  }
+
+  /** Publishes a view. `extends` says it only appends rows to the current one; anything else starts a new epoch. */
+  private setView(rows: Uint32Array | null, ctx: Uint8Array | null, repeat: Uint32Array | null, extendsCurrent = false) {
+    this.view = rows;
+    this.viewContext = ctx;
+    this.viewRepeat = repeat;
+    if (!extendsCurrent) this.viewEpoch++;
   }
 
   /** Hashes the repeat key of every entry not hashed yet (tail updates only read new entries). */
@@ -308,16 +378,19 @@ export class LogDocument {
     for (const [si, src] of this.sources.entries()) {
       const hi = (this.repeatHi[si] ??= new GrowU32(Math.max(16, src.entryCount)));
       const lo = (this.repeatLo[si] ??= new GrowU32(Math.max(16, src.entryCount)));
-      const fmt = src.format;
-      await src.forEachEntryBatch(hi.length, src.entryCount, (first, texts) => {
-        if (gen !== this.filterGen) return false;
-        for (let i = 0; i < texts.length; i++) {
-          const text = texts[i];
-          const [h, l] = fnv1a64(repeatKey(src.level(first + i), fmt.parse(text), text, mode));
-          hi.push(h);
-          lo.push(l);
-        }
-      });
+      await src.scanEntries(
+        hi.length,
+        src.entryCount,
+        { kind: 'repeat', mode },
+        null,
+        (_first, result) => {
+          if (gen !== this.filterGen) return false;
+          const r = result as { hi: Uint32Array; lo: Uint32Array };
+          hi.pushAll(r.hi);
+          lo.pushAll(r.lo);
+        },
+        this.scanBatch,
+      );
       if (gen !== this.filterGen) return false;
     }
     return true;
@@ -332,49 +405,8 @@ export class LogDocument {
     return ha.get(ea) === hb.get(eb) && this.repeatLo[sa].get(ea) === this.repeatLo[sb].get(eb);
   }
 
-  private buildView(context: number, group = false) {
-    const n = this.baseCount();
-    const hit = (b: number) => {
-      const [s, e] = this.ref(b);
-      const v = this.verdict[s];
-      return !!v && e < v.length && v.get(e) === 1;
-    };
-    const out = new GrowU32(1024);
-    const ctx = new GrowU8(1024);
-    if (context <= 0) {
-      for (let b = 0; b < n; b++) if (hit(b)) out.push(b);
-    } else {
-      let lastAdded = -1;
-      for (let b = 0; b < n; b++) {
-        if (!hit(b)) continue;
-        const lo = Math.max(lastAdded + 1, b - context);
-        for (let c = lo; c < b; c++) {
-          out.push(c);
-          ctx.push(1);
-        }
-        out.push(b);
-        ctx.push(0);
-        lastAdded = b;
-        // trailing context
-        let c = b + 1;
-        for (; c <= Math.min(n - 1, b + context); c++) {
-          if (hit(c)) break;
-          out.push(c);
-          ctx.push(1);
-          lastAdded = c;
-        }
-      }
-    }
-    this.view = out.view().slice();
-    this.viewContext = context > 0 ? ctx.view().slice() : null;
-    this.viewRepeat = null;
-    if (group) this.groupView();
-  }
-
   /** Collapses runs of consecutive view rows with the same repeat key into their first row. Context rows never merge. */
-  private groupView() {
-    const view = this.view!;
-    const vctx = this.viewContext;
+  private groupView(view: Uint32Array, vctx: Uint8Array | null): [Uint32Array, Uint8Array | null, Uint32Array] {
     const out = new GrowU32(1024);
     const ctx = new GrowU8(1024);
     const rep = new GrowU32(1024);
@@ -391,9 +423,7 @@ export class LogDocument {
       rep.push(1);
       lastCtx = isCtx;
     }
-    this.view = out.view().slice();
-    if (vctx) this.viewContext = ctx.view().slice();
-    this.viewRepeat = rep.view().slice();
+    return [out.view().slice(), vctx ? ctx.view().slice() : null, rep.view().slice()];
   }
 
   // --------------------------------------------------------------------- rows
@@ -451,9 +481,10 @@ export class LogDocument {
     const n = this.viewCount();
     const counts = new Map<string, { key: string; values: Map<string, number>; present: number; capped: boolean }>();
     let scanned = 0;
-    const count = (rows: RowData[]) => {
-      for (const row of rows) {
-        for (const [k, raw] of Object.entries(row.fields)) {
+    // Parsing the rows is the expensive part: done on the scan pool, counted here in row order.
+    const count = (fieldsOfRows: Record<string, string>[]) => {
+      for (const fields of fieldsOfRows) {
+        for (const [k, raw] of Object.entries(fields)) {
           const lk = k.toLowerCase();
           if (UNCOUNTED_FIELDS.has(lk)) continue;
           const v = raw.trim();
@@ -475,9 +506,10 @@ export class LogDocument {
           }
         }
       }
-      scanned += rows.length;
+      scanned += fieldsOfRows.length;
     };
-    const sampled = await this.scanView(maxRows, cancelled, count);
+    const { blocks, sampled } = this.scanBlocks(maxRows);
+    await this.scanRows(blocks, () => ({ kind: 'fields' }), cancelled, (_refs, results) => count(results as Record<string, string>[]));
     if (cancelled()) return { scanned, viewCount: n, sampled, fields: [], cancelled: true };
     const fields: FieldStat[] = [...counts.values()].map((c) => ({
       key: c.key,
@@ -489,36 +521,70 @@ export class LogDocument {
     return { scanned, viewCount: n, sampled, fields };
   }
 
-  /**
-   * Reads the view rows in chunks: all of them, or evenly spaced blocks when the view has more than `maxRows`.
-   * Returns true when the view was sampled.
-   */
-  private async scanView(maxRows: number, cancelled: () => boolean, fn: (rows: RowData[]) => void): Promise<boolean> {
+  /** The view-row blocks field stats and patterns read: every row, or evenly spaced blocks when the view has more than `maxRows`. */
+  private scanBlocks(maxRows: number): { blocks: [number, number][]; sampled: boolean } {
     const n = this.viewCount();
-    const tick = () => new Promise<void>((res) => setImmediate(res));
-    const sampled = n > maxRows;
-    if (!sampled) {
-      for (let r = 0; r < n; r += 2000) {
-        if (cancelled()) break;
-        fn(this.getRows(r, 2000));
-        await tick();
-      }
-    } else {
-      const blocks = Math.max(1, Math.floor(maxRows / STATS_BLOCK));
-      const stride = (n - STATS_BLOCK) / Math.max(1, blocks - 1);
-      for (let b = 0; b < blocks; b++) {
-        if (cancelled()) break;
-        fn(this.getRows(Math.floor(b * stride), STATS_BLOCK));
-        if (b % 2 === 1) await tick();
-      }
+    const blocks: [number, number][] = [];
+    if (n <= maxRows) {
+      for (let r = 0; r < n; r += 2000) blocks.push([r, 2000]);
+      return { blocks, sampled: false };
     }
-    return sampled;
+    const count = Math.max(1, Math.floor(maxRows / STATS_BLOCK));
+    const stride = (n - STATS_BLOCK) / Math.max(1, count - 1);
+    for (let b = 0; b < count; b++) blocks.push([Math.floor(b * stride), STATS_BLOCK]);
+    return { blocks, sampled: true };
   }
 
-  /** Rows `scanView` will read. */
-  private scanSize(maxRows: number): number {
-    const n = this.viewCount();
-    return n > maxRows ? Math.min(n, Math.max(1, Math.floor(maxRows / STATS_BLOCK)) * STATS_BLOCK) : n;
+  /**
+   * Evaluates a rows op (built per source) over blocks [start, count) of view rows and passes each block's rows and
+   * per-row results to `fn` in view order. The rows are read and evaluated on the scan pool, several blocks at a time;
+   * without one, here.
+   */
+  private async scanRows(
+    blocks: [number, number][],
+    op: (source: number) => RowsOp,
+    cancelled: () => boolean,
+    fn: (refs: [number, number][], results: unknown[]) => void | Promise<void>,
+  ): Promise<void> {
+    const tick = () => new Promise<void>((res) => setImmediate(res));
+    const perRow = (r: RowsResult): unknown[] =>
+      Array.isArray(r) ? r : r.templates.map((t, i) => [t, r.samples[i]]);
+    const start = (from: number, count: number) => {
+      const end = Math.min(this.viewCount(), from + count);
+      const refs: [number, number][] = [];
+      const bySource = new Map<number, { entries: number[]; at: number[] }>();
+      for (let r = from; r < end; r++) {
+        const ref = this.ref(this.baseOf(r));
+        let g = bySource.get(ref[0]);
+        if (!g) bySource.set(ref[0], (g = { entries: [], at: [] }));
+        g.entries.push(ref[1]);
+        g.at.push(refs.length);
+        refs.push(ref);
+      }
+      const results: unknown[] = new Array(refs.length);
+      const parts = [...bySource].map(([s, g]) =>
+        this.sources[s].evalRows(g.entries, op(s)).then((r) => perRow(r).forEach((x, i) => (results[g.at[i]] = x))),
+      );
+      return Promise.all(parts).then(() => ({ refs, results }));
+    };
+    const inFlight: Promise<{ refs: [number, number][]; results: unknown[] }>[] = [];
+    let next = 0;
+    try {
+      while (next < blocks.length || inFlight.length) {
+        while (next < blocks.length && inFlight.length < ROWS_IN_FLIGHT && !cancelled()) {
+          const [from, count] = blocks[next++];
+          inFlight.push(start(from, count));
+        }
+        if (!inFlight.length) break;
+        const { refs, results } = await inFlight.shift()!;
+        if (cancelled()) break;
+        await fn(refs, results);
+        await tick();
+      }
+    } finally {
+      // Cancelled (or failed): the blocks still being read are dropped.
+      for (const p of inFlight) p.catch(() => undefined);
+    }
   }
 
   // ----------------------------------------------------------------- patterns
@@ -526,26 +592,26 @@ export class LogDocument {
   /** Message templates over the view rows (sampled like fieldStats), most common first. */
   async patterns(maxRows = 200_000, top = 300, cancelled: () => boolean = () => false): Promise<PatternsResult> {
     const n = this.viewCount();
-    const expected = Math.max(1, this.scanSize(maxRows));
+    const { blocks, sampled } = this.scanBlocks(maxRows);
+    const expected = Math.max(1, sampled ? Math.min(n, blocks.length * STATS_BLOCK) : n);
     const map = new Map<string, PatternStat>();
     let other: PatternStat | null = null;
     let scanned = 0;
-    const count = (rows: RowData[]) => {
-      for (const row of rows) {
-        const msg = messageOf(row.text, row.fields);
-        const tpl = template(msg);
+    // Templates are worked out on the scan pool; the counting (and the cap) runs here in row order.
+    await this.scanRows(blocks, () => ({ kind: 'patterns' }), cancelled, (refs, results) => {
+      for (let i = 0; i < refs.length; i++) {
+        const [tpl, sample] = results[i] as [string, string];
         let p = map.get(tpl);
         if (!p) {
-          if (map.size >= PATTERNS_CAP) p = other ??= newPattern(OTHER_PATTERN, msg);
-          else map.set(tpl, (p = newPattern(tpl, msg)));
+          if (map.size >= PATTERNS_CAP) p = other ??= newPattern(OTHER_PATTERN, sample);
+          else map.set(tpl, (p = newPattern(tpl, sample)));
         }
         p.count++;
-        p.levels[row.level]++;
+        p.levels[this.sources[refs[i][0]].level(refs[i][1])]++;
         p.spark[Math.min(SPARK_BUCKETS - 1, Math.floor((scanned * SPARK_BUCKETS) / expected))]++;
         scanned++;
       }
-    };
-    const sampled = await this.scanView(maxRows, cancelled, count);
+    });
     if (cancelled()) return { scanned, viewCount: n, sampled, total: 0, patterns: [], cancelled: true };
     const all = [...map.values()];
     if (other) all.push(other);
@@ -558,7 +624,6 @@ export class LogDocument {
   /** Finds all view rows whose entry text matches. */
   async search(p: TextPattern, onProgress?: Progress, cancelled: () => boolean = () => false): Promise<SearchResult> {
     if (!p.text) return { rows: [], total: 0, truncated: false };
-    const m = compileMatcher(p);
     const hits = this.sources.map((s) => new Uint8Array(s.entryCount));
     const total = this.sources.reduce((n, s) => n + s.entryCount, 0);
     let done = 0;
@@ -566,16 +631,21 @@ export class LogDocument {
     for (const [si, src] of this.sources.entries()) {
       const inView = this.verdict[si];
       const ctxAll = !!this.viewContext; // context rows may come from non-matching entries
-      await src.forEachEntryBatch(0, src.entryCount, (first, texts) => {
-        if (cancelled()) return false;
-        for (let i = 0; i < texts.length; i++) {
-          const e = first + i;
-          if (view && !ctxAll && inView && (e >= inView.length || inView.get(e) !== 1)) continue;
-          if (m(texts[i])) hits[si][e] = 1;
-        }
-        done += texts.length;
-        onProgress?.('search', total ? done / total : 1);
-      });
+      const restrict = view && !ctxAll && inView ? (e: number) => e < inView.length && inView.data[e] === 1 : null;
+      await src.scanEntries(
+        0,
+        hits[si].length,
+        { kind: 'search', pattern: p },
+        restrict,
+        (first, result) => {
+          if (cancelled()) return false;
+          const r = result as Uint8Array;
+          hits[si].set(r, first);
+          done += r.length;
+          onProgress?.('search', total ? done / total : 1);
+        },
+        this.scanBatch,
+      );
     }
     if (cancelled()) return { rows: [], total: 0, truncated: false, cancelled: true };
     const rows: number[] = [];
@@ -736,18 +806,21 @@ export class LogDocument {
     const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
     const write = (s: string) => (out.write(s) ? Promise.resolve() : new Promise<void>((r) => out.once('drain', () => r())));
     if (format === 'csv') await write((this.merged ? ['source'] : []).concat(['line', ...cols.map((c) => c.title)]).map(q).join(',') + '\n');
-    for (let r = 0; r < n; r += 2000) {
-      const rows = this.getRows(r, 2000);
-      let chunk = '';
-      for (const row of rows) {
-        const srcName = this.sources[row.source].info().displayName;
-        if (format === 'text') chunk += row.text + '\n';
-        else if (format === 'csv') chunk += (this.merged ? [srcName] : []).concat([String(row.line), ...cols.map((c) => row.fields[c.key] ?? '')]).map(q).join(',') + '\n';
-        else chunk += JSON.stringify({ ...(this.merged ? { source: srcName } : {}), line: row.line, ...row.fields }) + '\n';
-      }
-      await write(chunk);
-      onProgress?.('export', Math.min(1, (r + 2000) / n));
-    }
+    const blocks: [number, number][] = [];
+    for (let r = 0; r < n; r += 2000) blocks.push([r, 2000]);
+    const columns = cols.map((c) => c.key);
+    let written = 0;
+    // Rows are read and formatted on the scan pool and written here in order.
+    await this.scanRows(
+      blocks,
+      (s) => ({ kind: 'export', format, columns, source: this.merged ? this.sources[s].info().displayName : null }),
+      () => false,
+      async (refs, lines) => {
+        await write((lines as string[]).join(''));
+        written += refs.length;
+        onProgress?.('export', Math.min(1, written / n));
+      },
+    );
     await new Promise<void>((res, rej) => out.end((e?: Error | null) => (e ? rej(e) : res())));
     return n;
   }
