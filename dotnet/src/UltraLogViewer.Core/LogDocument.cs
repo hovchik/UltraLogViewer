@@ -7,8 +7,9 @@ namespace UltraLogViewer.Core;
 /// What a tab shows: one file, or several files merged into one timeline.
 /// Base rows are every entry of every source (merged by timestamp when there are several sources);
 /// view rows are the base rows that pass the current filter (plus context rows), in base order.
-/// Filtering and search run per source in file order (sequential reads) and produce bitmaps,
-/// which are then walked in base order; that keeps merged views fast too.
+/// Filtering and search run per source in file order and produce bitmaps, which are then walked in base order; that
+/// keeps merged views fast too. Entry texts are read and tested in batches on all cores and merged in entry order
+/// (see <see cref="InOrder"/>), so the answers are exactly those of a sequential pass.
 /// Snapshots (merge, view) are immutable and swapped atomically, so reads never block.
 /// </summary>
 public sealed class LogDocument : IDisposable
@@ -236,7 +237,7 @@ public sealed class LogDocument : IDisposable
                 continue;
             }
             var cancelled = false;
-            src.ForEachEntryBatchParallel(start, count, (first, texts) =>
+            src.ForEachEntryBatch(start, count, (first, texts) =>
             {
                 // Runs on the thread pool, several batches at once; commit below appends the verdicts in entry order.
                 var output = new byte[texts.Length];
@@ -361,7 +362,7 @@ public sealed class LogDocument : IDisposable
             if (h.Count >= src.EntryCount) continue;
             var fmt = src.Format;
             var cancelled = false;
-            src.ForEachEntryBatchParallel(h.Count, src.EntryCount, (first, texts) =>
+            src.ForEachEntryBatch(h.Count, src.EntryCount, (first, texts) =>
             {
                 var output = new ulong[texts.Length];
                 if (gen != _filterGen || ct.IsCancellationRequested) return output; // commit drops it
@@ -705,7 +706,7 @@ public sealed class LogDocument : IDisposable
                 var inView = v is not null && v.Context is null && si < verdict.Count ? verdict[si] : null;
                 var h = hits[si];
                 // Batches run in parallel; each one only writes its own entries' slots in h.
-                src.ForEachEntryBatchParallel(0, h.Length, (first, texts) =>
+                src.ForEachEntryBatch(0, h.Length, (first, texts) =>
                 {
                     for (var i = 0; i < texts.Length; i++)
                     {

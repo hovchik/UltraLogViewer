@@ -573,6 +573,10 @@ public sealed class FileSource : IDisposable
             }
             return output;
         }
+        catch (ObjectDisposedException) when (Closed)
+        {
+            return []; // closed while a batch was being read on another thread
+        }
         finally
         {
             ArrayPool<byte>.Shared.Return(buf);
@@ -593,24 +597,13 @@ public sealed class FileSource : IDisposable
         }
     }
 
-    /// <summary>Calls <paramref name="fn"/> with batches of entry texts in [from, to); return false to stop.</summary>
-    public void ForEachEntryBatch(int from, int to, Func<int, string[], bool> fn, CancellationToken ct = default, int batch = 4096)
-    {
-        for (var e = from; e < to && !Closed; e += batch)
-        {
-            ct.ThrowIfCancellationRequested();
-            var texts = ReadEntries(e, Math.Min(to, e + batch));
-            if (!fn(e, texts)) return;
-        }
-    }
-
     /// <summary>
-    /// Like <see cref="ForEachEntryBatch"/>, but on all cores: batches are read and handed to <paramref name="work"/> on
-    /// the thread pool, several at a time, and their results go to <paramref name="commit"/> on the calling thread in
-    /// entry order, so whatever commit builds comes out exactly as a sequential pass would build it. Commit gets the
-    /// first entry, the entry count and the result; it returns false to stop. <paramref name="work"/> must be thread safe.
+    /// Reads entries [from, to) in batches on all cores: each batch's texts go to <paramref name="work"/> on the thread
+    /// pool, several at a time, and the results to <paramref name="commit"/> on the calling thread in entry order, so
+    /// whatever commit builds comes out exactly as a sequential pass would build it. Commit gets the first entry, the
+    /// entry count and the result; it returns false to stop. <paramref name="work"/> must be thread safe.
     /// </summary>
-    public void ForEachEntryBatchParallel<T>(int from, int to, Func<int, string[], T> work, Func<int, int, T, bool> commit, CancellationToken ct = default, int batch = 4096,
+    public void ForEachEntryBatch<T>(int from, int to, Func<int, string[], T> work, Func<int, int, T, bool> commit, CancellationToken ct = default, int batch = 4096,
         bool parallel = true)
     {
         if (from >= to) return;
