@@ -462,3 +462,15 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .modal .box.ai-settings input[type='password'], .modal .box.ai-settings input[type='text'] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 12.5px var(--mono); }
 .err-text { color: var(--error); font-size: 12px; margin-top: 4px; }
 .err-text:empty { display: none; }
+
+/* remote files (remote.ts) */
+.badge.remote { margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10.5px; background: var(--accent-bg); color: var(--accent); vertical-align: 1px; }
+.src .remote-state.reconnecting, .src .remote-state.failed { color: var(--warn); }
+.remote-row { display: flex; gap: 6px; }
+.remote-row input { flex: 1; }
+.modal input.mono { font-family: var(--mono); }
+.remote-list { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; font-family: var(--mono); font-size: 12.5px; }
+.remote-list .item { padding: 2px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.remote-list .item.dir { font-weight: 600; }
+.remote-list .item:hover { background: var(--accent-bg); }
+.remote-list .item.on { background: var(--accent); color: #fff; }

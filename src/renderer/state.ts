@@ -44,6 +44,11 @@ export interface Settings {
   presets?: FilterPreset[];
   customFormats?: CustomFormat[];
   recent?: string[];
+  /** The ssh program for remote files (empty: $ULV_SSH, else ssh from the PATH). */
+  sshProgram?: string;
+  /** What "Multi-host tail…" was last opened with. */
+  multiHostHosts?: string;
+  multiHostPath?: string;
   showHistogram?: boolean;
   showDetail?: boolean;
   showSidebar?: boolean;

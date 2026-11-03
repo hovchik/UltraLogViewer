@@ -8,6 +8,7 @@ import { registerAi } from './aiMain';
 import { editorTemplate, expandCommand, expandUrl, isUnsafeUrlTemplate, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
+import { looksRemote } from '../core/remoteTarget';
 
 let win: BrowserWindow | null = null;
 let worker: Worker;
@@ -38,7 +39,11 @@ function writeSettings(s: Record<string, unknown>) {
 
 function startWorker() {
   worker = new Worker(path.join(__dirname, 'engineWorker.js'), { workerData: { cacheDir: path.join(app.getPath('userData'), 'index-cache') } });
-  worker.on('message', (msg: { id?: number; result?: unknown; error?: string; event?: unknown }) => {
+  worker.on('message', (msg: { id?: number; result?: unknown; error?: string; event?: unknown; sshPids?: number[] }) => {
+    if (msg.sshPids) {
+      sshPids = msg.sshPids;
+      return;
+    }
     if (msg.event) {
       win?.webContents.send('engine-event', msg.event);
       return;
@@ -51,10 +56,25 @@ function startWorker() {
   });
   worker.on('error', (e) => console.error('engine worker error', e));
   worker.on('exit', (code) => {
+    killSsh();
     for (const p of pending.values()) p.reject(new Error('engine stopped'));
     pending.clear();
     if (code !== 0 && !quitting) startWorker();
   });
+}
+
+/** Ssh processes of remote files that the engine runs (see core/remote.ts). */
+let sshPids: number[] = [];
+
+/** No ssh is left running when the app quits or the engine stops. */
+function killSsh() {
+  for (const pid of sshPids.splice(0)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
 }
 
 function callEngine(method: string, args: unknown[]): Promise<unknown> {
@@ -239,6 +259,8 @@ function buildMenu() {
         { label: 'Open and merge files…', accelerator: 'CmdOrCtrl+Shift+O', click: () => send('open-merge') },
         { label: 'Open last…', click: () => send('open-last') },
         { label: 'Open time range…', click: () => send('open-range') },
+        { label: 'Open remote file…', click: () => send('open-remote') },
+        { label: 'Multi-host tail…', click: () => send('multi-host') },
         {
           label: 'Open recent',
           submenu: recentItems.length ? recentItems : [{ label: 'No recent files', enabled: false }],
@@ -397,7 +419,8 @@ const isFile = (a: string) => {
 };
 /** ultralogviewer [files] [-] [--since -1h] [--until 2024-05-01T11:00] [--last 30m] */
 const parseArgv = (argv: string[]) => parseCommandLine(argv.slice(app.isPackaged ? 1 : 2), Date.now(), isFile);
-const filesFromArgv = (argv: string[]) => parseArgv(argv).files.filter(isFile).map((a) => path.resolve(a));
+// ssh://user@host/path and user@host:/path open remote files
+const filesFromArgv = (argv: string[]) => parseArgv(argv).files.filter((a) => isFile(a) || looksRemote(a)).map((a) => (isFile(a) ? path.resolve(a) : a));
 const cli = parseArgv(process.argv);
 /** Standard input copied into a temp file that is tailed like any log ("ultralogviewer -"). */
 let stdin: Promise<StdinCapture | null> = Promise.resolve(null);
@@ -505,8 +528,10 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 
+  app.on('will-quit', killSsh);
   app.on('before-quit', () => {
     quitting = true;
+    void callEngine('closeRemote', []).catch(() => undefined);
     void stdin.then((s) => s?.dispose());
     void worker?.terminate();
   });

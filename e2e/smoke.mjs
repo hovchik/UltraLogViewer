@@ -17,13 +17,21 @@ const other = path.join(tmp, 'other.log');
 fs.writeFileSync(other, '2024-05-01 08:00:00,500 [main] ERROR com.acme.Other - from the other file\n');
 const launchLog = path.join(tmp, 'launched.txt');
 const notes = path.join(tmp, 'notes.txt');
+// remote files: a fake ssh serves hosts/<host>/ as each host's "/" (test/fixtures/fake-ssh)
+const hosts = path.join(tmp, 'hosts');
+const hostFile = (host, p, text) => {
+  const f = path.join(hosts, host, p);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, text);
+  return f;
+};
 fs.writeFileSync(notes, 'Release notes for build 4.2\n\nInstalled packages:\n  - libfoo 1.2\nWARNING: disk almost full\nerror: could not copy config.ini\ndone\n');
 
 const app = await electron.launch({
   // a fresh profile so settings from earlier runs (theme, wrap, dock…) don't leak in
   args: ['--no-sandbox', `--user-data-dir=${path.join(tmp, 'profile')}`, '.', log],
   // source links write what they would open to launchLog instead of starting an editor
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', ULV_SOURCE_LAUNCH_LOG: launchLog },
+  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', ULV_SOURCE_LAUNCH_LOG: launchLog, ULV_SSH: path.resolve('test/fixtures/fake-ssh/ssh'), FAKE_SSH_ROOT: hosts },
 });
 const win = await app.firstWindow();
 win.on('pageerror', (e) => console.error('pageerror:', e));
@@ -727,6 +735,65 @@ await step('AI: extract fields offline, consent preview (Cancel sends nothing), 
   } finally {
     server.close();
   }
+});
+
+await step('opens a remote file over ssh: browse, follow, multi-host merge, and no ssh left after closing', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['File › Open remote file…', 'File › Multi-host tail…']) assert.ok(labels.includes(l), `menu item ${l}`);
+  const ts = (s) => `2024-05-01 10:00:${String(s).padStart(2, '0')},000 [main] INFO  com.acme.Remote -`;
+  const remoteLog = hostFile('web1', 'var/log/app.log', `${ts(0)} remote one\n${ts(1)} remote two\n`);
+  const tabsBefore = await win.locator('.tab').count();
+
+  // File › Open remote file… from the palette, then Browse and a double-click on the file
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+P');
+  await win.waitForSelector('.modal .palette .pal-item');
+  await win.keyboard.type('open remote');
+  await win.waitForFunction(() => document.querySelectorAll('.palette .pal-item').length === 1);
+  await win.keyboard.press('Enter');
+  await win.waitForSelector('.modal .remote-dialog');
+  await win.fill('.remote-dialog input', 'ssh://web1/var/log/');
+  await win.locator('.remote-dialog .btn', { hasText: 'Browse' }).click();
+  await win.waitForSelector('.remote-list .item:has-text("app.log")', { timeout: 15000 });
+  await shot('30-remote-browse');
+  await win.locator('.remote-list .item', { hasText: 'app.log' }).dblclick();
+  await win.waitForFunction(() => document.querySelector('.tab.active .name')?.textContent === 'web1:/var/log/app.log', null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r:has-text("remote two")', { timeout: 20000 });
+  await win.waitForFunction(() => /remote · live/.test(document.querySelector('#sidebar .sources')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.match(await win.locator('#sidebar .sources .badge.remote').innerText(), /remote/);
+  fs.appendFileSync(remoteLog, `${ts(2)} remote three appended\n`);
+  await win.waitForSelector('.grid-rows .r:has-text("remote three appended")', { timeout: 20000 });
+  const recent = await win.evaluate(() => window.ulv.getSettings().then((s) => s.recent[0]));
+  assert.equal(recent, 'ssh://web1/var/log/app.log');
+
+  // multi-host tail: a pattern on one host and a file on another, merged by time and labelled by host
+  hostFile('a1', 'var/log/app/x.log', `${ts(10)} a1 first\n${ts(14)} a1 third\n`);
+  hostFile('a1', 'var/log/app/y.log', `${ts(15)} a1 fourth\n`);
+  hostFile('b2', 'var/log/app/x.log', `${ts(12)} b2 second\n`);
+  await win.evaluate(() => window.__ulv.openPaths(['ssh://a1/var/log/app/*.log', 'b2:/var/log/app/x.log'], true));
+  await win.waitForFunction(() => document.querySelector('.tab.active .name')?.textContent === 'a1:/var/log/app/x.log + 2 more', null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r:has-text("a1 fourth")', { timeout: 20000 });
+  const order = await win.evaluate(() => [...document.querySelectorAll('.grid-rows .r')].map((r) => r.querySelector('.c[data-col="message"]')?.textContent?.trim()));
+  assert.deepEqual(order.slice(0, 4), ['a1 first', 'b2 second', 'a1 third', 'a1 fourth']);
+  const sources = await win.evaluate(() => [...document.querySelectorAll('.grid-rows .r .c[data-col="__source"]')].map((c) => c.textContent?.trim()));
+  assert.equal(sources[1], 'b2:/var/log/app/x.log');
+  await win.waitForFunction(() => (document.querySelector('#sidebar .sources')?.textContent?.match(/remote · live/g) ?? []).length === 3, null, { timeout: 20000 });
+  await shot('31-multi-host');
+
+  const pids = () => fs.readdirSync(path.join(hosts, 'pids')).map(Number);
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return !/\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf-8'));
+    } catch {
+      return false;
+    }
+  };
+  assert.equal(pids().filter(alive).length, 4);
+  while ((await win.locator('.tab').count()) > tabsBefore) await win.locator('.tab.active .x').click();
+  const deadline = Date.now() + 10000;
+  while (pids().some(alive) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(pids().filter(alive), [], 'ssh processes left after closing the tabs');
 });
 
 await step('dark theme renders', async () => {

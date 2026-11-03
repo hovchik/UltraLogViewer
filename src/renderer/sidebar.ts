@@ -4,6 +4,7 @@ import { fieldPicks, packageTree } from '../core/fieldPicks';
 import { SHORTCUT_TIP, shortcutReference, TIME_SHORTCUTS, validatePattern } from '../core/query';
 import { ColumnDef, FilterRule, Level, LEVEL_NAMES } from '../core/types';
 import { formatTime } from '../core/timestamp';
+import { remoteStatusText } from '../core/remoteTarget';
 import type { Bookmark, HighlightRule, Settings, Tab } from './state';
 import { uid } from './state';
 import { ask, fmtBytes, fmtNum, h, toast } from './util';
@@ -63,7 +64,9 @@ export class Sidebar {
         h(
           'div',
           { class: 'src', title: s.path },
-          h('div', { class: 'name' }, s.displayName),
+          h('div', { class: 'name' }, s.displayName, s.remote ? h('span', { class: 'badge remote', title: s.remote.url }, 'remote') : null),
+          // a remote file: the state of its connection (copying, live, reconnecting…)
+          ...(s.remote ? [h('div', { class: `muted remote-state ${s.remote.state}` }, remoteStatusText(s.remote))] : []),
           ...(s.indexing ? [h('div', { class: 'muted' }, `Indexing ${Math.round((s.progress ?? 0) * 100)}%`), h('div', { class: 'prog' }, h('i', { style: `width:${((s.progress ?? 0) * 100).toFixed(1)}%` }))] : []),
           h('div', { class: 'muted' }, `${fmtBytes(s.size)} · ${fmtNum(s.lines)} lines · ${fmtNum(s.entries)} entries`),
           h('div', { class: 'muted' }, [s.formatLabel || s.format, s.encoding, ...extra].join(' · ')),

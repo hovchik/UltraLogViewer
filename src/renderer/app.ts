@@ -21,6 +21,8 @@ import { describeWindow, OpenWindow, parseDuration, parsePoint, windowEmpty } fr
 import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, HighlightRule, Settings, Tab, uid, viewSettings } from './state';
 import { baseName, dirName, parseWorkspace, resolvePath, resolveWorkspace, serializeWorkspace } from './workspace';
 import { $, ask, contextMenu, debounce, esc, fmtBytes, fmtNum, h, MenuItem, modal, toast } from './util';
+import { localCopies, multiHostDialog, normalizeRemote, remoteDialog, sourceUrl } from './remote';
+import { looksRemote, remoteDisplay, tryParseRemote } from '../core/remoteTarget';
 
 let settings: Settings = {};
 const tabs: Tab[] = [];
@@ -212,7 +214,12 @@ function placeholderInfo(id: number, title: string): DocInfo {
 }
 
 /** Opens one tab over the given files (several = merged timeline) without activating it. */
-async function openTab(g: string[], opts: { format?: string; encoding?: string; window?: OpenWindow | null } = {}): Promise<Tab> {
+async function openTab(g: string[], opts: { format?: string; encoding?: string; window?: OpenWindow | null } = {}): Promise<Tab | null> {
+  // remote files: their local copies (remote.ts); null when none could be opened
+  const local = await localCopies(g, settings);
+  if (!local) return null;
+  const first = tryParseRemote(g[0]);
+  g = local;
   const window = windowEmpty(opts.window) ? null : opts.window!;
   const id = await engine.open(g, {
     customFormats: settings.customFormats,
@@ -221,7 +228,8 @@ async function openTab(g: string[], opts: { format?: string; encoding?: string; 
     cache: settings.indexCache !== false,
     window,
   });
-  const title = g.length === 1 ? g[0].split(/[\\/]/).pop()! : `${g[0].split(/[\\/]/).pop()} + ${g.length - 1}`;
+  const name = first ? remoteDisplay(first) : g[0].split(/[\\/]/).pop()!; // (until the engine names it)
+  const title = g.length === 1 ? name : `${name} + ${g.length - 1}`;
   const tab: Tab = {
     id,
     paths: g,
@@ -246,8 +254,12 @@ async function openTab(g: string[], opts: { format?: string; encoding?: string; 
 /** `window`: open only this time window of the files. */
 async function openPaths(paths: string[], merge: boolean, window: OpenWindow | null = null) {
   if (!paths.length) return;
+  paths = paths.map(normalizeRemote); // remote files as ssh:// URLs, the form kept in recent files
   const groups = merge ? [paths] : paths.map((p) => [p]);
-  for (const g of groups) activate(await openTab(g, { window }));
+  for (const g of groups) {
+    const tab = await openTab(g, { window });
+    if (tab) activate(tab);
+  }
   void ulv().addRecent(paths);
   settings.recent = [...paths, ...(settings.recent ?? []).filter((p) => !paths.includes(p))].slice(0, 15);
 }
@@ -1725,7 +1737,7 @@ async function saveWorkspace(file?: string | null) {
   if (!file) return;
   const input = tabs.map((t) => {
     return {
-      paths: t.paths,
+      paths: t.paths.map((p) => sourceUrl(t.info.sources, p)), // remote files as ssh:// URLs
       formatId: t.formatId,
       encoding: t.encoding ?? 'auto',
       filter: t.filter,
@@ -1761,7 +1773,7 @@ async function openWorkspace(file?: string | null) {
   const dir = dirName(file);
   const candidates = [...new Set(ws.tabs.flatMap((t) => [...t.paths, ...t.relPaths.map((r) => resolvePath(dir, r))]))];
   const found = await ulv().filesExist(candidates);
-  const existing = new Set(candidates.filter((_, i) => found[i]));
+  const existing = new Set(candidates.filter((p, i) => found[i] || looksRemote(p))); // ssh:// URLs connect again
   const r = resolveWorkspace(ws, file, (p) => existing.has(p));
   settings.highlights = r.highlights.map((x) => ({ ...x }));
   saveSettings();
@@ -1769,6 +1781,7 @@ async function openWorkspace(file?: string | null) {
   const opened: Tab[] = [];
   for (const wt of r.tabs) {
     const tab = await openTab(wt.paths, { format: wt.format, encoding: wt.encoding });
+    if (!tab) continue;
     tab.filter = { ...defaultFilter(), ...wt.filter, bookmarks: [], clearedBefore: null };
     tab.search.pattern = wt.search;
     tab.pending = { bookmarks: wt.bookmarks, pins: wt.pins, columns: { extraColumns: wt.extraColumns, columnOrder: wt.columnOrder, hiddenColumns: wt.hiddenColumns } };
@@ -1826,7 +1839,7 @@ async function openCommandPalette() {
 async function exportView() {
   const t = active;
   if (!t) return;
-  const file = await ulv().saveDialog(`${t.info.title.replace(/\.(log|txt|gz)$/i, '')}-view.log`);
+  const file = await ulv().saveDialog(`${t.info.title.replace(/\.(log|txt|gz)$/i, '').replace(/[\\/:]/g, '_')}-view.log`);
   if (!file) return;
   const fmt = /\.csv$/i.test(file) ? 'csv' : /\.jsonl?$/i.test(file) ? 'jsonl' : 'text';
   try {
@@ -2362,6 +2375,14 @@ window.ulv.onMenu((cmd, ...args) => {
       return void openPaths((args[0] as string[]) ?? [], false, (args[1] as OpenWindow) ?? null);
     case 'open-last':
       return void openWindowDialog(false);
+    case 'open-remote':
+      return void remoteDialog(settings, (settings.recent ?? []).find(looksRemote) ?? '').then((url) => void (url && openPaths([url], false)));
+    case 'multi-host':
+      return void multiHostDialog(settings).then((urls) => {
+        if (!urls) return;
+        saveSettings();
+        void openPaths(urls, true);
+      });
     case 'open-range':
       return void openWindowDialog(true);
     case 'toggle-index-cache':
