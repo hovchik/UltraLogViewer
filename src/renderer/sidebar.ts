@@ -5,7 +5,7 @@ import { ColumnDef, FilterRule, Level, LEVEL_NAMES } from '../core/types';
 import { formatTime } from '../core/timestamp';
 import type { Bookmark, HighlightRule, Settings, Tab } from './state';
 import { uid } from './state';
-import { ask, fmtNum, h, toast } from './util';
+import { ask, fmtBytes, fmtNum, h, toast } from './util';
 
 export interface SidebarHost {
   settings(): Settings;
@@ -42,8 +42,30 @@ export class Sidebar {
       return;
     }
     this.fieldsEl = this.fieldsSection(tab);
-    this.el.append(this.levelsSection(tab), this.fieldsEl, this.filtersSection(tab), this.timeSection(tab), this.highlightsSection(), this.bookmarksSection(tab));
+    this.el.append(this.levelsSection(tab), this.fieldsEl, this.filtersSection(tab), this.timeSection(tab), this.highlightsSection(), this.bookmarksSection(tab), this.sourcesSection(tab));
     this.el.scrollTop = scroll;
+  }
+
+  // --------------------------------------------------------------- sources
+
+  /** The files of the tab; while a merge is indexed, each file shows its own progress. */
+  private sourcesSection(tab: Tab) {
+    const sources = tab.info.sources;
+    const sec = h('div', { class: 'sec sources' }, h('h3', {}, sources.length > 1 ? 'Sources (merged by time)' : 'Source'));
+    for (const s of sources) {
+      const extra = [s.compression || (s.compressed ? 'gzip' : ''), s.live ? '' : 'static', s.partial ? 'partial' : '', s.cacheState ? 'cached index' : ''].filter(Boolean);
+      sec.append(
+        h(
+          'div',
+          { class: 'src', title: s.path },
+          h('div', { class: 'name' }, s.displayName),
+          ...(s.indexing ? [h('div', { class: 'muted' }, `Indexing ${Math.round((s.progress ?? 0) * 100)}%`), h('div', { class: 'prog' }, h('i', { style: `width:${((s.progress ?? 0) * 100).toFixed(1)}%` }))] : []),
+          h('div', { class: 'muted' }, `${fmtBytes(s.size)} · ${fmtNum(s.lines)} lines · ${fmtNum(s.entries)} entries`),
+          h('div', { class: 'muted' }, [s.formatLabel || s.format, s.encoding, ...extra].join(' · ')),
+        ),
+      );
+    }
+    return sec;
   }
 
   // ---------------------------------------------------------------- levels

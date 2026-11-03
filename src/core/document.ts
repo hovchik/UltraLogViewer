@@ -97,6 +97,36 @@ export class LogDocument {
     return src;
   }
 
+  /**
+   * Opens several files at once (a merged view): they are indexed in parallel, each reporting its own progress
+   * (FileSource.progress). A file that fails is left out; the failures are returned.
+   */
+  async addSources(paths: string[], opts: (path: string) => SourceOptions, onProgress?: Progress): Promise<{ path: string; error: Error }[]> {
+    const added = paths.map((p, i) => new FileSource(this.sources.length + i, p, opts(p)));
+    this.sources.push(...added);
+    this.indexing = true;
+    const failed: { path: string; error: Error }[] = [];
+    try {
+      const report = () => {
+        this.progress = added.reduce((n, s) => n + (s.indexing ? s.progress : 1), 0) / added.length;
+        onProgress?.('index', this.progress);
+      };
+      const results = await Promise.allSettled(added.map((s) => s.open(report)));
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') return;
+        failed.push({ path: added[i].path, error: r.reason instanceof Error ? r.reason : new Error(String(r.reason)) });
+        added[i].close();
+        this.sources.splice(this.sources.indexOf(added[i]), 1);
+      });
+      this.sources.forEach((s, i) => (s.id = i));
+    } finally {
+      this.indexing = false;
+    }
+    this.rebuildBase();
+    if (this.filter) await this.applyFilter(this.filter, false, onProgress);
+    return failed;
+  }
+
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.queue.then(fn, fn);
     this.queue = run.catch(() => undefined);

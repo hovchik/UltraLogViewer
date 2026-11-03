@@ -27,6 +27,11 @@ export class ScanPool {
 
   constructor(private script: string, readonly size = Math.max(1, Math.min(8, os.availableParallelism?.() ?? os.cpus().length))) {}
 
+  /** Chunks queued or being scanned, over all files. */
+  get pending() {
+    return this.jobs.size;
+  }
+
   /** False once a worker failed to start or crashed; callers then scan on their own thread. */
   get usable() {
     return !this.broken;

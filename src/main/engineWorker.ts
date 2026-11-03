@@ -1,9 +1,9 @@
 // Worker-thread host for the Engine: request/response over postMessage, plus pushed events.
-import { parentPort } from 'node:worker_threads';
+import { parentPort, workerData } from 'node:worker_threads';
 import { Engine } from './engine';
 
 const port = parentPort!;
-const engine = new Engine((event) => port.postMessage({ event }));
+const engine = new Engine((event) => port.postMessage({ event }), (workerData as { cacheDir?: string } | null)?.cacheDir);
 
 port.on('message', async (msg: { id: number; method: string; args: unknown[] }) => {
   try {

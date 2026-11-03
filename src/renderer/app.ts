@@ -10,6 +10,7 @@ import { openPalette } from './palette';
 import { PatternsView } from './patternsView';
 import { Sidebar } from './sidebar';
 import type { TimeMode } from '../core/timestamp';
+import { describeWindow, OpenWindow, parseDuration, parsePoint, windowEmpty } from '../core/timeWindow';
 import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, HighlightRule, Settings, Tab, uid, viewSettings } from './state';
 import { baseName, dirName, parseWorkspace, resolvePath, resolveWorkspace, serializeWorkspace } from './workspace';
 import { $, ask, contextMenu, debounce, esc, fmtBytes, fmtNum, h, MenuItem, modal, toast } from './util';
@@ -134,8 +135,15 @@ function placeholderInfo(id: number, title: string): DocInfo {
 }
 
 /** Opens one tab over the given files (several = merged timeline) without activating it. */
-async function openTab(g: string[], opts: { format?: string; encoding?: string } = {}): Promise<Tab> {
-  const id = await engine.open(g, { customFormats: settings.customFormats, format: opts.format || undefined, encoding: (opts.encoding || undefined) as 'auto' | undefined });
+async function openTab(g: string[], opts: { format?: string; encoding?: string; window?: OpenWindow | null } = {}): Promise<Tab> {
+  const window = windowEmpty(opts.window) ? null : opts.window!;
+  const id = await engine.open(g, {
+    customFormats: settings.customFormats,
+    format: opts.format || undefined,
+    encoding: (opts.encoding || undefined) as 'auto' | undefined,
+    cache: settings.indexCache !== false,
+    window,
+  });
   const title = g.length === 1 ? g[0].split(/[\\/]/).pop()! : `${g[0].split(/[\\/]/).pop()} + ${g.length - 1}`;
   const tab: Tab = {
     id,
@@ -150,6 +158,7 @@ async function openTab(g: string[], opts: { format?: string; encoding?: string }
     follow: false,
     formatId: opts.format ?? '',
     encoding: opts.encoding && opts.encoding !== 'auto' ? opts.encoding : undefined,
+    window,
     expanded: new Set(),
     unfolded: new Set(),
   };
@@ -157,10 +166,11 @@ async function openTab(g: string[], opts: { format?: string; encoding?: string }
   return tab;
 }
 
-async function openPaths(paths: string[], merge: boolean) {
+/** `window`: open only this time window of the files. */
+async function openPaths(paths: string[], merge: boolean, window: OpenWindow | null = null) {
   if (!paths.length) return;
   const groups = merge ? [paths] : paths.map((p) => [p]);
-  for (const g of groups) activate(await openTab(g));
+  for (const g of groups) activate(await openTab(g, { window }));
   void ulv().addRecent(paths);
   settings.recent = [...paths, ...(settings.recent ?? []).filter((p) => !paths.includes(p))].slice(0, 15);
 }
@@ -177,6 +187,7 @@ function activate(tab: Tab | null) {
   renderPill();
   syncMenu();
   renderBanner();
+  renderPartialBanner();
   ac.close();
   if (tab) {
     void refreshOverview(tab);
@@ -283,12 +294,14 @@ window.ulv.onEvent((raw) => {
   if (!$('#sidebar').contains(document.activeElement)) sidebar.render(tab);
   renderStatus();
   renderTabs();
+  renderPartialBanner();
 });
 
 async function onDocReady(tab: Tab) {
   tab.progress = undefined;
   if (tab.pending) await applyPending(tab);
-  if (tab.paths.length === 1) {
+  // Line numbers of a partial view are not the file's: its bookmarks are neither restored nor saved.
+  if (tab.paths.length === 1 && !isPartial(tab)) {
     const saved = settings.bookmarks?.[tab.paths[0]] ?? [];
     for (const s of saved) {
       const key = await engine.keyForLine(tab.id, 0, s.line);
@@ -543,6 +556,59 @@ function renderBanner() {
 }
 
 $('#ctx-exit').onclick = () => active && void setContextMode(active, false);
+
+// ------------------------------------------------------------ partial view
+
+const isPartial = (t: Tab) => t.info.sources.some((s) => s.partial);
+
+/** Text of the partial-view banner, e.g. "Showing 2024-05-01 10:00–11:00 · partial file". */
+function partialText(t: Tab): string {
+  const src = t.info.sources.filter((s) => s.partial);
+  if (!src.length) return '';
+  const i = t.info;
+  const range = i.timeMin != null && i.timeMax != null ? describeWindow(i.timeMin, i.timeMax) : `no entries in ${describeWindow(src[0].windowFrom, src[0].windowTo)}`;
+  return `Showing ${range} · ${i.sources.length > 1 ? 'partial files' : 'partial file'}${src.every((s) => s.live) ? ' · following new lines' : ''}`;
+}
+
+function renderPartialBanner() {
+  const t = active;
+  const on = !!t && !t.info.indexing && isPartial(t);
+  const el = $('#partial-banner');
+  el.classList.toggle('hidden', !on);
+  if (on) $('.msg', el).textContent = partialText(t!);
+}
+
+$('#partial-whole').onclick = () => {
+  const t = active;
+  if (!t) return;
+  t.window = null;
+  void reopen(t, t.encoding ?? 'auto');
+};
+
+/** "Open last…" (a duration back from the newest entry) or "Open time range…" (from / until). */
+async function openWindowDialog(range: boolean) {
+  const paths = await ulv().openDialog(true);
+  if (!paths.length) return;
+  let window: OpenWindow | null;
+  if (!range) {
+    const d = await ask('Open last', { value: '1h', hint: 'Show the newest entries of this long (e.g. 15m, 1h, 2d).' });
+    if (d === null) return;
+    const last = parseDuration(d);
+    if (last === null) return toast('Enter a duration such as 15m, 1h or 2d', true);
+    window = { last };
+  } else {
+    const now = Date.now();
+    const from = await ask('Open time range', { value: '-1h', hint: 'From: 2024-05-01 10:00, 10:30 or -2h (empty = the start).' });
+    if (from === null) return;
+    const until = await ask('Open time range', { value: '', placeholder: '2024-05-01 11:00', hint: 'Until (empty = the end, and keep following new lines).' });
+    if (until === null) return;
+    const since = from.trim() ? parsePoint(from, now) : null;
+    const to = until.trim() ? parsePoint(until, now) : null;
+    if ((from.trim() && since === null) || (until.trim() && to === null)) return toast('Enter a time such as 2024-05-01 10:00, 10:30 or -2h', true);
+    window = { since, until: to };
+  }
+  await openPaths(paths, paths.length > 1, windowEmpty(window) ? null : window);
+}
 
 // -------------------------------------------------------------- field stats
 
@@ -999,7 +1065,7 @@ const firstLine = (s: string) => {
 };
 
 function persistBookmarks(tab: Tab) {
-  if (tab.paths.length !== 1) return;
+  if (tab.paths.length !== 1 || isPartial(tab)) return;
   settings.bookmarks ??= {};
   const list = [...tab.bookmarks.values()].map((b) => ({ line: b.line, note: b.note }));
   if (list.length) settings.bookmarks[tab.paths[0]] = list;
@@ -1614,6 +1680,8 @@ async function reopen(t: Tab, encoding: string) {
     encoding: encoding as 'auto',
     format: t.formatId || undefined,
     customFormats: settings.customFormats,
+    cache: settings.indexCache !== false,
+    window: t.window ?? null,
   });
   t.info = placeholderInfo(t.id, t.info.title);
   t.search.result = null;
@@ -1694,6 +1762,18 @@ window.ulv.onMenu((cmd, ...args) => {
       return void openDialog(true);
     case 'open-path':
       return void openPaths([String(args[0])], false);
+    case 'open-window':
+      return void openPaths((args[0] as string[]) ?? [], false, (args[1] as OpenWindow) ?? null);
+    case 'open-last':
+      return void openWindowDialog(false);
+    case 'open-range':
+      return void openWindowDialog(true);
+    case 'toggle-index-cache':
+      settings.indexCache = settings.indexCache === false;
+      saveSettings();
+      return toast(settings.indexCache ? 'Indexes of big files are saved, so they reopen instantly' : 'Index cache turned off');
+    case 'clear-index-cache':
+      return void engine.clearIndexCache().then((n) => toast(`Index cache cleared (${fmtBytes(n)})`));
     case 'export':
       return void exportView();
     case 'close-tab':
@@ -1828,8 +1908,15 @@ async function init() {
   applyLayout();
   renderFormatOptions();
   activate(null);
+  const startup = await ulv().startupOptions();
+  if (startup.errors.length) toast(startup.errors.join('\n'), true);
   const files = await ulv().startupFiles();
-  if (files.length) await openPaths(files, false);
+  if (files.length) await openPaths(files, false, startup.window);
+  // Piped input is the last startup file: follow it like a tail.
+  if (startup.stdin && active && files.length) {
+    active.follow = true;
+    renderToolbar();
+  }
   // test hook: lets automated UI tests drive the app without native dialogs
   (window as unknown as Record<string, unknown>).__ulv = { openPaths, saveWorkspace, openWorkspace, state: () => ({ tabs, active }) };
 }

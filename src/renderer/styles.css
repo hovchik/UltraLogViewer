@@ -175,6 +175,14 @@ select.btn { padding: 0 6px; max-width: 170px; }
 .ctx-banner { display: flex; align-items: center; gap: 10px; padding: 4px 10px; border-bottom: 1px solid var(--border); background: var(--accent-bg); color: var(--fg); font-size: 12px; flex: none; }
 .ctx-banner .msg { flex: 1; }
 .ctx-banner .mini { border-color: var(--accent); color: var(--accent); }
+/* partial-file (time window) banner */
+.ctx-banner.partial { background: var(--warn-bg); }
+.ctx-banner.partial .mini { border-color: var(--warn); color: var(--fg); }
+/* sources list: one file per row, with its own progress while a merge is indexed */
+.sec .src { padding: 3px 0; font-size: 12px; line-height: 1.45; }
+.sec .src .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sec .src .prog { height: 3px; background: var(--border); border-radius: 2px; margin: 2px 0; }
+.sec .src .prog i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 
 /* context menu */
 .ctxmenu { position: fixed; z-index: 70; min-width: 190px; max-width: 420px; padding: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22); font: 12.5px/1.3 var(--sans); color: var(--fg); user-select: none; }
