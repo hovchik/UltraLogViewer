@@ -14,7 +14,7 @@ import { FileSource, SourceOptions } from './fileSource';
 import { Merge, SetMember, SourceSet } from './sourceSet';
 import { GrowU32, GrowU8, lowerBound } from './grow';
 import { compileQueryWithTimeRange } from './query';
-import { compileTextTest, RowsOp, RowsResult } from './entryScan';
+import { compileTextTest, RowsOp, RowsResult, TextFilter } from './entryScan';
 import { RepeatMode } from './patterns';
 import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, PatternsResult, PatternStat, RowData, rowKey, SearchResult, TextPattern } from './types';
 
@@ -337,7 +337,12 @@ export class LogDocument implements SetMember {
     const cleared = spec.clearedBefore ?? null;
     const bookmarks = spec.bookmarksOnly ? new Set(spec.bookmarks ?? []) : null;
     // The query's top-level since:/until: join the time range, which the index answers without reading entries.
-    const q = spec.query?.trim() ? compileQueryWithTimeRange(spec.query, !!spec.queryCaseSensitive) : { predicate: null, from: null, to: null };
+    // Relative times resolve once, here: the batches (and workers) get the same moment, so a scan that takes a while
+    // never moves the window under it.
+    const queryNow = Date.now();
+    const q = spec.query?.trim() ? compileQueryWithTimeRange(spec.query, !!spec.queryCaseSensitive, queryNow) : { predicate: null, from: null, to: null };
+    // A query that is only top-level since:/until: is answered by the time index alone, without reading entries.
+    const textFilter: TextFilter = { rules: spec.rules, query: q.predicate ? spec.query : undefined, queryCaseSensitive: spec.queryCaseSensitive, queryNow };
     const from = Math.max(spec.timeFrom ?? -Infinity, q.from ?? -Infinity);
     const to = Math.min(spec.timeTo ?? Infinity, q.to ?? Infinity);
     const hasTime = spec.timeFrom != null || spec.timeTo != null || q.from !== null || q.to !== null;
@@ -367,7 +372,7 @@ export class LogDocument implements SetMember {
         }
         return true;
       };
-      const text = bookmarks ? null : compileTextTest(spec, src.format);
+      const text = bookmarks ? null : compileTextTest(textFilter, src.format);
       if (!text) {
         for (let e = start; e < src.entryCount; e++) v.push(cheap(e) ? 1 : 0);
         done += src.entryCount - start;
@@ -377,7 +382,7 @@ export class LogDocument implements SetMember {
       await src.scanEntries(
         start,
         src.entryCount,
-        { kind: 'filter', filter: { rules: spec.rules, query: spec.query, queryCaseSensitive: spec.queryCaseSensitive } },
+        { kind: 'filter', filter: textFilter },
         needsCheap ? cheap : null,
         (_first, result) => {
           if (gen !== this.filterGen) return false;
