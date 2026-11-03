@@ -25,6 +25,8 @@ public sealed class WorkspaceTab
     public FilterSpec Filter { get; set; } = new();
     public WorkspaceSearch Search { get; set; } = new();
     public List<WorkspaceBookmark> Bookmarks { get; set; } = [];
+    /// <summary>Pinned entries (Note unused).</summary>
+    public List<WorkspaceBookmark> Pins { get; set; } = [];
     public List<string> ExtraColumns { get; set; } = [];
     public List<string> ColumnOrder { get; set; } = [];
     public List<string> HiddenColumns { get; set; } = [];
@@ -70,7 +72,7 @@ public static class Workspace
         var list = new List<string>();
         for (var i = 0; i < tab.Paths.Length; i++)
         {
-            if (exists(tab.Paths[i])) list.Add(tab.Paths[i]);
+            if (exists(tab.Paths[i]) || RemoteTarget.LooksRemote(tab.Paths[i])) list.Add(tab.Paths[i]); // ssh:// URLs connect again
             else if (i < tab.RelPaths.Length && System.IO.Path.GetFullPath(System.IO.Path.Combine(dir, tab.RelPaths[i])) is var rel && exists(rel)) list.Add(rel);
         }
         return list.ToArray();

@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { Bzip2Decoder, isBzip2 } from './bzip2';
+import { remoteDisplayName } from './remote';
 
 export const MEMBER_SEPARATOR = '::';
 
@@ -32,6 +33,8 @@ export const memberPath = (archive: string, member: string) => archive + MEMBER_
 
 /** Display name of a path: the file name, or the member's file name for a zip member. */
 export function displayName(p: string): string {
+  const remote = remoteDisplayName(p); // the local copy of a remote file: "host:path"
+  if (remote) return remote;
   const m = splitMember(p);
   const name = m ? m.member : p;
   return name.split(/[\\/]/).pop() ?? name;

@@ -1,5 +1,7 @@
 // Shared types between the engine (worker thread) and the renderer.
 
+import type { RemoteStatus } from './remoteTarget';
+
 /** Severity levels, ordered so that a higher number is more severe. */
 export enum Level {
   None = 0,
@@ -97,6 +99,8 @@ export interface SourceInfo {
   windowTo?: number | null;
   /** 'hit' or 'grown' when the index came from the index cache. */
   cacheState?: string;
+  /** For the local copy of a remote file: where it comes from and the state of the connection. */
+  remote?: RemoteStatus;
 }
 
 export interface DocInfo {

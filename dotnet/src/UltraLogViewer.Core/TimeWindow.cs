@@ -80,7 +80,9 @@ public static partial class TimeWindow
 
 /// <summary>
 /// The command line: files to open, "-" for standard input, and an optional window:
-/// <c>--since -1h</c>, <c>--since 2024-05-01T10:00 --until 2024-05-01T11:00</c>, <c>--last 30m</c>.
+/// <c>--since -1h</c>, <c>--since 2024-05-01T10:00 --until 2024-05-01T11:00</c>, <c>--last 30m</c>; what to show:
+/// <c>--filter "level:error"</c>, <c>--search "timeout"</c>, <c>--goto 10:30</c>, <c>--levels error,warn</c>,
+/// <c>--format json</c>, <c>--merge</c>, <c>--new-tab</c>; or an <c>ultralogviewer://open?…</c> link. See <see cref="OpenRequest"/>.
 /// </summary>
 public sealed class CommandLine
 {
@@ -88,6 +90,16 @@ public sealed class CommandLine
     public bool Stdin { get; private set; }
     public OpenWindow? Window { get; private set; }
     public List<string> Errors { get; } = [];
+    public string? Filter { get; private set; }
+    public string? Search { get; private set; }
+    /// <summary>Raw "go to" text (parsed by <see cref="OpenRequest.ParseGoTo"/>).</summary>
+    public string? GoTo { get; private set; }
+    public string? Levels { get; private set; }
+    public string? Format { get; private set; }
+    public bool Merge { get; private set; }
+    public bool NewTab { get; private set; }
+    /// <summary>A deep link given as an argument (how Windows and Linux hand a clicked link to the app).</summary>
+    public string? Url { get; private set; }
 
     public static CommandLine Parse(IReadOnlyList<string> args, long nowMs)
     {
@@ -103,7 +115,16 @@ public sealed class CommandLine
                 c.Errors.Add($"{name} needs a value");
                 return null;
             }
+            bool Opt(string name) => a == name || a.StartsWith(name + "=", StringComparison.Ordinal);
             if (a == "-") c.Stdin = true;
+            else if (a.StartsWith(OpenRequest.Scheme + ":", StringComparison.OrdinalIgnoreCase)) c.Url = a;
+            else if (Opt("--filter")) c.Filter = Value("--filter") ?? c.Filter;
+            else if (Opt("--search")) c.Search = Value("--search") ?? c.Search;
+            else if (Opt("--goto")) c.GoTo = Value("--goto") ?? c.GoTo;
+            else if (Opt("--levels")) c.Levels = Value("--levels") ?? c.Levels;
+            else if (Opt("--format")) c.Format = Value("--format") ?? c.Format;
+            else if (a == "--merge") c.Merge = true;
+            else if (a == "--new-tab") c.NewTab = true;
             else if (a == "--since" || a.StartsWith("--since=", StringComparison.Ordinal))
             {
                 var v = Value("--since");

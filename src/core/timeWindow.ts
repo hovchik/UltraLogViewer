@@ -75,11 +75,23 @@ export interface CommandLine {
   stdin: boolean;
   window: OpenWindow | null;
   errors: string[];
+  filter?: string;
+  search?: string;
+  /** Raw "go to" text (parsed by parseGoTo in openRequest.ts). */
+  goto?: string;
+  levels?: string;
+  format?: string;
+  merge?: boolean;
+  newTab?: boolean;
+  /** A deep link given as an argument (how Windows and Linux hand a clicked link to the app). */
+  url?: string;
 }
 
 /**
  * The command line: files to open, "-" for standard input, and an optional window:
- * `--since -1h`, `--since 2024-05-01T10:00 --until 2024-05-01T11:00`, `--last 30m`. Other switches are ignored.
+ * `--since -1h`, `--since 2024-05-01T10:00 --until 2024-05-01T11:00`, `--last 30m`; what to show: `--filter "level:error"`,
+ * `--search "timeout"`, `--goto 10:30`, `--levels error,warn`, `--format json`, `--merge`, `--new-tab`; or an
+ * `ultralogviewer://open?…` link (see openRequest.ts). Other switches are ignored.
  */
 export function parseCommandLine(args: string[], now: number, isFile: (p: string) => boolean = () => false): CommandLine {
   const out: CommandLine = { files: [], stdin: false, window: null, errors: [] };
@@ -93,7 +105,19 @@ export function parseCommandLine(args: string[], now: number, isFile: (p: string
       return null;
     };
     const opt = (name: string) => a === name || a.startsWith(name + '=');
+    const text = (name: string, set: (v: string) => void) => {
+      const v = value(name);
+      if (v !== null) set(v);
+    };
     if (a === '-') out.stdin = true;
+    else if (/^ultralogviewer:/i.test(a)) out.url = a;
+    else if (opt('--filter')) text('--filter', (v) => (out.filter = v));
+    else if (opt('--search')) text('--search', (v) => (out.search = v));
+    else if (opt('--goto')) text('--goto', (v) => (out.goto = v));
+    else if (opt('--levels')) text('--levels', (v) => (out.levels = v));
+    else if (opt('--format')) text('--format', (v) => (out.format = v));
+    else if (a === '--merge') out.merge = true;
+    else if (a === '--new-tab') out.newTab = true;
     else if (opt('--since')) {
       const v = value('--since');
       if (v === null) continue;

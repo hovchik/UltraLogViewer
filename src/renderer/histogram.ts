@@ -1,18 +1,37 @@
-// Timeline strip: entry counts over time stacked by severity. Click jumps, drag sets a time filter,
-// hover shows a tooltip, the splitter below resizes it.
+// Timeline strip: entry counts over time stacked by severity, or by any field ("Group by": the top values in their own
+// colours plus "other", with a legend that filters). Click jumps, drag sets a time filter, hover shows a tooltip, the
+// splitter below resizes it. The time span on screen in the grid is a band.
 
+import { isDottedName } from '../core/fieldPicks';
+import type { GroupedHistogram } from '../core/histogramGroups';
 import type { Histogram } from '../core/types';
 import { formatDuration, formatTime, histogramTip } from '../core/timestamp';
+import { h } from './util';
 
 export interface HistogramHost {
   jumpToTime(t: number): void;
   setTimeRange(from: number, to: number): void;
   /** The splitter was dragged; `height` is already clamped to 40..240. */
   onResize(height: number): void;
+  /** The "Group by" button was clicked (the host shows the choices next to it). */
+  onGroupMenu(anchor: HTMLElement): void;
+  /** A legend item was clicked: filter to that value. */
+  onLegendClick(index: number): void;
 }
 
 export const HIST_MIN = 40;
 export const HIST_MAX = 240;
+/** Height of the bar above the chart with the "Group by" button, the legend and the time span. */
+const BAR_H = 17;
+/** Colours of the top values of a grouped timeline; "other" is grey. */
+export const GROUP_COLORS = ['#4c6ef5', '#f59f00', '#12b886', '#e64980', '#7950f2', '#1098ad', '#fa5252', '#82c91e'];
+export const OTHER_COLOR = '#868e96';
+/** Legend labels: dotted names (loggers, classes) by their last part, unless two of them would then read the same. */
+export function legendLabels(keys: string[]): string[] {
+  const short = keys.map((k) => (isDottedName(k) ? k.slice(k.lastIndexOf('.') + 1) : k));
+  return short.map((s, i) => (short.indexOf(s) !== short.lastIndexOf(s) ? keys[i] : s));
+}
+const colorOf = (g: GroupedHistogram, i: number) => (i === g.keys.length - 1 && g.keys[i] === '(other)' ? OTHER_COLOR : GROUP_COLORS[i % GROUP_COLORS.length]);
 
 export class HistogramView {
   private canvas: HTMLCanvasElement;
@@ -21,10 +40,22 @@ export class HistogramView {
   private drag: { x0: number; x1: number } | null = null;
   private viewport: [number, number] | null = null;
   private hover = -1;
+  private groups: GroupedHistogram | null = null;
+  private groupLabel = 'Level';
+  private legendClickable = true;
+  private groupBtn: HTMLButtonElement;
+  private legend: HTMLElement;
+  private span: HTMLElement;
 
   constructor(private el: HTMLElement, private host: HistogramHost, splitter?: HTMLElement | null) {
     this.canvas = el.querySelector('canvas')!;
     this.tip = el.querySelector('.hist-tip')!;
+    this.groupBtn = h('button', { class: 'hist-group', title: 'Stack the timeline by level, logger, thread, file or any parsed field' });
+    this.groupBtn.addEventListener('click', () => this.host.onGroupMenu(this.groupBtn));
+    this.legend = h('div', { class: 'hist-legend' });
+    this.span = h('span', { class: 'hist-span', style: 'margin-left:auto' });
+    el.append(h('div', { class: 'hist-bar' }, this.groupBtn, this.legend, this.span));
+    this.renderBar();
     this.canvas.addEventListener('mousemove', (e) => this.onHover(e));
     this.canvas.addEventListener('mouseleave', () => {
       this.tip.style.display = 'none';
@@ -63,7 +94,49 @@ export class HistogramView {
   set(data: Histogram | null) {
     this.data = data;
     this.hover = -1;
+    if (this.groups && (!data || this.groups.start !== data.start || this.groups.bucketMs !== data.bucketMs || this.groups.counts.length !== data.counts.length)) this.groups = null;
+    this.renderBar();
     this.draw();
+  }
+
+  /**
+   * Stacks the bars by a field instead of by level (null: by level). `label` names the field on the button; the legend
+   * filters on click when `clickable`. Groups that do not fit the current buckets are ignored until they are replaced.
+   */
+  setGroups(g: GroupedHistogram | null, label: string, clickable = true) {
+    const d = this.data;
+    this.groups = g && d && g.start === d.start && g.bucketMs === d.bucketMs && g.counts.length === d.counts.length ? g : null;
+    this.groupLabel = label;
+    this.legendClickable = clickable;
+    this.renderBar();
+    this.draw();
+  }
+
+  /** The grouping shown (null: by level), for tests. */
+  get shownGroups(): GroupedHistogram | null {
+    return this.groups;
+  }
+
+  private renderBar() {
+    this.groupBtn.textContent = `Group by: ${this.groupLabel} ▾`;
+    this.legend.innerHTML = '';
+    const g = this.groups;
+    if (g) {
+      const labels = legendLabels(g.keys);
+      g.keys.forEach((k, i) => {
+        const item = h(
+          'span',
+          { class: this.legendClickable ? 'lg click' : 'lg', title: this.legendClickable ? `${k}: ${g.totals[i].toLocaleString('en-US')} entries. Click to show only these` : k },
+          h('i', { class: 'sw', style: `background:${colorOf(g, i)}` }),
+          h('span', { class: 'k' }, labels[i]),
+          h('span', { class: 'n' }, g.totals[i].toLocaleString('en-US')),
+        );
+        if (this.legendClickable) item.addEventListener('click', () => this.host.onLegendClick(i));
+        this.legend.append(item);
+      });
+    }
+    const d = this.data;
+    this.span.textContent = d && d.counts.length ? `${formatTime(d.start)} – ${formatTime(d.start + d.counts.length * d.bucketMs)} · ${formatDuration(d.bucketMs)} / bar` : '';
   }
 
   /** Time span currently on screen in the grid, drawn as a marker. */
@@ -99,34 +172,45 @@ export class HistogramView {
     }
     const max = Math.max(1, ...d.counts.map((b) => b[0] + b[1] + b[2]));
     const bw = w / d.counts.length;
-    const top = 14;
-    const ph = hgt - top - 2;
-    const colors = [css.getPropertyValue('--accent'), css.getPropertyValue('--warn'), css.getPropertyValue('--error')];
-    d.counts.forEach((b, i) => {
-      let y = hgt - 1;
-      for (let k = 0; k < 3; k++) {
-        if (!b[k]) continue;
-        const bh = Math.max(1, (b[k] / max) * ph);
-        ctx.globalAlpha = k === 0 ? 0.45 : 0.9;
-        ctx.fillStyle = colors[k];
-        ctx.fillRect(i * bw, y - bh, Math.max(1, bw - (bw > 3 ? 1 : 0)), bh);
-        y -= bh;
-      }
-    });
+    const top = BAR_H + 1;
+    const ph = hgt - top - 1;
+    const barW = Math.max(1, bw - (bw > 3 ? 1 : 0));
+    const g = this.groups;
+    if (g) {
+      // stacked by field value, the most common value at the bottom
+      g.counts.forEach((b, i) => {
+        let y = hgt - 1;
+        for (let k = 0; k < b.length; k++) {
+          if (!b[k]) continue;
+          const bh = Math.max(1, (b[k] / max) * ph);
+          ctx.globalAlpha = 0.85;
+          ctx.fillStyle = colorOf(g, k);
+          ctx.fillRect(i * bw, y - bh, barW, bh);
+          y -= bh;
+        }
+      });
+    } else {
+      const colors = [css.getPropertyValue('--accent'), css.getPropertyValue('--warn'), css.getPropertyValue('--error')];
+      d.counts.forEach((b, i) => {
+        let y = hgt - 1;
+        for (let k = 0; k < 3; k++) {
+          if (!b[k]) continue;
+          const bh = Math.max(1, (b[k] / max) * ph);
+          ctx.globalAlpha = k === 0 ? 0.45 : 0.9;
+          ctx.fillStyle = colors[k];
+          ctx.fillRect(i * bw, y - bh, barW, bh);
+          y -= bh;
+        }
+      });
+    }
     ctx.globalAlpha = 1;
-    ctx.fillStyle = css.getPropertyValue('--fg-3');
-    ctx.font = '10px system-ui';
-    ctx.fillText(formatTime(d.start), 4, 10);
-    const endLabel = formatTime(d.start + d.counts.length * d.bucketMs);
-    ctx.fillText(endLabel, w - ctx.measureText(endLabel).width - 4, 10);
-    const mid = `${formatDuration(d.bucketMs)} / bar`;
-    ctx.fillText(mid, w / 2 - ctx.measureText(mid).width / 2, 10);
     const span = d.counts.length * d.bucketMs;
     if (this.viewport) {
+      // the time span on screen in the grid: a subtle band
       const x0 = ((this.viewport[0] - d.start) / span) * w;
       const x1 = ((this.viewport[1] - d.start) / span) * w;
-      ctx.fillStyle = css.getPropertyValue('--fg-2');
-      ctx.globalAlpha = 0.15;
+      ctx.fillStyle = css.getPropertyValue('--accent');
+      ctx.globalAlpha = 0.14;
       ctx.fillRect(x0, top, Math.max(2, x1 - x0), ph);
       // dim what is outside the viewport window when it covers less than 90% of the width
       if (x1 - x0 < w * 0.9) {
@@ -141,14 +225,14 @@ export class HistogramView {
     if (this.hover >= 0 && this.hover < d.counts.length) {
       ctx.fillStyle = css.getPropertyValue('--fg');
       ctx.globalAlpha = 0.12;
-      ctx.fillRect(this.hover * bw, 0, Math.max(1, bw), hgt);
+      ctx.fillRect(this.hover * bw, top, Math.max(1, bw), hgt - top);
       ctx.globalAlpha = 1;
     }
     if (this.drag) {
       ctx.fillStyle = css.getPropertyValue('--accent');
       ctx.globalAlpha = 0.25;
       const a = Math.min(this.drag.x0, this.drag.x1);
-      ctx.fillRect(a, 0, Math.abs(this.drag.x1 - this.drag.x0), hgt);
+      ctx.fillRect(a, top, Math.abs(this.drag.x1 - this.drag.x0), hgt - top);
       ctx.globalAlpha = 1;
     }
   }
@@ -161,7 +245,15 @@ export class HistogramView {
     const b = d.counts[i];
     const t0 = d.start + i * d.bucketMs;
     this.tip.style.display = 'block';
-    this.tip.textContent = histogramTip(t0, t0 + d.bucketMs, b);
+    const g = this.groups;
+    let tip = histogramTip(t0, t0 + d.bucketMs, b);
+    if (g) {
+      // span and count, then the bucket's largest groups
+      const top = g.counts[i].map((n, k) => [n, k]).filter(([n]) => n > 0).sort((x, y) => y[0] - x[0]).slice(0, 5);
+      tip = [...tip.split('\n').slice(0, 2), ...top.map(([n, k]) => `${g.keys[k]}: ${n.toLocaleString('en-US')}`)].join('\n');
+    }
+    this.tip.textContent = tip;
+    this.tip.style.top = `${BAR_H + 2}px`;
     if (i !== this.hover) {
       this.hover = i;
       this.draw();

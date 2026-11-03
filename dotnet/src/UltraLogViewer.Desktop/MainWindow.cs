@@ -28,7 +28,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private readonly List<DocumentTab> _tabs = [];
     private DocumentTab? _active;
 
-    private readonly LogGrid _grid;
+    /// <summary>The grid of the active tab: the main one, or the right pane's when that has focus (see MainWindow.Split.cs).</summary>
+    private LogGrid _grid;
     private readonly HistogramView _hist;
     private readonly Sidebar _sidebar;
     private readonly TextBox _detail;
@@ -110,7 +111,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             }
         };
 
-        _quick = new TextBox { Watermark = "Quick filter (Ctrl+L): words, -x, level:error, status>=500, since:-1h", MinWidth = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
+        _quick = new TextBox { Watermark = "Quick filter (Ctrl+L): words, -x, level:error, status>=500, since:-1h, ? ask AI", MinWidth = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
         _quickDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
         _quickDebounce.Tick += (_, _) =>
         {
@@ -208,6 +209,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Open and _merge…", () => Run(() => PickAndOpen(true)), new KeyGesture(Key.O, KeyModifiers.Control | KeyModifiers.Shift)),
                         Item("Open _last…", () => Run(() => PickAndOpenWindow(false))),
                         Item("Open time _range…", () => Run(() => PickAndOpenWindow(true))),
+                        Item("Open re_mote file…", () => Run(PickRemoteFile)),
+                        Item("Multi-_host tail…", () => Run(PickMultiHost)),
+                        Item("_Listen…", () => Run(ListenAsync)),
+                        WindowsOnly(Item("Open _Windows event log…", () => Run(OpenEventLogAsync))),
                         _recentMenu,
                         new Separator(),
                         Item("Open _workspace…", () => Run(PickOpenWorkspace)),
@@ -217,7 +222,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Reopen with _encoding…", () => Run(ChooseEncoding)),
                         Check("Use index cache", () => _settings.IndexCache, ToggleIndexCache),
                         Item("Clear index cache", ClearIndexCache),
+                        LocalApiMenu(),
                         new Separator(),
+                        Item("_Duplicate tab", () => Run(() => DuplicateTab(_active)), new KeyGesture(Key.T, KeyModifiers.Control | KeyModifiers.Shift)),
                         Item("_Close tab", () => CloseTab(_active), new KeyGesture(Key.W, KeyModifiers.Control)),
                         Item("E_xit", Close),
                     },
@@ -231,10 +238,13 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("_Find", FocusSearch, new KeyGesture(Key.F, KeyModifiers.Control)),
                         Item("_Quick filter", FocusQuick, new KeyGesture(Key.L, KeyModifiers.Control)),
                         Item("_Go to line…", () => Run(GoToLine), new KeyGesture(Key.G, KeyModifiers.Control)),
+                        Item("Copy lin_k to this view", () => Run(CopyViewLink)),
                         new Separator(),
                         Item("Toggle _bookmark", ToggleBookmarkAtFocus, new KeyGesture(Key.B, KeyModifiers.Control)),
                         Item("Next bookmark", () => NextBookmark(1), new KeyGesture(Key.F2)),
                         Item("Previous bookmark", () => NextBookmark(-1), new KeyGesture(Key.F2, KeyModifiers.Shift)),
+                        Item("_Pin row", TogglePinAtFocus, new KeyGesture(Key.P, KeyModifiers.Control)),
+                        Item("Editor and source roots…", () => Run(EditSourceSettings)),
                         Item("Clear all filters", ClearFilters),
                         Item("C_lear (hide everything so far)", ClearSoFar, new KeyGesture(Key.K, KeyModifiers.Control)),
                     },
@@ -258,12 +268,16 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         TimeMenu(new MenuItem { Header = "Time _column" }),
                         new Separator(),
                         Check("_Patterns", () => _patternsShown, TogglePatterns, new KeyGesture(Key.A, KeyModifiers.Control | KeyModifiers.Shift)),
+                        Check("S_QL", () => _sqlShown, ToggleSql, new KeyGesture(Key.Q, KeyModifiers.Control | KeyModifiers.Shift)),
                         GroupMenu(),
                         Check("Fold framework frames", () => _settings.FoldFrames, () => { SetDisplay(() => _settings.FoldFrames = !_settings.FoldFrames); UpdateDetail(); }),
                         new Separator(),
+                        Item("Split _right", () => { if (OwnerOf(_active) is { Split: null } t) Run(() => SplitRight(t)); }, new KeyGesture(Key.OemPipe, KeyModifiers.Control)),
+                        Item("Close split", () => CloseSplit(OwnerOf(_active))),
                         Item("Next tab", () => CycleTab(1), new KeyGesture(Key.Tab, KeyModifiers.Control)),
                     },
                 },
+                AiMenu(),
                 new MenuItem
                 {
                     Header = "_Help",
@@ -290,7 +304,14 @@ public sealed partial class MainWindow : Window, ILogGridHost
         };
 
         // ------------------------------------------------------------ center
-        _grid = new LogGrid(this);
+        var mainHost = new PaneHost(this);
+        var splitHost = new PaneHost(this);
+        _grid = _gridMain = mainHost.Grid = new LogGrid(mainHost);
+        _gridSplit = splitHost.Grid = new LogGrid(splitHost);
+        _headMain = new PaneHeader(right: false);
+        _headSplit = new PaneHeader(right: true);
+        _splitPane = new DockPanel { IsVisible = false, Children = { _headSplit.Root, _gridSplit } };
+        DockPanel.SetDock(_headSplit.Root, Dock.Top);
         _hist = new HistogramView { IsVisible = _settings.ShowHistogram };
         _hist.Jump += t =>
         {
@@ -334,7 +355,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Content = new StackPanel { Children = { _detailFields, _detail } },
+            Content = new StackPanel { Children = { AiPane(), _detailFields, _detailLinks, _detail } },
         };
         var detailPane = new DockPanel { Children = { detailHead, detailBody } };
         DockPanel.SetDock(detailHead, Dock.Top);
@@ -354,9 +375,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _center.Children.Add(_histSplitter);
         _center.Children.Add(_work);
         _partialBanner = BuildPartialBanner();
-        var gridHost = new DockPanel { Children = { _partialBanner, _contextBanner, BuildGridArea() } };
+        var pinStrip = BuildPinStrip();
+        var gridHost = new DockPanel { Children = { _partialBanner, _contextBanner, pinStrip, BuildPanes(BuildGridArea()) } };
         DockPanel.SetDock(_partialBanner, Dock.Top);
         DockPanel.SetDock(_contextBanner, Dock.Top);
+        DockPanel.SetDock(pinStrip, Dock.Top);
         _work.Children.Add(gridHost);
         _work.Children.Add(_detailSplitter);
         _work.Children.Add(detailPane);
@@ -384,7 +407,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             Child = _toastText,
         };
         _toastText.Foreground = Brushes.White;
-        var centerHost = new Panel { Children = { _center, _welcome, _toast } };
+        var centerHost = new Panel { Children = { BuildSqlDock(_center), _welcome, _toast } };
 
         _sidebar = new Sidebar(this);
         var sideBorder = new Border
@@ -453,10 +476,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
         });
 #pragma warning restore CS0618
         AddHandler(KeyDownEvent, OnGlobalKey, RoutingStrategies.Tunnel);
-        _grid.PropertyChanged += (_, e) =>
-        {
-            if (e.Property == BoundsProperty) Run(RefreshOverviewAsync);
-        };
+        foreach (var g in new[] { _gridMain, _gridSplit })
+            g.PropertyChanged += (_, e) =>
+            {
+                if (e.Property == BoundsProperty && g == _grid) Run(RefreshOverviewAsync);
+            };
         _hist.PropertyChanged += (_, e) =>
         {
             if (e.Property == BoundsProperty && ((Rect)e.OldValue!).Width != ((Rect)e.NewValue!).Width) Run(RefreshHistogramAsync);
@@ -478,6 +502,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
             RebuildTabStrip();
             _sidebar.Render(_active);
         };
+        WireTimeline();
+        WireDetailLinks();
+        WireAutoHighlight();
         Activate(null);
     }
 
@@ -492,7 +519,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
     public DocumentTab? ActiveTab => _active;
     internal LogGrid LogView => _grid;
 
-    public void HighlightsChanged() => _grid.RefreshPatterns();
+    public void HighlightsChanged()
+    {
+        foreach (var g in VisibleGrids) g.RefreshPatterns();
+    }
 
     // ================================================================ helpers
 
@@ -613,15 +643,19 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     // ================================================================= tabs
 
-    private void Activate(DocumentTab? tab)
+    /// <param name="focusGrid">False when the user already put the focus somewhere in the pane (a click, a quick filter box).</param>
+    private void Activate(DocumentTab? tab, bool focusGrid = true)
     {
         _active = tab;
-        _grid.SetTab(tab);
+        ShowPanes(tab);
+        // The highlight belongs to the selection of the pane that had the focus: the other pane must not keep it.
+        _gridMain.AutoHighlight = _gridSplit.AutoHighlight = null;
         _welcome.IsVisible = tab is null;
         _center.IsVisible = tab is not null;
         if (tab is null) RebuildRecent();
         UpdateTitle();
         if (_patternsShown) ShowPatterns(false);
+        SqlTabChanged();
         _search.Text = tab?.SearchPattern.Text ?? "";
         if (tab is not null)
         {
@@ -635,6 +669,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         RebuildTabStrip();
         _sidebar.Render(tab);
         _hist.Data = null;
+        _hist.Groups = null;
+        RenderPins();
         UpdateContextBanner();
         UpdatePartialBanner();
         UpdateSearchCount();
@@ -642,7 +678,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         UpdateStatus();
         if (tab is { Ready: true }) Run(() => RefreshDerivedAsync(tab));
         if (tab is { Ready: true, FieldStats: null }) ScheduleFieldStats(tab);
-        _grid.Focus();
+        if (focusGrid) _grid.Focus();
     }
 
     private void RebuildTabStrip()
@@ -658,20 +694,32 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 CloseTab(t);
             };
             var label = new TextBlock { Text = t.Title, VerticalAlignment = VerticalAlignment.Center, MaxWidth = 260, TextTrimming = TextTrimming.CharacterEllipsis };
+            var on = t == OwnerOf(_active);
             var cell = new Border
             {
                 Padding = new Thickness(12, 4, 4, 4),
                 BorderThickness = new Thickness(0, 0, 0, 2),
-                BorderBrush = t == _active ? p.Accent : Brushes.Transparent,
-                Background = t == _active ? p.Bg : Brushes.Transparent,
+                BorderBrush = on ? p.Accent : Brushes.Transparent,
+                Background = on ? p.Bg : Brushes.Transparent,
                 Cursor = new Cursor(StandardCursorType.Hand),
                 Child = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { label, close } },
             };
-            ToolTip.SetTip(cell, string.Join("\n", t.Paths));
+            ToolTip.SetTip(cell, string.Join("\n", t.Paths.Select(SourceUrl)));
+            cell.ContextMenu = new ContextMenu
+            {
+                Items =
+                {
+                    Item("Duplicate tab", () => Run(() => DuplicateTab(t)), new KeyGesture(Key.T, KeyModifiers.Control | KeyModifiers.Shift)),
+                    t.Split is null ? Item("Split right", () => Run(() => SplitRight(t)), new KeyGesture(Key.OemPipe, KeyModifiers.Control)) : Item("Close split", () => CloseSplit(t)),
+                    new Separator(),
+                    Item("Close tab", () => CloseTab(t)),
+                },
+            };
             cell.PointerPressed += (_, e) =>
             {
-                if (e.GetCurrentPoint(cell).Properties.IsMiddleButtonPressed) CloseTab(t);
-                else if (t != _active) Activate(t);
+                var props = e.GetCurrentPoint(cell).Properties;
+                if (props.IsMiddleButtonPressed) CloseTab(t);
+                else if (props.IsLeftButtonPressed && t != OwnerOf(_active)) Activate(t);
             };
             _tabStrip.Children.Add(cell);
         }
@@ -679,19 +727,31 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void CycleTab(int dir)
     {
-        if (_tabs.Count < 2 || _active is null) return;
-        var i = (_tabs.IndexOf(_active) + dir + _tabs.Count) % _tabs.Count;
+        if (_tabs.Count < 2 || OwnerOf(_active) is not { } cur) return;
+        var i = (_tabs.IndexOf(cur) + dir + _tabs.Count) % _tabs.Count;
         Activate(_tabs[i]);
     }
 
+    /// <summary>Closes a tab (with its split pane); for a split pane, closes the split.</summary>
     public void CloseTab(DocumentTab? tab)
     {
         if (tab is null) return;
+        if (tab.SplitOf is { } owner)
+        {
+            CancelAi(tab);
+            CloseSplit(owner);
+            return;
+        }
         var i = _tabs.IndexOf(tab);
         if (i < 0) return;
         _tabs.RemoveAt(i);
+        CancelAi(tab);
+        if (tab.Split is { } split) CancelAi(split);
+        var wasActive = OwnerOf(_active) == tab;
+        DropSql(tab);
         tab.Dispose();
-        if (_active == tab) Activate(_tabs.Count == 0 ? null : _tabs[Math.Min(i, _tabs.Count - 1)]);
+        PruneRemote();
+        if (wasActive) Activate(_tabs.Count == 0 ? null : _tabs[Math.Min(i, _tabs.Count - 1)]);
         else RebuildTabStrip();
     }
 
@@ -712,7 +772,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
     /// <param name="window">Open only this time window of the files (null: everything).</param>
     public async Task OpenPaths(string[] paths, bool merge, OpenWindow? window = null)
     {
-        paths = paths.Select(Path.GetFullPath).ToArray();
+        // remote files as ssh:// URLs, the form kept in recent files
+        paths = paths.Select(p => RemoteTarget.LooksRemote(p) ? RemoteTarget.Parse(p)?.Url ?? p : Path.GetFullPath(p)).ToArray();
         _settings.AddRecent(paths);
         _settings.Save();
         if (window is { IsEmpty: true }) window = null;
@@ -723,7 +784,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         foreach (var p in paths)
         {
-            var existing = window is null ? _tabs.FirstOrDefault(t => t.Paths.Length == 1 && t.Window is null && string.Equals(t.Paths[0], p, StringComparison.Ordinal)) : null;
+            var key = RemoteTarget.Parse(p) is { } remote ? RemoteFile.LocalPathFor(remote, RemoteOptions.CacheDir) : p; // a remote file's local copy
+            var existing = window is null ? _tabs.FirstOrDefault(t => t.Paths.Length == 1 && t.Window is null && string.Equals(t.Paths[0], key, StringComparison.Ordinal)) : null;
             if (existing is not null)
             {
                 Activate(existing);
@@ -735,6 +797,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private async Task<DocumentTab?> OpenTab(string[] paths, string encoding, DocumentTab? replacing, Action<DocumentTab>? init = null)
     {
+        if (await LocalCopiesAsync(paths) is not { } local) return null; // remote files: their local copies (MainWindow.Remote.cs)
+        paths = local;
         var doc = new LogDocument(paths.Length == 1 ? Path.GetFileName(paths[0]) : "Merged");
         var tab = new DocumentTab(paths, doc) { Encoding = encoding, BusyLabel = "Indexing", BusyProgress = 0, Window = replacing?.Window };
         init?.Invoke(tab);
@@ -742,12 +806,14 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             tab.Filter = replacing.Filter.Clone();
             tab.FormatId = replacing.FormatId;
+            (tab.Capture, replacing.Capture) = (replacing.Capture, null); // a receiver keeps running in the reopened tab
             var i = _tabs.IndexOf(replacing);
             _tabs[i] = tab;
             replacing.Dispose();
         }
         else _tabs.Add(tab);
         Activate(tab);
+        RemoteOpened();
         try
         {
             // A zip opens as its text members, merged; all files of a merge are indexed in parallel.
@@ -773,7 +839,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.BusyProgress = null;
         tab.BusyLabel = "";
         tab.Info = doc.Info();
-        if (!tab.IsPartial) RestoreBookmarks(tab); // line numbers of a partial view are not the file's
+        if (!tab.IsPartial)
+        {
+            // line numbers of a partial view are not the file's
+            RestoreBookmarks(tab);
+            RestorePins(tab);
+        }
         if (_active == tab) UpdatePartialBanner();
         if (!tab.Filter.IsTrivial || tab.Bookmarks.Count > 0 && tab.Filter.BookmarksOnly) await ApplyFilterAsync(tab);
         if (_active == tab)
@@ -795,6 +866,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private void OnTick()
     {
         _tickCount++;
+        TickRemote();
         var tab = _active;
         if (tab is not null && tab.BusyProgress is not null)
         {
@@ -813,9 +885,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab is { Ready: true, BusyProgress: null, StaleViews: true } && !_refreshing.Contains(tab) && DateTime.UtcNow - _lastHeavyRefresh > TimeSpan.FromSeconds(1.5))
             Run(() => RefreshDerivedAsync(tab));
         if (_tickCount % 2 == 0)
-            foreach (var t in _tabs.ToList())
-                if (t.Ready && t.BusyProgress is null && !_refreshing.Contains(t) && t.Info.Sources.Any(s => s.Live))
-                    _ = TailAsync(t);
+        {
+            // Tabs over the same files (duplicates, split panes) share them: each file is polled once.
+            var due = AllTabs().Where(t => t.Ready && t.BusyProgress is null && !_refreshing.Contains(t) && t.Info.Sources.Any(s => s.Live)).ToList();
+            foreach (var group in due.GroupBy(t => t.Doc.Set))
+                _ = TailAsync(group.Key, group.ToList());
+        }
     }
 
     /// <summary>
@@ -853,19 +928,42 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab.SearchResult is not null && tab == _active) await RunSearch(false, showCost: false);
     }
 
+    private async Task TailAsync(SourceSet set, List<DocumentTab> tabs)
+    {
+        foreach (var t in tabs) _refreshing.Add(t);
+        try
+        {
+            await set.RefreshAsync();
+            foreach (var t in tabs) await TailAsync(t);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // file temporarily locked or deleted during rotation: try again on the next tick
+        }
+        finally
+        {
+            foreach (var t in tabs) _refreshing.Remove(t);
+        }
+    }
+
+    /// <summary>Takes up what the last poll of the tab's files found.</summary>
     private async Task TailAsync(DocumentTab tab)
     {
         _refreshing.Add(tab);
         try
         {
             var before = tab.Info.ViewCount;
-            if (!await tab.Doc.RefreshAsync() || !_tabs.Contains(tab)) return;
+            if (!await tab.Doc.SyncAsync() || !IsOpen(tab)) return;
             tab.Info = tab.Doc.Info();
             OnRowsAppended(tab, before, tab.Info.ViewCount);
             tab.StaleViews = true;
             UpdateBookmarkRows(tab);
             if (DateTime.UtcNow - tab.StatsTime > TimeSpan.FromSeconds(10)) ScheduleFieldStats(tab);
-            if (tab != _active) return;
+            if (tab != _active)
+            {
+                RefreshInactivePane(tab);
+                return;
+            }
             _grid.Invalidate();
             if (tab.Follow) _grid.ScrollTo(int.MaxValue);
             _sidebar.UpdateCounts(tab);
@@ -895,7 +993,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     {
         if (_active is not { } tab) return;
         var q = _quick.Text ?? "";
-        if (q == tab.Filter.Query) return;
+        if (q == tab.Filter.Query || IsAiQuestion(q)) return; // "? question" goes to the AI on Enter, never in as a filter
         // A bad query is reported and the view keeps the last good filter (level toggles etc. still apply).
         if (Query.ValidateQuery(q, tab.Filter.QueryCaseSensitive) is { } err)
         {
@@ -936,7 +1034,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 return;
             }
         }
-        var focusKey = (_grid.GetCached(tab.Focus) ?? (tab.Info.ViewCount > 0 ? (await Task.Run(() => tab.Doc.GetRows(tab.Focus, 1))).FirstOrDefault() : null))?.Key;
+        var focusKey = (GridOf(tab)?.GetCached(tab.Focus) ?? (tab.Info.ViewCount > 0 ? (await Task.Run(() => tab.Doc.GetRows(tab.Focus, 1))).FirstOrDefault() : null))?.Key;
         if (tab.Doc.IgnoreFilter)
         {
             // A filter change ends "show in context".
@@ -967,7 +1065,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 tab.BusyLabel = "";
             }
         }
-        if (!applied || !_tabs.Contains(tab)) return;
+        if (!applied || !IsOpen(tab)) return;
         tab.ViewEpoch = tab.Doc.ViewEpoch;
         tab.Info = tab.Doc.Info();
         tab.ScanCost = spec.IsTrivial ? "" : ScanCost("Filtered", tab.Info.Total, clock.Elapsed);
@@ -975,7 +1073,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
         var row = focusKey is null ? null : tab.Doc.RowForKey(focusKey);
         tab.Focus = tab.Anchor = row ?? Math.Clamp(tab.Focus, 0, Math.Max(0, tab.Info.ViewCount - 1));
         UpdateBookmarkRows(tab);
-        if (tab != _active) return;
+        if (tab != _active)
+        {
+            RefreshInactivePane(tab);
+            return;
+        }
         _grid.Invalidate();
         _grid.Reveal(tab.Focus, center: true);
         _sidebar.Render(tab);
@@ -1001,8 +1103,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private void FocusQuick()
     {
-        _quick.Focus();
-        _quick.SelectAll();
+        // In a split each pane has its own quick filter.
+        var box = !SplitShown ? _quick : _grid == _gridSplit ? _headSplit.Quick : _headMain.Quick;
+        box.Focus();
+        box.SelectAll();
     }
 
     private async Task RunSearch(bool jump, bool showCost = true)
@@ -1206,6 +1310,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private void UpdateBookmarkRows(DocumentTab tab)
     {
         foreach (var b in tab.Bookmarks.Values) b.Row = tab.Doc.RowForKey(b.Key);
+        UpdatePinRows(tab);
     }
 
     private void SaveBookmarks(DocumentTab tab)
@@ -1416,6 +1521,15 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.FormatId = id ?? "";
         tab.Info = tab.Doc.Info();
         UpdateBookmarkRows(tab);
+        // Duplicates and split panes read the same files, so they were re-parsed too.
+        foreach (var other in AllTabs().Where(t => t != tab && t.Doc.Set == tab.Doc.Set).ToList())
+        {
+            await other.Doc.SyncAsync();
+            other.FormatId = tab.FormatId;
+            other.Info = other.Doc.Info();
+            UpdateBookmarkRows(other);
+            RefreshInactivePane(other);
+        }
         if (tab != _active) return;
         _grid.Invalidate();
         SyncFormatCombo();
@@ -1429,7 +1543,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private async Task ChooseEncoding()
     {
-        if (_active is not { Ready: true } tab) return;
+        if (OwnerOf(_active) is not { Ready: true } tab) return;
         var i = await Dialogs.Choose(this, "Encoding", "Reopen this file with encoding:", Encodings, Math.Max(0, Array.IndexOf(Encodings, tab.Encoding)));
         if (i < 0 || Encodings[i] == tab.Encoding) return;
         await OpenTab(tab.Paths, Encodings[i], tab);
@@ -1512,7 +1626,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         ApplyDock();
         if (!_settings.ShowDetail) ToggleDetail(true, save: false);
         _settings.Save();
-        _grid.LayoutChanged();
+        foreach (var g in VisibleGrids) g.LayoutChanged();
     }
 
     private void SaveHistogramSize()
@@ -1568,6 +1682,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         foreach (var t in _tabs) t.Dispose();
         _tabs.Clear();
         _stdin?.Dispose();
+        RemoteFile.CloseAll();
     }
 
     // ===================================================== overview & timeline
@@ -1588,6 +1703,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab != _active) return;
         _hist.Data = h;
         UpdateViewport();
+        await RefreshGroupsAsync(tab, buckets);
     }
 
     private void UpdateViewport()
@@ -1606,12 +1722,13 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     public void SetColumnWidth(string key, double width) => _settings.ColumnWidths[key] = Math.Round(width);
 
-    public bool IsColumnHidden(string key) => _settings.HiddenColumns.Contains(key);
+    public bool IsColumnHidden(string key) => IsColumnHidden(_active, key);
 
     public void SelectionChanged()
     {
         UpdateDetail();
         UpdateStatus();
+        SyncOtherPane();
         if (_active is { } t && t.Follow && t.Focus < t.Info.ViewCount - 1)
         {
             t.Follow = false;
@@ -1676,16 +1793,20 @@ public sealed partial class MainWindow : Window, ILogGridHost
             case Key.L when ctrl: FocusQuick(); break;
             case Key.G when ctrl && !shift: Run(GoToLine); break;
             case Key.B when ctrl: ToggleBookmarkAtFocus(); break;
-            case Key.T when ctrl: SetFollow(!(_active?.Follow ?? false)); break;
+            case Key.T when ctrl && !shift: SetFollow(!(_active?.Follow ?? false)); break;
             case Key.E when ctrl: Run(Export); break;
             case Key.W when ctrl: CloseTab(_active); break;
             case Key.Tab when ctrl: CycleTab(shift ? -1 : 1); break;
             case Key.H when ctrl && shift: ToggleHistogram(!_settings.ShowHistogram); break;
             case Key.D when ctrl && shift: ToggleDetail(!_settings.ShowDetail); break;
+            case Key.T when ctrl && shift: Run(() => DuplicateTab(_active)); break;
+            case Key.OemPipe when ctrl: ToggleSplit(); break;
             case Key.Z when e.KeyModifiers == KeyModifiers.Alt: SetDisplay(() => _settings.Wrap = !_settings.Wrap); break;
             case Key.F1: OpenPalette(); break;
             case Key.P when ctrl && shift: OpenPalette(); break;
+            case Key.P when ctrl: TogglePinAtFocus(); break;
             case Key.A when ctrl && shift: TogglePatterns(); break;
+            case Key.Q when ctrl && shift: ToggleSql(); break;
             case Key.K when ctrl && !shift: ClearSoFar(); break;
             case Key.S when ctrl && e.KeyModifiers.HasFlag(KeyModifiers.Alt): Run(PickSaveWorkspace); break;
             case Key.F2: NextBookmark(shift ? -1 : 1); break;
@@ -1701,7 +1822,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private async Task<RowData?> RowAsync(DocumentTab tab, int row)
     {
         if (row < 0 || row >= tab.Info.ViewCount) return null;
-        return _grid.GetCached(row) ?? (await Task.Run(() => tab.Doc.GetRows(row, 1))).FirstOrDefault();
+        return GridOf(tab)?.GetCached(row) ?? (await Task.Run(() => tab.Doc.GetRows(row, 1))).FirstOrDefault();
     }
 
     private int _detailGen;
@@ -1711,12 +1832,17 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (!_settings.ShowDetail) return;
         var tab = _active;
         var gen = ++_detailGen;
-        if (UpdatePatternDetail()) return;
+        if (UpdatePatternDetail())
+        {
+            RenderDetailLinks("");
+            return;
+        }
         if (tab is null || tab.Info.ViewCount == 0)
         {
             _detail.Text = "";
             _detailBar.Text = "";
             _detailFields.Children.Clear();
+            RenderDetailLinks("");
             return;
         }
         Run(async () =>
@@ -1734,6 +1860,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             _detailBar.Text = string.Join("   ·   ", parts);
             RenderDetailFields(tab, row);
             _detail.Text = FoldDetail(tab, row, Pretty.Entry(row.Text));
+            RenderDetailLinks(_detail.Text);
         });
     }
 
@@ -1772,6 +1899,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _progress.IsVisible = tab.BusyProgress is not null;
         _progress.Value = tab.BusyProgress ?? 0;
         _statusBusy.Text = tab.BusyProgress is double p ? $"{tab.BusyLabel} {p:P0}" : tab.ScanCost;
+        UpdatePaneHeaders();
     }
 
     /// <summary>"Filtered 8,695,680 entries in 0.82 s": makes the cost of a scan visible after it finishes.</summary>

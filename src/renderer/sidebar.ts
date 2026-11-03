@@ -1,10 +1,13 @@
 // Left panel: levels, field values, filter rules, time range, highlight rules and bookmarks.
 
+import { fieldPicks, packageTree } from '../core/fieldPicks';
 import { SHORTCUT_TIP, shortcutReference, TIME_SHORTCUTS, validatePattern } from '../core/query';
 import { ColumnDef, FilterRule, Level, LEVEL_NAMES } from '../core/types';
 import { formatTime } from '../core/timestamp';
+import { remoteStatusText } from '../core/remoteTarget';
 import type { Bookmark, HighlightRule, Settings, Tab } from './state';
 import { uid } from './state';
+import { captureBox } from './receivers';
 import { ask, fmtBytes, fmtNum, h, toast } from './util';
 
 export interface SidebarHost {
@@ -21,6 +24,10 @@ export interface SidebarHost {
   toggleColumn(key: string): void;
   /** Click on a field value (include) or right-click (exclude). */
   filterByValue(key: string, value: string, mode: 'include' | 'exclude'): void;
+  /** Ctrl+click on a field value: adds it to (or removes it from) the values picked for the field, shown as OR. */
+  togglePick(key: string, value: string): void;
+  /** Click on a package node: shows that package and everything below it (`logger:com.acme.*`); `toggle` adds it to the picks instead. */
+  pickPackage(key: string, prefix: string, toggle: boolean): void;
   rescanFields(): void;
   clearAllFilters(): void;
 }
@@ -52,13 +59,16 @@ export class Sidebar {
   private sourcesSection(tab: Tab) {
     const sources = tab.info.sources;
     const sec = h('div', { class: 'sec sources' }, h('h3', {}, sources.length > 1 ? 'Sources (merged by time)' : 'Source'));
+    if (tab.capture) sec.append(captureBox(tab));
     for (const s of sources) {
       const extra = [s.compression || (s.compressed ? 'gzip' : ''), s.live ? '' : 'static', s.partial ? 'partial' : '', s.cacheState ? 'cached index' : ''].filter(Boolean);
       sec.append(
         h(
           'div',
           { class: 'src', title: s.path },
-          h('div', { class: 'name' }, s.displayName),
+          h('div', { class: 'name' }, s.displayName, s.remote ? h('span', { class: 'badge remote', title: s.remote.url }, 'remote') : null),
+          // a remote file: the state of its connection (copying, live, reconnecting…)
+          ...(s.remote ? [h('div', { class: `muted remote-state ${s.remote.state}` }, remoteStatusText(s.remote))] : []),
           ...(s.indexing ? [h('div', { class: 'muted' }, `Indexing ${Math.round((s.progress ?? 0) * 100)}%`), h('div', { class: 'prog' }, h('i', { style: `width:${((s.progress ?? 0) * 100).toFixed(1)}%` }))] : []),
           h('div', { class: 'muted' }, `${fmtBytes(s.size)} · ${fmtNum(s.lines)} lines · ${fmtNum(s.entries)} entries`),
           h('div', { class: 'muted' }, [s.formatLabel || s.format, s.encoding, ...extra].join(' · ')),
@@ -113,7 +123,7 @@ export class Sidebar {
       sec.append(h('div', { class: 'empty-hint' }, 'Counting values…'));
       return sec;
     }
-    sec.append(h('div', { class: 'empty-hint' }, `Top values in ${fmtNum(st.scanned)} of ${fmtNum(st.viewCount)} entries${st.sampled ? ' (sample)' : ''}`));
+    sec.append(h('div', { class: 'empty-hint' }, `Top values in ${fmtNum(st.scanned)} of ${fmtNum(st.viewCount)} entries${st.sampled ? ' (sample)' : ''}. Ctrl+click picks several`));
     if (!st.fields.length) sec.append(h('div', { class: 'empty-hint' }, 'No parsed fields in this view.'));
     const expanded = (tab.expandedFields ??= new Set());
     for (const f of st.fields) {
@@ -142,20 +152,39 @@ export class Sidebar {
         ),
       );
       if (!open) continue;
+      const picks = fieldPicks(tab.filter.query ?? '', f.key);
       for (const [v, c] of f.top) {
         const pct = f.present ? (c / f.present) * 100 : 0;
+        const picked = picks.values.includes(v);
         sec.append(
           h(
             'div',
             {
-              class: 'fv',
-              title: `${v}\nClick: only this value · Right-click: exclude it`,
-              onclick: () => this.host.filterByValue(f.key, v, 'include'),
+              class: picked ? 'fv picked' : 'fv',
+              title: `${v}\nClick: only this value · Ctrl+click: pick several (OR) · Right-click: exclude it`,
+              onclick: (e: MouseEvent) => (e.ctrlKey || e.metaKey ? this.host.togglePick(f.key, v) : this.host.filterByValue(f.key, v, 'include')),
               oncontextmenu: (e: Event) => { e.preventDefault(); this.host.filterByValue(f.key, v, 'exclude'); },
             },
             h('span', { class: 'v' }, v),
             h('span', { class: 'n' }, fmtNum(c)),
             h('i', { class: 'bar', style: `width:${pct.toFixed(1)}%` }),
+          ),
+        );
+      }
+      // dotted names (loggers, classes) get their packages as nodes
+      for (const [prefix, depth, count] of packageTree(f.top)) {
+        const picked = picks.prefixes.includes(prefix);
+        sec.append(
+          h(
+            'div',
+            {
+              class: picked ? 'fv pkg picked' : 'fv pkg',
+              style: `padding-left:${16 + depth * 12}px`,
+              title: `${prefix}*: this package and everything below it\nClick: show only it (Ctrl+click: add it to the picks)`,
+              onclick: (e: MouseEvent) => this.host.pickPackage(f.key, prefix, e.ctrlKey || e.metaKey),
+            },
+            h('span', { class: 'v' }, `${prefix}*`),
+            h('span', { class: 'n' }, fmtNum(count)),
           ),
         );
       }

@@ -1,9 +1,16 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from 'electron';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
+import type { AiSettings } from '../core/aiClient';
+import { registerAi } from './aiMain';
+import { decodeHandoff, encodeHandoff, HANDOFF_SWITCH, handleArgv, registerOpenRequests, rendererGone, startApiFromSettings, startupRequest, stopApi } from './openMain';
+import { editorTemplate, expandCommand, expandUrl, isUnsafeUrlTemplate, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
+import { registerReceivers, stopAllReceivers } from './receiversMain';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
+import { looksRemote } from '../core/remoteTarget';
 
 let win: BrowserWindow | null = null;
 let worker: Worker;
@@ -34,7 +41,11 @@ function writeSettings(s: Record<string, unknown>) {
 
 function startWorker() {
   worker = new Worker(path.join(__dirname, 'engineWorker.js'), { workerData: { cacheDir: path.join(app.getPath('userData'), 'index-cache') } });
-  worker.on('message', (msg: { id?: number; result?: unknown; error?: string; event?: unknown }) => {
+  worker.on('message', (msg: { id?: number; result?: unknown; error?: string; event?: unknown; sshPids?: number[] }) => {
+    if (msg.sshPids) {
+      sshPids = msg.sshPids;
+      return;
+    }
     if (msg.event) {
       win?.webContents.send('engine-event', msg.event);
       return;
@@ -47,10 +58,36 @@ function startWorker() {
   });
   worker.on('error', (e) => console.error('engine worker error', e));
   worker.on('exit', (code) => {
+    killSsh();
     for (const p of pending.values()) p.reject(new Error('engine stopped'));
     pending.clear();
     if (code !== 0 && !quitting) startWorker();
   });
+}
+
+/** Ssh processes of remote files that the engine runs (see core/remote.ts). */
+let sshPids: number[] = [];
+
+/** No ssh is left running when the app quits or the engine stops. */
+function killSsh() {
+  for (const pid of sshPids.splice(0)) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/**
+ * The program that remote files run comes from the settings main reads, never from the page's arguments: the renderer
+ * shows hostile log text, and its calls should not be able to name a program to start.
+ */
+function engineArgs(method: string, args: unknown[]): unknown[] {
+  const ssh = () => (readSettings().sshProgram as string | undefined) ?? null;
+  if (method === 'openRemote') return [args[0], { ssh: ssh() }];
+  if (method === 'listRemote') return [args[0], ssh()];
+  return args;
 }
 
 function callEngine(method: string, args: unknown[]): Promise<unknown> {
@@ -58,6 +95,81 @@ function callEngine(method: string, args: unknown[]): Promise<unknown> {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     worker.postMessage({ id, method, args });
+  });
+}
+
+// ------------------------------------------------------------ source links
+
+/**
+ * Opens a source location (from an entry's stack trace) in the configured editor: resolved against the source roots,
+ * then launched as a URL (vscode://, idea://…) or as a command line. With ULV_SOURCE_LAUNCH_LOG set (UI tests) the
+ * launch is written to that file instead.
+ */
+/** Custom editor commands the user has allowed, kept by the main process only (not in the renderer's settings). */
+const approvedEditorsFile = () => path.join(app.getPath('userData'), 'approved-editors.json');
+
+async function confirmEditorCommand(template: string): Promise<boolean> {
+  let approved: string[] = [];
+  try {
+    const v = JSON.parse(fs.readFileSync(approvedEditorsFile(), 'utf-8'));
+    if (Array.isArray(v)) approved = v.filter((x): x is string => typeof x === 'string');
+  } catch {
+    // none yet
+  }
+  if (approved.includes(template)) return true;
+  const opts = {
+    type: 'question' as const,
+    buttons: ['Allow', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Open in editor',
+    message: 'Allow this editor command?',
+    detail: `UltraLogViewer will run:\n\n${template}\n\nOnly allow a command you set up yourself under Edit › Editor and source roots….`,
+  };
+  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  if (response !== 0) return false;
+  try {
+    fs.mkdirSync(path.dirname(approvedEditorsFile()), { recursive: true });
+    fs.writeFileSync(approvedEditorsFile(), JSON.stringify([...approved, template]), { mode: 0o600 });
+  } catch {
+    // allowed for this launch only
+  }
+  return true;
+}
+
+async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unknown; command?: unknown }): Promise<{ ok: boolean; file?: string; target?: string; error?: string }> {
+  if (!ref || typeof ref.path !== 'string' || typeof ref.line !== 'number') return { ok: false, error: 'bad location' };
+  const roots = Array.isArray(opts?.roots) ? opts.roots.filter((r): r is string => typeof r === 'string') : [];
+  const file = resolveSource(ref, roots, isFile, path);
+  if (!file) return { ok: false };
+  const template = editorTemplate(typeof opts?.editor === 'string' ? opts.editor : undefined, typeof opts?.command === 'string' ? opts.command : '');
+  if (!template.trim()) return { ok: false, file, error: 'Set the command line of your editor under Edit › Editor and source roots…' };
+  const col = typeof ref.col === 'number' ? ref.col : 0;
+  if (isUnsafeUrlTemplate(template)) return { ok: false, file, error: 'A file:// editor URL would run the file instead of opening it in an editor; set another one under Edit › Editor and source roots…' };
+  const log = process.env.ULV_SOURCE_LAUNCH_LOG;
+  // The editor and its command come from the renderer. A custom one runs only after the user confirms it here, in the
+  // main process, once per distinct command, so page content can never start a program on its own.
+  if (opts?.editor === 'custom' && !log && !(await confirmEditorCommand(template))) return { ok: false, file, error: 'The editor command was not allowed' };
+  if (isUrlTemplate(template)) {
+    const target = expandUrl(template, file, ref.line, col);
+    if (log) fs.appendFileSync(log, target + '\n');
+    else await shell.openExternal(target);
+    return { ok: true, file, target };
+  }
+  const { program, args } = expandCommand(template, file, ref.line, col);
+  if (!program) return { ok: false, file, error: 'The editor command is empty' };
+  const target = [program, ...args].join(' ');
+  if (log) {
+    fs.appendFileSync(log, target + '\n');
+    return { ok: true, file, target };
+  }
+  return new Promise((resolve) => {
+    const child = spawn(program, args, { detached: true, stdio: 'ignore' });
+    child.once('error', (e) => resolve({ ok: false, file, error: `${program}: ${e.message}` }));
+    child.once('spawn', () => {
+      child.unref();
+      resolve({ ok: true, file, target });
+    });
   });
 }
 
@@ -78,11 +190,12 @@ function viewMenuState(s: Record<string, unknown>) {
     gaps: (typeof s.gapMs === 'number' ? s.gapMs : 10000) > 0,
     foldFrames: s.foldFrames !== false,
     indexCache: s.indexCache !== false,
+    localApi: (s.localApi as { enabled?: boolean } | undefined)?.enabled === true,
   };
 }
 let menuState = '';
 /** Per-tab state the menu shows (sent by the renderer when the active tab or its filter changes). */
-let tabMenu: { groupRepeats: string; patterns: boolean } = { groupRepeats: 'off', patterns: false };
+let tabMenu: { groupRepeats: string; patterns: boolean; sql: boolean } = { groupRepeats: 'off', patterns: false, sql: false };
 const menuKey = (s: Record<string, unknown>) => JSON.stringify([viewMenuState(s), tabMenu]);
 
 /** Gives every leaf item an id, so the command palette can list and run it. */
@@ -160,6 +273,10 @@ function buildMenu() {
         { label: 'Open and merge files…', accelerator: 'CmdOrCtrl+Shift+O', click: () => send('open-merge') },
         { label: 'Open last…', click: () => send('open-last') },
         { label: 'Open time range…', click: () => send('open-range') },
+        { label: 'Open remote file…', click: () => send('open-remote') },
+        { label: 'Multi-host tail…', click: () => send('multi-host') },
+        { label: 'Listen…', click: () => send('listen') },
+        ...(process.platform === 'win32' ? [{ label: 'Open Windows event log…', click: () => send('open-eventlog') }] : []),
         {
           label: 'Open recent',
           submenu: recentItems.length ? recentItems : [{ label: 'No recent files', enabled: false }],
@@ -172,6 +289,16 @@ function buildMenu() {
         { label: 'Export view…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
         { label: 'Use index cache', type: 'checkbox', checked: v.indexCache, click: () => send('toggle-index-cache') },
         { label: 'Clear index cache', click: () => send('clear-index-cache') },
+        {
+          label: 'Local API',
+          submenu: [
+            { id: 'local-api', label: 'Enable local HTTP API', type: 'checkbox', checked: v.localApi, click: () => send('toggle-local-api') },
+            { label: 'Copy API example', click: () => send('copy-api-example') },
+            { label: 'New API token', click: () => send('new-api-token') },
+          ],
+        },
+        // The renderer handles Ctrl+Shift+T and Ctrl+\ itself (so they also work with the menu bar hidden).
+        { label: 'Duplicate tab', accelerator: 'CmdOrCtrl+Shift+T', registerAccelerator: false, click: () => send('duplicate-tab') },
         { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => send('close-tab') },
         { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
@@ -186,7 +313,11 @@ function buildMenu() {
         { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: () => send('find') },
         { label: 'Quick filter', accelerator: 'CmdOrCtrl+L', click: () => send('quick-filter') },
         { label: 'Go to line…', accelerator: 'CmdOrCtrl+G', click: () => send('goto-line') },
+        { label: 'Copy link to this view', click: () => send('copy-view-link') },
         { label: 'Toggle bookmark', accelerator: 'CmdOrCtrl+B', click: () => send('toggle-bookmark') },
+        // The renderer handles Ctrl+P itself, like Ctrl+K.
+        { label: 'Pin row', accelerator: 'CmdOrCtrl+P', registerAccelerator: false, click: () => send('toggle-pin') },
+        { label: 'Editor and source roots…', click: () => send('source-settings') },
         { type: 'separator' },
         // The renderer handles Ctrl+K itself (so it also works with the menu bar hidden).
         { label: 'Clear (hide everything so far)', accelerator: 'CmdOrCtrl+K', registerAccelerator: false, click: () => send('clear-view') },
@@ -203,7 +334,10 @@ function buildMenu() {
         { label: 'Details pane', accelerator: 'CmdOrCtrl+Shift+D', click: () => send('toggle-detail') },
         { label: 'Sidebar', accelerator: 'CmdOrCtrl+Shift+B', click: () => send('toggle-sidebar') },
         { label: 'Details on the right', type: 'checkbox', checked: v.dockRight, click: () => send('toggle-dock') },
+        { label: 'Split right', accelerator: 'CmdOrCtrl+\\', registerAccelerator: false, click: () => send('split-right') },
+        { label: 'Close split', click: () => send('close-split') },
         { label: 'Patterns', type: 'checkbox', checked: tabMenu.patterns, accelerator: 'CmdOrCtrl+Shift+A', registerAccelerator: false, click: () => send('toggle-patterns') },
+        { label: 'SQL', type: 'checkbox', checked: tabMenu.sql, accelerator: 'CmdOrCtrl+Shift+Q', registerAccelerator: false, click: () => send('toggle-sql') },
         {
           label: 'Group repeats',
           submenu: groupModes.map(([mode, label]): Electron.MenuItemConstructorOptions => ({ label, type: 'radio', checked: tabMenu.groupRepeats === mode, click: () => send('group-repeats', mode) })),
@@ -234,6 +368,16 @@ function buildMenu() {
         { role: 'resetZoom' },
         { type: 'separator' },
         { role: 'toggleDevTools' },
+      ],
+    },
+    {
+      label: 'AI',
+      submenu: [
+        { label: 'Explain selected entry', click: () => send('ai-explain') },
+        { label: 'Extract fields from selected line…', click: () => send('ai-extract') },
+        { label: 'Ask AI for a filter… (? in the quick filter)', click: () => send('ai-filter') },
+        { type: 'separator' },
+        { label: 'AI settings…', click: () => send('ai-settings') },
       ],
     },
     {
@@ -290,6 +434,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.on('closed', () => (win = null));
+  win.webContents.on('did-start-navigation', (_e, _url, _inPlace, isMainFrame) => isMainFrame && rendererGone());
 }
 
 const isFile = (a: string) => {
@@ -301,20 +446,27 @@ const isFile = (a: string) => {
 };
 /** ultralogviewer [files] [-] [--since -1h] [--until 2024-05-01T11:00] [--last 30m] */
 const parseArgv = (argv: string[]) => parseCommandLine(argv.slice(app.isPackaged ? 1 : 2), Date.now(), isFile);
-const filesFromArgv = (argv: string[]) => parseArgv(argv).files.filter(isFile).map((a) => path.resolve(a));
+// ssh://user@host/path and user@host:/path open remote files
+const filesFromArgv = (argv: string[]) => parseArgv(argv).files.filter((a) => isFile(a) || looksRemote(a)).map((a) => (isFile(a) ? path.resolve(a) : a));
 const cli = parseArgv(process.argv);
 /** Standard input copied into a temp file that is tailed like any log ("ultralogviewer -"). */
 let stdin: Promise<StdinCapture | null> = Promise.resolve(null);
 
 let quitting = false;
 
+// Chromium reorders the argv the running instance gets (switches first), which would separate "--filter" from its
+// value, so the raw arguments also go along as one encoded switch. (Not as requestSingleInstanceLock's additionalData:
+// Electron 38 on Linux crashes the running instance on some argv with it.)
+app.commandLine.appendSwitch(HANDOFF_SWITCH, encodeHandoff(process.argv, process.cwd()));
 if (!app.requestSingleInstanceLock()) {
-  app.quit();
+  // handed over: leave at once (quit() before "ready" can hang on some Linux setups)
+  app.exit(0);
 } else {
-  app.on('second-instance', (_e, argv) => {
-    const window = parseArgv(argv).window;
-    if (window) send('open-window', filesFromArgv(argv), window);
-    else for (const f of filesFromArgv(argv)) send('open-path', f);
+  registerOpenRequests({ win: () => win, readSettings, writeSettings, buildMenu, isFile });
+  app.on('second-instance', (_e, argv, workingDirectory) => {
+    // the files, window, filter, search, "go to"… or an ultralogviewer:// link of a later launch
+    const h = decodeHandoff(argv) ?? { argv, cwd: workingDirectory };
+    handleArgv(h.argv.slice(app.isPackaged ? 1 : 2), h.cwd);
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -329,18 +481,24 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     if (cli.stdin) stdin = captureStdin(process.stdin).catch(() => null);
     startWorker();
-    ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, args));
+    ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, engineArgs(method, Array.isArray(args) ? args : [])));
     ipcMain.handle('settings:get', () => readSettings());
     ipcMain.handle('settings:set', (_e, s: Record<string, unknown>) => {
-      writeSettings(s);
+      if (!s || typeof s !== 'object') return;
+      // the ssh program is only ever set by editing the settings file: the page cannot name a program to start
+      const { sshProgram: _ignored, ...rest } = s;
+      const ssh = readSettings().sshProgram;
+      writeSettings(ssh === undefined ? rest : { ...rest, sshProgram: ssh });
       // keep the View menu's check marks in sync with the renderer
       if (menuKey(s) !== menuState) buildMenu();
     });
-    ipcMain.handle('menu:state', (_e, st: { groupRepeats: string; patterns: boolean }) => {
-      tabMenu = { groupRepeats: String(st?.groupRepeats ?? 'off'), patterns: !!st?.patterns };
+    ipcMain.handle('menu:state', (_e, st: { groupRepeats: string; patterns: boolean; sql?: boolean }) => {
+      tabMenu = { groupRepeats: String(st?.groupRepeats ?? 'off'), patterns: !!st?.patterns, sql: !!st?.sql };
       if (menuKey(readSettings()) !== menuState) buildMenu();
     });
     ipcMain.handle('menu:items', () => menuItems());
+    registerAi(() => app.getPath('userData'), () => readSettings().ai as AiSettings | undefined);
+    registerReceivers(() => app.getPath('userData'));
     ipcMain.handle('menu:run', (_e, id: string) => {
       const item = Menu.getApplicationMenu()?.getMenuItemById(String(id));
       if (!item || !item.enabled) return false;
@@ -391,21 +549,35 @@ if (!app.requestSingleInstanceLock()) {
       });
       return r.canceled ? null : r.filePath;
     });
+    ipcMain.handle('dialog:folder', async () => {
+      const r = await dialog.showOpenDialog(win!, { properties: ['openDirectory'] });
+      return r.canceled ? null : r.filePaths[0] ?? null;
+    });
+    ipcMain.handle('source:open', (_e, ref: SourceRef, opts: { roots?: unknown; editor?: unknown; command?: unknown }) => openSource(ref, opts));
     ipcMain.handle('startup-files', async () => {
       const piped = await stdin;
       return [...filesFromArgv(process.argv), ...(piped ? [piped.path] : []), ...pendingOpen.splice(0)];
     });
+    ipcMain.handle('startup-request', async () => {
+      const piped = await stdin;
+      return { request: await startupRequest(process.argv.slice(app.isPackaged ? 1 : 2), piped?.path ?? null, pendingOpen.splice(0)), stdin: cli.stdin };
+    });
     ipcMain.handle('startup-options', (): { window: OpenWindow | null; errors: string[]; stdin: boolean } => ({ window: cli.window, errors: cli.errors, stdin: cli.stdin }));
     buildMenu();
     createWindow();
+    startApiFromSettings();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   });
 
+  app.on('will-quit', killSsh);
   app.on('before-quit', () => {
     quitting = true;
+    void callEngine('closeRemote', []).catch(() => undefined);
     void stdin.then((s) => s?.dispose());
+    void stopAllReceivers();
+    void stopApi();
     void worker?.terminate();
   });
   app.on('window-all-closed', () => {

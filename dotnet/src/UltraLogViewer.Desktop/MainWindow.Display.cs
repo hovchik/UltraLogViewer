@@ -37,7 +37,7 @@ public sealed partial class MainWindow
         change();
         _settings.Save();
         RefreshChecks();
-        _grid.LayoutChanged();
+        foreach (var g in VisibleGrids) g.LayoutChanged();
     }
 
     private void SetTimeMode(string mode) => SetDisplay(() => _settings.TimeMode = mode);

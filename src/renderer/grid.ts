@@ -4,6 +4,7 @@
 
 import { fold, FoldLine } from '../core/folding';
 import { compilePattern, matchRanges } from '../core/query';
+import { findSourceRefs, SourceRef } from '../core/sourceLinks';
 import { formatTimeCell, formatGap } from '../core/timestamp';
 import { tokenize } from '../core/tokenizer';
 import type { ColumnDef, RowData } from '../core/types';
@@ -50,6 +51,10 @@ export interface GridHost {
   copyRows(from: number, to: number): void;
   /** Ctrl+click on a token in the message column or an expanded line. */
   onTokenClick(row: RowData, text: string): void;
+  /** Double-click on a word in a cell or an expanded line (double-clicking the line number toggles the bookmark). */
+  onWordDoubleClick(word: string): void;
+  /** Click on a source location (Foo.java:42…) in an expanded entry. */
+  openSource(ref: SourceRef): void;
 }
 
 /** Text styling layers, lowest first: tokens, then highlight rules, then search hits. */
@@ -99,10 +104,6 @@ export class Grid {
     this.scroller.addEventListener('scroll', () => this.onScroll());
     this.body.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.rowsEl.addEventListener('mousedown', (e) => this.onMouseDown(e));
-    this.rowsEl.addEventListener('dblclick', (e) => {
-      const row = this.rowAt(e);
-      if (row !== null && this.cache.get(row)) this.host.toggleBookmark(this.cache.get(row)!);
-    });
     this.overviewEl.addEventListener('mousedown', (e) => this.onOverviewClick(e));
     this.header.addEventListener('contextmenu', (e) => {
       e.preventDefault();
@@ -622,7 +623,7 @@ export class Grid {
         continue;
       }
       const line = raw.length > 2000 ? raw.slice(0, 2000) + '…' : raw;
-      html += `<div class="rl">${line ? this.markup(line, false, tokens) : ' '}</div>`;
+      html += `<div class="rl">${line ? this.markup(line, false, tokens, findSourceRefs(line)) : ' '}</div>`;
     }
     if (lines.length > MAX_EXPAND) html += `<div class="rl rx-more">… ${(lines.length - MAX_EXPAND).toLocaleString('en-US')} more lines</div>`;
     return html + '</div>';
@@ -669,10 +670,11 @@ export class Grid {
     return true;
   }
 
-  private markup(text: string, current: boolean, tokens = false): string {
+  /** `links`: source locations in the text, drawn as links (data-src is the index into them). */
+  private markup(text: string, current: boolean, tokens = false, links: SourceRef[] = []): string {
     if (!text) return '';
     const hasHl = this.hlCompiled.some((h) => !h.rule.row);
-    if (!this.searchRe && !hasHl && !tokens) return esc(text);
+    if (!this.searchRe && !hasHl && !tokens && !links.length) return esc(text);
     const layers: Layer[] = [{ open: '', close: '' }];
     const at = new Uint16Array(text.length);
     let any = false;
@@ -683,6 +685,7 @@ export class Grid {
       any = true;
     };
     if (tokens) for (const tk of tokenize(text)) paint(tk.start, tk.start + tk.length, { open: `<span class="tk-${tk.kind}">`, close: '</span>' });
+    links.forEach((r, i) => paint(r.start, r.start + r.length, { open: `<span class="src-link" data-src="${i}" title="Open ${esc(r.path)}:${r.line} in your editor">`, close: '</span>' }));
     // Earlier rules win over later ones, so paint them last.
     for (let k = this.hlCompiled.length - 1; k >= 0; k--) {
       const { rule, re } = this.hlCompiled[k];
@@ -795,12 +798,29 @@ export class Grid {
     // default focus handling would then move focus to <body>.
     e.preventDefault();
     this.root.focus();
+    if (e.detail === 2 && !e.shiftKey && !linkMod(e) && !(e.target as HTMLElement).closest('.more, .fold, .src-link')) {
+      // A double-click. (Not a dblclick listener: the first click re-renders the rows, which detaches its target, so
+      // the browser never fires click or dblclick here.) On a word it highlights the word, elsewhere it bookmarks.
+      const word = wordAt(e.clientX, e.clientY);
+      const r = this.cache.get(row);
+      if (word) this.host.onWordDoubleClick(word);
+      else if (r) this.host.toggleBookmark(r);
+      return;
+    }
     if (linkMod(e) && !e.shiftKey) {
       const tk = this.tokenAt(e);
       const r = this.cache.get(row);
       if (tk && r) {
         this.clearTokenHover();
         this.host.onTokenClick(r, tk.text);
+        return;
+      }
+    }
+    const linkEl = (e.target as HTMLElement).closest('.rx .rl .src-link') as HTMLElement | null;
+    if (linkEl && !e.shiftKey && e.detail === 1) {
+      const ref = findSourceRefs(linkEl.closest('.rl')!.textContent ?? '')[Number(linkEl.dataset.src)];
+      if (ref) {
+        this.host.openSource(ref);
         return;
       }
     }
@@ -991,6 +1011,27 @@ export class Grid {
     }
     e.preventDefault();
   }
+}
+
+const isWordChar = (c: string) => /[\p{L}\p{N}_]/u.test(c);
+
+/** The word (letters, digits, "_"; at least two characters) under a point in a cell or an expanded line, or null. */
+function wordAt(x: number, y: number): string | null {
+  const el = document.elementFromPoint(x, y)?.closest('.grid-rows .c, .grid-rows .rx .rl:not(.fold):not(.rx-more)');
+  const caret = el && document.caretRangeFromPoint?.(x, y);
+  if (!el || !caret || caret.startContainer.nodeType !== Node.TEXT_NODE || !el.contains(caret.startContainer)) return null;
+  const text = (caret.startContainer as Text).data;
+  let a = caret.startOffset;
+  let b = caret.startOffset;
+  while (a > 0 && isWordChar(text[a - 1])) a--;
+  while (b < text.length && isWordChar(text[b])) b++;
+  if (b - a < 2) return null;
+  // the caret snaps to the nearest character: the pointer must really be over the word (not the space after the text)
+  const range = document.createRange();
+  range.setStart(caret.startContainer, a);
+  range.setEnd(caret.startContainer, b);
+  const hit = [...range.getClientRects()].some((rc) => x >= rc.left - 1 && x <= rc.right + 1 && y >= rc.top - 1 && y <= rc.bottom + 1);
+  return hit ? text.slice(a, b) : null;
 }
 
 function binaryHas(arr: number[], v: number): boolean {
