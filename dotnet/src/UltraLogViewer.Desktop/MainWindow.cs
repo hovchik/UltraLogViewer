@@ -798,6 +798,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 _grid.CountChanged();
                 if (_tickCount % 4 == 0) _sidebar.UpdateCounts(tab);
             }
+            else if (tab.BusyLabel == "Filtering") ShowPartialView(tab);
             UpdateStatus();
         }
         if (tab is { Ready: true, BusyProgress: null, StaleViews: true } && !_refreshing.Contains(tab) && DateTime.UtcNow - _lastHeavyRefresh > TimeSpan.FromSeconds(1.5))
@@ -808,6 +809,31 @@ public sealed partial class MainWindow : Window, ILogGridHost
                     _ = TailAsync(t);
     }
 
+    /// <summary>
+    /// While a filter runs, shows the rows it has found so far. Within one epoch the view only gains rows at its end,
+    /// so the grid keeps its cache; a new epoch (the first partial view replacing the old one) redraws it.
+    /// </summary>
+    private void ShowPartialView(DocumentTab tab)
+    {
+        var epoch = tab.Doc.ViewEpoch;
+        if (epoch == tab.ViewEpoch && tab.Doc.ViewCount == tab.Info.ViewCount) return;
+        tab.Info = tab.Doc.Info();
+        if (epoch == tab.ViewEpoch)
+        {
+            _grid.CountChanged();
+            return;
+        }
+        tab.ViewEpoch = epoch;
+        if (tab.SearchResult is not null)
+        {
+            // The hits are rows of the old view; the search runs again when the filter is done.
+            tab.SearchResult = null;
+            _grid.RefreshPatterns();
+            UpdateSearchCount();
+        }
+        _grid.Invalidate();
+    }
+
     /// <summary>After new data: recompute the overview, timeline and search hits, at most every 1.5 s.</summary>
     private async Task RefreshDerivedAsync(DocumentTab tab)
     {
@@ -815,7 +841,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.StaleViews = false;
         await RefreshOverviewAsync();
         await RefreshHistogramAsync();
-        if (tab.SearchResult is not null && tab == _active) await RunSearch(false);
+        if (tab.SearchResult is not null && tab == _active) await RunSearch(false, showCost: false);
     }
 
     private async Task TailAsync(DocumentTab tab)
@@ -903,8 +929,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         tab.BusyLabel = "Filtering";
         tab.BusyProgress = 0;
+        tab.ViewEpoch = tab.Doc.ViewEpoch;
         UpdateStatus();
         bool applied;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             applied = await tab.Doc.ApplyFilterAsync(spec, new SyncProgress(f => tab.BusyProgress = f));
@@ -915,7 +943,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
             tab.BusyLabel = "";
         }
         if (!applied || !_tabs.Contains(tab)) return;
+        tab.ViewEpoch = tab.Doc.ViewEpoch;
         tab.Info = tab.Doc.Info();
+        tab.ScanCost = spec.IsTrivial ? "" : ScanCost("Filtered", tab.Info.Total, clock.Elapsed);
         tab.NewRows = 0;
         var row = focusKey is null ? null : tab.Doc.RowForKey(focusKey);
         tab.Focus = tab.Anchor = row ?? Math.Clamp(tab.Focus, 0, Math.Max(0, tab.Info.ViewCount - 1));
@@ -929,7 +959,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         UpdatePill();
         RefreshChecks();
         ScheduleFieldStats(tab);
-        if (tab.SearchPattern.Text.Length > 0) await RunSearch(false);
+        if (tab.SearchPattern.Text.Length > 0) await RunSearch(false, showCost: false); // keep showing what the filter cost
         await RefreshOverviewAsync();
         await RefreshHistogramAsync();
     }
@@ -950,7 +980,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _quick.SelectAll();
     }
 
-    private async Task RunSearch(bool jump)
+    private async Task RunSearch(bool jump, bool showCost = true)
     {
         if (_active is not { } tab || !tab.Ready) return;
         var pattern = CurrentPattern();
@@ -972,6 +1002,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.BusyLabel = "Searching";
         tab.BusyProgress = 0;
         SearchResult res;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             res = await tab.Doc.SearchAsync(pattern, new SyncProgress(f => tab.BusyProgress = f));
@@ -983,6 +1014,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         if (gen != _searchGen || tab != _active) return;
         tab.SearchResult = res;
+        if (showCost && !res.Cancelled) tab.ScanCost = ScanCost("Searched", tab.Info.Total, clock.Elapsed);
         var at = Array.BinarySearch(res.Rows, tab.Focus);
         tab.SearchCurrent = at >= 0 ? at : Math.Min(~at, Math.Max(0, res.Rows.Length - 1));
         _grid.RefreshPatterns();
@@ -1277,6 +1309,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (HistogramOn) Run(RefreshHistogramAsync);
     }
 
+    internal string ScanCostStatusForTest => _statusBusy.Text ?? "";
     internal string FormatStatusForTest => _statusFormat.IsVisible ? _statusFormat.Content as string ?? "" : "";
     internal string FormatPickerTextForTest => _format.SelectedItem as string ?? "";
     internal bool TimelineButtonEnabledForTest => _histBtn.IsEnabled;
@@ -1711,6 +1744,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _statusLive.Text = src is null ? "" : i.Sources.Any(s => s.Live) ? (tab.Follow ? "● Following" : "● Live") : "Static";
         _progress.IsVisible = tab.BusyProgress is not null;
         _progress.Value = tab.BusyProgress ?? 0;
-        _statusBusy.Text = tab.BusyProgress is double p ? $"{tab.BusyLabel} {p:P0}" : "";
+        _statusBusy.Text = tab.BusyProgress is double p ? $"{tab.BusyLabel} {p:P0}" : tab.ScanCost;
     }
+
+    /// <summary>"Filtered 8,695,680 entries in 0.82 s": makes the cost of a scan visible after it finishes.</summary>
+    internal static string ScanCost(string verb, int entries, TimeSpan took) =>
+        $"{verb} {entries:N0} {(entries == 1 ? "entry" : "entries")} in {took.TotalSeconds:0.00} s";
 }
