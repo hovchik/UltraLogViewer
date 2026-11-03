@@ -97,7 +97,8 @@ public sealed partial class MainWindow : ILocalApiHost
             Toast(string.Join("\n", req.Errors), true);
             return null;
         }
-        var files = req.ExpandPaths(cwd);
+        // remote files as ssh:// URLs, the form kept in recent files (only the command line can name them)
+        var files = req.ExpandPaths(cwd).Select(f => RemoteTarget.LooksRemote(f) ? RemoteTarget.Parse(f)?.Url ?? f : f).ToList();
         if (!req.IsValid) Toast(string.Join("\n", req.Errors.Take(5)), true);
         var stdin = files.Remove("-");
         if (files.Count == 0 && !stdin) return null;
@@ -119,7 +120,9 @@ public sealed partial class MainWindow : ILocalApiHost
         }
         foreach (var g in groups)
         {
-            var tab = req.NewTab ? null : _tabs.FirstOrDefault(t => t.Paths.SequenceEqual(g, StringComparer.Ordinal) && Equals(t.Window, window) && (format is null || t.FormatId == format));
+            // a remote file's tab has its local copy
+            var keys = g.Select(p => RemoteTarget.Parse(p) is { } remote ? RemoteFile.LocalPathFor(remote, RemoteOptions.CacheDir) : p).ToArray();
+            var tab = req.NewTab ? null : _tabs.FirstOrDefault(t => t.Paths.SequenceEqual(keys, StringComparer.Ordinal) && Equals(t.Window, window) && (format is null || t.FormatId == format));
             if (tab is not null) Activate(tab);
             else tab = await OpenTab(g, "auto", null, t =>
             {

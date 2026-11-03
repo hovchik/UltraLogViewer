@@ -148,7 +148,7 @@ public sealed partial class OpenRequest
             else if (Source != RequestSource.CommandLine)
             {
                 if (p == "-") Errors.Add("Standard input can only be read from the command line");
-                else if (Source == RequestSource.Url && (p.StartsWith(@"\\", StringComparison.Ordinal) || p.StartsWith("//", StringComparison.Ordinal)))
+                else if (Source == RequestSource.Url && p.Length >= 2 && p[0] is '/' or '\\' && p[1] is '/' or '\\') // "/\\server" is a network path on Windows too
                     Errors.Add($"Network paths are not opened from links: {p}");
                 else if (!IsAbsolute(p)) Errors.Add($"A full path is needed: {p}");
             }

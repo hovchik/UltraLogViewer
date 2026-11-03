@@ -33,6 +33,7 @@ beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ulv-sql-'));
   await esbuild.build({ entryPoints: ['src/main/scanWorker.ts'], bundle: true, platform: 'node', format: 'cjs', outfile: path.join(dir, 'scanWorker.js'), logLevel: 'silent' });
   pool = new ScanPool(path.join(dir, 'scanWorker.js'), 3);
+  await esbuild.build({ entryPoints: ['src/main/sqlWorker.ts'], bundle: true, platform: 'node', format: 'cjs', outfile: path.join(dir, 'sqlWorker.js'), logLevel: 'silent' });
 });
 afterAll(() => {
   pool.close();
@@ -255,5 +256,46 @@ describe('SQL panel status', () => {
       '2+ rows in 4 ms  ·  table loaded in 1.2 s  ·  first 2,000,000 of 8,695,680 entries',
     );
     expect(sqlStatusText({ ...base, rows: [], error: 'no such column: x' })).toBe('400 entries');
+  });
+});
+
+describe('LogSql on the query worker', () => {
+  const runaway = 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c';
+
+  it('runs queries off the engine thread, with ulv_row and regexp', async () => {
+    const d = await doc(lines(50).replace(/INFO  (com\.acme\.App - entry \d*[13579]\n)/g, 'ERROR $1'));
+    const levels = [true, true, true, true, true, true, true];
+    levels[Level.Info] = false;
+    await d.applyFilter({ levels, rules: [] } as FilterSpec);
+    const sql = new LogSql(d, path.join(dir, 'sqlWorker.js'));
+    const r = await sql.query("SELECT row, line, regexp_extract(message, 'entry (\\d+)') AS n FROM view WHERE message REGEXP 'entry 1\\d' ORDER BY line LIMIT 3");
+    expect(r.error).toBeNull();
+    expect(r.rows).toEqual([[5, 12, '11'], [6, 14, '13'], [7, 16, '15']]);
+    expect((await sql.query('DELETE FROM logs_data')).error).toBeTruthy();
+    sql.close();
+  });
+
+  it('gives up a query that runs too long, and the next one still works', async () => {
+    const d = await doc(lines(20));
+    const sql = new LogSql(d, path.join(dir, 'sqlWorker.js'));
+    sql.timeLimitMs = 300;
+    // the engine thread stays free meanwhile: this timer fires while the query runs
+    let ticked = false;
+    setTimeout(() => (ticked = true), 50);
+    const r = await sql.query(runaway);
+    expect(r.error).toBe('The query ran for more than 0 s and was stopped');
+    expect(ticked).toBe(true);
+    expect((await sql.query('SELECT count(*) FROM logs')).rows).toEqual([[20]]);
+    sql.close();
+  });
+
+  it('Cancel gives up a running query', async () => {
+    const d = await doc(lines(20));
+    const sql = new LogSql(d, path.join(dir, 'sqlWorker.js'));
+    const running = sql.query(runaway);
+    setTimeout(() => sql.cancel(), 200);
+    expect((await running).cancelled).toBe(true);
+    expect((await sql.query('SELECT max(line) FROM logs')).rows).toEqual([[20]]);
+    sql.close();
   });
 });

@@ -229,8 +229,12 @@ export class StreamFramer {
   private remaining = 0;
   truncated = 0;
 
+  private max: number;
+
   constructor(private syslog: boolean, max: number) {
-    this.buf = Buffer.alloc(Math.max(16, max));
+    // grows up to `max` as messages need it: every connection has one, and senders are not trusted
+    this.max = Math.max(16, max);
+    this.buf = Buffer.alloc(Math.min(this.max, 4096));
   }
 
   feed(data: Uint8Array, emit: (m: string) => void) {
@@ -264,9 +268,9 @@ export class StreamFramer {
           }
           continue;
         case St.Octets:
-          if (this.len < this.buf.length) this.buf[this.len++] = b;
+          this.add(b);
           if (--this.remaining === 0) {
-            if (this.count > this.buf.length) this.truncated++;
+            if (this.count > this.max) this.truncated++;
             this.emit(emit);
           }
           continue;
@@ -284,8 +288,7 @@ export class StreamFramer {
     if (b === 10) {
       if (this.len > 0 && this.buf[this.len - 1] === 13) this.len--;
       this.emit(emit);
-    } else if (this.len < this.buf.length) this.buf[this.len++] = b;
-    else {
+    } else if (!this.add(b)) {
       this.truncated++;
       this.emit(emit);
       this.state = St.SkipLine;
@@ -298,8 +301,16 @@ export class StreamFramer {
     this.state = St.Start;
   }
 
-  private add(b: number) {
-    if (this.len < this.buf.length) this.buf[this.len++] = b;
+  /** Appends a byte; false when the message is already `max` bytes long. */
+  private add(b: number): boolean {
+    if (this.len >= this.max) return false;
+    if (this.len === this.buf.length) {
+      const bigger = Buffer.alloc(Math.min(this.max, this.buf.length * 2));
+      this.buf.copy(bigger, 0, 0, this.len);
+      this.buf = bigger;
+    }
+    this.buf[this.len++] = b;
+    return true;
   }
 
   private emit(emit: (m: string) => void) {

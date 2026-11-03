@@ -1,14 +1,20 @@
 // The engine's side of remote files: turning ssh:// URLs (and user@host:/path, and patterns) into local copies that
 // core/remote.ts keeps up to date, and listing remote folders.
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { expandRemote, listRemote, RemoteFile } from '../core/remote';
 import { looksRemote, parseRemote, remoteDisplay } from '../core/remoteTarget';
 
-/** Next to the index cache (in the app's user-data folder), else a folder of this process in the temp folder. */
+let tmpCache: string | null = null;
+
+/**
+ * Next to the index cache (in the app's user-data folder), else a new private folder in the temp folder (made with
+ * mkdtemp: a predictable name there could be created first by another user, with links in it).
+ */
 export const remoteCacheDir = (indexCacheDir?: string) =>
-  indexCacheDir ? path.join(path.dirname(indexCacheDir), 'remote-cache') : path.join(os.tmpdir(), `ulv-remote-${process.pid}`);
+  indexCacheDir ? path.join(path.dirname(indexCacheDir), 'remote-cache') : (tmpCache ??= fs.mkdtempSync(path.join(os.tmpdir(), 'ulv-remote-')));
 
 /** Replaces remote paths by local copies, connecting to all hosts at once; what failed is in `errors`. */
 export async function localCopies(paths: string[], opts: { ssh?: string | null; cacheDir: string }): Promise<{ paths: string[]; errors: string[] }> {

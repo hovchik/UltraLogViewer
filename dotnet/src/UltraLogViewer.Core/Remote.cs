@@ -15,6 +15,9 @@ public sealed partial record RemoteTarget(string? User, string Host, int? Port, 
     [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")]
     private static partial Regex HostName();
 
+    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$")]
+    private static partial Regex UserName();
+
     [GeneratedRegex(@"^\[[0-9A-Fa-f:.%]+\]$")]
     private static partial Regex Ipv6();
 
@@ -96,7 +99,8 @@ public sealed partial record RemoteTarget(string? User, string Host, int? Port, 
     public void Validate()
     {
         if (!HostName().IsMatch(Host) && !Ipv6().IsMatch(Host)) throw new FormatException($"Bad host name \"{Host}\"");
-        if (User is not null && (User.Length == 0 || User.StartsWith('-') || User.Any(c => char.IsControl(c) || char.IsWhiteSpace(c) || c is '/' or ':' or '@')))
+        // Plain names only: older OpenSSH clients pass the user to a shell unquoted (%r in ProxyCommand, Match exec).
+        if (User is not null && !UserName().IsMatch(User))
             throw new FormatException($"Bad user name \"{User}\"");
         if (Port is < 1 or > 65535) throw new FormatException($"Bad port {Port}");
         if (!Path.StartsWith('/')) throw new FormatException("The remote path must be absolute (start with /)");
@@ -370,7 +374,7 @@ public sealed class RemoteFile : IDisposable
     private async Task StartAsync(CancellationToken ct)
     {
         _expected = await ProbeSizeAsync(ct);
-        Directory.CreateDirectory(_opts.CacheDir);
+        CaptureFile.EnsureFolder(_opts.CacheDir); // owner-only: the copies hold the remote logs
         if (ByLocal.TryGetValue(LocalPath, out var old)) old.Dispose(); // a closed session of the same file (it deletes the copy)
         var create = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.ReadWrite | FileShare.Delete, BufferSize = 0 };
         if (!OperatingSystem.IsWindows()) create.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;

@@ -128,7 +128,8 @@ export function validate(r: OpenRequest): OpenRequest {
     else if (hasControl(p)) r.errors.push('A path contains control characters');
     else if (r.source !== 'cli') {
       if (p === '-') r.errors.push('Standard input can only be read from the command line');
-      else if (r.source === 'url' && (p.startsWith('\\\\') || p.startsWith('//'))) r.errors.push(`Network paths are not opened from links: ${p}`);
+      // any two leading slashes: Windows also reads "/\\server\\share" and "\\/server/share" as network paths
+      else if (r.source === 'url' && /^[\\/]{2}/.test(p)) r.errors.push(`Network paths are not opened from links: ${p}`);
       else if (!isAbsolutePath(p)) r.errors.push(`A full path is needed: ${p}`);
     }
   }

@@ -163,6 +163,21 @@ public class SqlTests
         Assert.Equal("DELETE is not allowed: the table is read-only.", r.Error);
     }
 
+    private const string Runaway = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c";
+
+    [Fact]
+    public async Task StopsAQueryThatRunsTooLongOrIsCancelled()
+    {
+        using var d = await Doc(TestFiles.Log4j);
+        using var sql = new LogSql(d) { TimeLimit = TimeSpan.FromMilliseconds(300) };
+        var r = await sql.QueryAsync(Runaway);
+        Assert.Equal("The query ran for more than 0 s and was stopped", r.Error);
+        Assert.Equal(6L, (await sql.QueryAsync("SELECT count(*) FROM logs")).Rows[0][0]);
+        sql.TimeLimit = TimeSpan.FromMinutes(1);
+        using var cts = new CancellationTokenSource(200);
+        Assert.True((await sql.QueryAsync(Runaway, ct: cts.Token)).Cancelled);
+    }
+
     [Fact]
     public async Task TheEngineBlocksAttachWritesAndExtensionsOnItsOwn()
     {

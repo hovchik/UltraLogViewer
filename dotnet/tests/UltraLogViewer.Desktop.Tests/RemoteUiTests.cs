@@ -63,6 +63,35 @@ public sealed class RemoteUiTests : IDisposable
     private static string Line(int s, string host, string msg) => $"2024-05-01 10:00:{s:00}.000 [main] INFO  com.acme.{host} - {msg}\n";
 
     [AvaloniaFact]
+    public async Task The_command_line_opens_remote_files_and_links_never_do()
+    {
+        if (FakeSsh() is null) return;
+        HostFile("web1", "/var/log/app.log", Line(0, "Web", "one") + Line(1, "Web", "two"));
+        var (w, settings) = NewWindow();
+        var now = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+        OpenRequest Cli(params string[] args) => OpenRequest.FromCommandLine(CommandLine.Parse(args, now), now);
+
+        // a link or the API never names a remote file: it would run ssh
+        foreach (var remote in new[] { "ssh://web1/var/log/app.log", "web1:/var/log/app.log" })
+        {
+            Assert.Null(await w.HandleRequestAsync(OpenRequest.FromUrl("ultralogviewer://open?path=" + Uri.EscapeDataString(remote), now), _dir));
+            Assert.Null(await w.HandleRequestAsync(OpenRequest.FromJson($$"""{"path":"{{remote}}"}""", now), _dir));
+        }
+        Assert.Null(w.ActiveTab);
+
+        // the command line (and a later launch handing its command line over) does
+        var tab = await w.HandleRequestAsync(Cli("web1:/var/log/app.log", "--filter", "two"), _dir);
+        Assert.NotNull(tab);
+        await Until(() => tab!.Ready);
+        Assert.Equal("web1:/var/log/app.log", tab!.Title);
+        Assert.Equal(1, tab.Info.ViewCount);
+        Assert.Equal("ssh://web1/var/log/app.log", settings.Recent[0]);
+        // the same file again (in either form) shows the same tab
+        Assert.Same(tab, await w.HandleRequestAsync(Cli("ssh://web1/var/log/app.log"), _dir));
+        w.Close();
+    }
+
+    [AvaloniaFact]
     public async Task Opens_a_remote_file_follows_it_and_kills_ssh_when_the_tab_closes()
     {
         if (FakeSsh() is null) return;

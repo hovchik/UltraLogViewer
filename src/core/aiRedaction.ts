@@ -5,13 +5,18 @@
 const HEX = '[0-9A-Fa-f]{1,4}';
 
 const RULES: [string, RegExp, (m: string, ...g: string[]) => string | null][] = [
+  // A PEM private key block, whole (its base64 lines are split by + and /, so the token rule would miss parts).
+  ['pem', /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g, () => '<private key>'],
   // Authorization: Bearer xyz (also "Basic"): the scheme stays, the credential (8+ chars) goes.
   ['bearer', /\b([Bb][Ee][Aa][Rr][Ee][Rr]|Basic)(\s+)[A-Za-z0-9\-._~+/]{8,}=*/g, (_m, scheme, ws) => `${scheme}${ws}<token>`],
+  // Authorization: <any other scheme> credential, or a bare credential.
+  ['authorization', /\b((?:Proxy-)?Authorization)(\s*[:=]\s*)((?:[A-Za-z][\w-]*\s+)?)[A-Za-z0-9\-._~+/]{8,}=*/gi, (_m, name, sep, scheme) => `${name}${sep}${scheme}<token>`],
   ['jwt', /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, () => '<jwt>'],
   // password=..., "secret": "...", api_key: ..., token=...: keep the key, mask the value.
   [
     'secret',
-    /\b((?:pass(?:word|wd)?|pwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|access[_-]?key|private[_-]?key|auth)"?)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)/gi,
+    // (not \b: DB_PASSWORD and db_password count too)
+    /(?<![A-Za-z0-9])((?:pass(?:word|wd|phrase)?|pwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?|auth)"?)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"']+)/gi,
     (_m, key, sep) => `${key}${sep}<redacted>`,
   ],
   // Well-known key formats: OpenAI/Anthropic sk-..., AWS AKIA..., GitHub ghp_..., Slack xox?-..., Google AIza...

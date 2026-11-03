@@ -69,6 +69,26 @@
       "in": "nothing secret here, 42 items in 3.5s",
       "out": "nothing secret here, 42 items in 3.5s",
       "count": 0
+    },
+    {
+      "in": "env DB_PASSWORD=hunter2 POSTGRES_PASSWORD='x y' bypass=1",
+      "out": "env DB_PASSWORD=<redacted> POSTGRES_PASSWORD=<redacted> bypass=1",
+      "count": 2
+    },
+    {
+      "in": "ssh passphrase: correct-horse credentials=abc",
+      "out": "ssh passphrase: <redacted> credentials=<redacted>",
+      "count": 2
+    },
+    {
+      "in": "Authorization: Token 0123456789abcdef and Proxy-Authorization: Digest username1",
+      "out": "Authorization: Token <token> and Proxy-Authorization: Digest <token>",
+      "count": 2
+    },
+    {
+      "in": "key -----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1+2/3\nabc\n-----END RSA PRIVATE KEY----- done",
+      "out": "key <private key> done",
+      "count": 1
     }
   ],
   "guess": [

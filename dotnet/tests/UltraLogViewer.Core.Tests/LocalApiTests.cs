@@ -76,6 +76,14 @@ public class LocalApiTests
         Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=app.log", Now).IsValid);
         Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=%5C%5Cevil%5Cshare%5Ca.log", Now).IsValid);
         Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=//evil/share/a.log", Now).IsValid);
+        Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=/%5Cevil%5Cshare%5Ca.log", Now).IsValid); // a network path on Windows too
+        Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=%5C/evil/share/a.log", Now).IsValid);
+        // never a remote file: that would run ssh
+        foreach (var remote in new[] { "ssh://web1/var/log/a.log", "web1:/var/log/a.log", "ops@web1:/var/log/*.log" })
+        {
+            Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=" + Uri.EscapeDataString(remote), Now).IsValid, remote);
+            Assert.False(OpenRequest.FromJson(JsonSerializer.Serialize(new { path = remote }), Now).IsValid, remote);
+        }
         Assert.False(OpenRequest.FromUrl("ultralogviewer://run?cmd=calc", Now).IsValid);
         Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=/a.log&filter=a%0Db", Now).IsValid);
         Assert.False(OpenRequest.FromUrl("ultralogviewer://open?path=/a.log&format=../../x", Now).IsValid);

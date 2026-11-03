@@ -32,6 +32,8 @@ public sealed class LogSql : IDisposable
     internal int Batch { get; set; } = 4096;
     /// <summary>Tests: skip <see cref="SqlSchema.Guard"/> to check that the engine blocks on its own.</summary>
     internal bool SkipGuard { get; set; }
+    /// <summary>A query (not the load) running longer than this is interrupted: a recursive CTE or a cross join can run for ever.</summary>
+    internal TimeSpan TimeLimit { get; set; } = SqlSchema.TimeLimit;
 
     private readonly LogDocument _doc;
     private readonly SqliteConnection _db;
@@ -202,6 +204,8 @@ public sealed class LogSql : IDisposable
         var h = _db.Handle!;
         raw.sqlite3_set_authorizer(h, Authorizer, null);
         using var interrupt = ct.Register(() => raw.sqlite3_interrupt(h));
+        using var limit = new CancellationTokenSource(TimeLimit);
+        using var overtime = limit.Token.Register(() => raw.sqlite3_interrupt(h));
         try
         {
             using var cmd = _db.CreateCommand();
@@ -226,6 +230,7 @@ public sealed class LogSql : IDisposable
         catch (SqliteException e)
         {
             if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+            if (limit.IsCancellationRequested) return SqlResult.Fail(SqlSchema.TimeLimitText(TimeLimit));
             return SqlResult.Fail(CleanError(e.Message));
         }
         finally

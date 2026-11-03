@@ -79,6 +79,17 @@ function killSsh() {
   }
 }
 
+/**
+ * The program that remote files run comes from the settings main reads, never from the page's arguments: the renderer
+ * shows hostile log text, and its calls should not be able to name a program to start.
+ */
+function engineArgs(method: string, args: unknown[]): unknown[] {
+  const ssh = () => (readSettings().sshProgram as string | undefined) ?? null;
+  if (method === 'openRemote') return [args[0], { ssh: ssh() }];
+  if (method === 'listRemote') return [args[0], ssh()];
+  return args;
+}
+
 function callEngine(method: string, args: unknown[]): Promise<unknown> {
   const id = nextCall++;
   return new Promise((resolve, reject) => {
@@ -470,10 +481,14 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(() => {
     if (cli.stdin) stdin = captureStdin(process.stdin).catch(() => null);
     startWorker();
-    ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, args));
+    ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, engineArgs(method, Array.isArray(args) ? args : [])));
     ipcMain.handle('settings:get', () => readSettings());
     ipcMain.handle('settings:set', (_e, s: Record<string, unknown>) => {
-      writeSettings(s);
+      if (!s || typeof s !== 'object') return;
+      // the ssh program is only ever set by editing the settings file: the page cannot name a program to start
+      const { sshProgram: _ignored, ...rest } = s;
+      const ssh = readSettings().sshProgram;
+      writeSettings(ssh === undefined ? rest : { ...rest, sshProgram: ssh });
       // keep the View menu's check marks in sync with the renderer
       if (menuKey(s) !== menuState) buildMenu();
     });

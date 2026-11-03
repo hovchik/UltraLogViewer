@@ -981,6 +981,11 @@ export class LogDocument implements SetMember {
     return lowerBound(0, Math.min(count, pos.length), (i) => pos[i] >= limit);
   }
 
+  /** The current view (null: every base row) and the base row count, for ulv_row in the SQL query worker. */
+  viewSnapshot(): { view: Uint32Array | null; base: number } {
+    return { view: this.curView, base: this.baseCount() };
+  }
+
   /** View row of a base position, or null when the current view does not show it. */
   viewRowOfBase(b: number): number | null {
     const v = this.curView;

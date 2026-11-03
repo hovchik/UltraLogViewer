@@ -16,11 +16,17 @@ public static class AiRedaction
 
     private static readonly (string Name, Regex Re, Func<Match, string?> Replace)[] Rules =
     [
+        // A PEM private key block, whole (its base64 lines are split by + and /, so the token rule would miss parts).
+        ("pem", new Regex(@"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", O, Limit), _ => "<private key>"),
         // Authorization: Bearer xyz (also "Basic"): the scheme stays, the credential (8+ chars) goes.
         ("bearer", new Regex(@"\b((?i:bearer)|Basic)(\s+)[A-Za-z0-9\-._~+/]{8,}=*", O, Limit), m => $"{m.Groups[1].Value}{m.Groups[2].Value}<token>"),
+        // Authorization: <any other scheme> credential, or a bare credential.
+        ("authorization", new Regex(@"\b((?:Proxy-)?Authorization)(\s*[:=]\s*)((?:[A-Za-z][\w-]*\s+)?)[A-Za-z0-9\-._~+/]{8,}=*", O | RegexOptions.IgnoreCase, Limit),
+            m => $"{m.Groups[1].Value}{m.Groups[2].Value}{m.Groups[3].Value}<token>"),
         ("jwt", new Regex(@"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", O, Limit), _ => "<jwt>"),
         // password=..., "secret": "...", api_key: ..., token=...: keep the key, mask the value.
-        ("secret", new Regex(@"\b((?:pass(?:word|wd)?|pwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|access[_-]?key|private[_-]?key|auth)""?)(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)",
+        // (not \b: DB_PASSWORD and db_password count too)
+        ("secret", new Regex(@"(?<![A-Za-z0-9])((?:pass(?:word|wd|phrase)?|pwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?|auth)""?)(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)",
             O | RegexOptions.IgnoreCase, Limit), m => $"{m.Groups[1].Value}{m.Groups[2].Value}<redacted>"),
         // Well-known key formats: OpenAI/Anthropic sk-..., AWS AKIA..., GitHub ghp_..., Slack xox?-..., Google AIza...
         ("key", new Regex(@"\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{30,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})", O, Limit), _ => "<key>"),

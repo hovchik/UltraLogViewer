@@ -97,6 +97,15 @@ describe('TCP framing', () => {
     expect(frame(false, 256, Buffer.from('b'.repeat(600) + '\nshort\n  indented\n'))).toEqual(['b'.repeat(256), 'short', '  indented']);
     expect(frame(false, 256, Buffer.from('unterminated'))).toEqual(['unterminated']);
   });
+
+  it('grows its buffer only as far as messages need, up to the maximum', () => {
+    const big = 'c'.repeat(10_000);
+    expect(frame(false, 20_000, Buffer.from(big + '\nd\n'))).toEqual([big, 'd']);
+    expect(frame(true, 20_000, Buffer.from(`10000 ${big}`))).toEqual([big]);
+    expect(frame(false, 6000, Buffer.from(big + '\n'))).toEqual(['c'.repeat(6000)]);
+    const f = new StreamFramer(false, 16 << 20);
+    expect((f as unknown as { buf: Buffer }).buf.length).toBeLessThanOrEqual(4096);
+  });
 });
 
 const LOG4J =

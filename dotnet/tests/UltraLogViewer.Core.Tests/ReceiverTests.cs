@@ -123,6 +123,19 @@ public class FramingTests
         Assert.Equal([new string('b', 256), "short", "  indented"], lines);
         Assert.Equal(["unterminated"], Frame(false, 256, B("unterminated")));
     }
+
+    [Fact]
+    public void GrowsItsBufferOnlyAsFarAsMessagesNeed()
+    {
+        var big = new string('c', 10_000);
+        Assert.Equal([big, "d"], Frame(false, 20_000, B(big + "\nd\n")));
+        Assert.Equal([big], Frame(true, 20_000, B("10000 " + big)));
+        Assert.Equal([new string('c', 6000)], Frame(false, 6000, B(big + "\n")));
+        // 64 idle connections with a 16 MB maximum must not hold 1 GB
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        _ = new StreamFramer(false, 16 << 20);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 * 1024);
+    }
 }
 
 public class Log4jXmlTests

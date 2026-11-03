@@ -78,6 +78,12 @@ describe('open request', () => {
       'ultralogviewer://open?path=app.log',
       'ultralogviewer://open?path=%5C%5Cevil%5Cshare%5Ca.log',
       'ultralogviewer://open?path=//evil/share/a.log',
+      'ultralogviewer://open?path=/%5Cevil%5Cshare%5Ca.log', // Windows reads "/\\evil\\share" as a network path too
+      'ultralogviewer://open?path=%5C/evil/share/a.log',
+      // never a remote file: that would run ssh
+      'ultralogviewer://open?path=ssh%3A%2F%2Fweb1%2Fvar%2Flog%2Fa.log',
+      'ultralogviewer://open?path=web1:/var/log/a.log',
+      'ultralogviewer://open?path=ops@web1:/var/log/a.log',
       'ultralogviewer://run?cmd=calc',
       'ultralogviewer://open?path=/a.log&filter=a%0Db',
       'ultralogviewer://open?path=/a.log&format=../../x',
@@ -85,6 +91,8 @@ describe('open request', () => {
       'ultralogviewer://open?' + Array.from({ length: MAX_FILES + 1 }, (_, i) => `path=/l/${i}.log`).join('&'),
     ])
       expect(requestFromUrl(bad, NOW).errors.length, bad).toBeGreaterThan(0);
+    for (const remote of ['ssh://web1/var/log/a.log', 'web1:/var/log/a.log', 'ops@web1:/var/log/*.log'])
+      expect(requestFromJson(JSON.stringify({ path: remote }), NOW).errors.length, remote).toBeGreaterThan(0);
 
     // a link on the command line (how Windows starts the app for a clicked link) is a URL request
     const c = cli('ultralogviewer://open?path=/var/log/app.log');

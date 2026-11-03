@@ -32,7 +32,9 @@ public sealed class StreamFramer(bool syslog, int max)
 {
     private enum State { Start, Count, Octets, Line, SkipLine }
 
-    private readonly byte[] _buf = new byte[Math.Max(16, max)];
+    // grows up to the maximum as messages need it: every connection has one, and senders are not trusted
+    private readonly int _max = Math.Max(16, max);
+    private byte[] _buf = new byte[Math.Min(Math.Max(16, max), 4096)];
     private int _len;
     private State _state = State.Start;
     private long _count;
@@ -79,10 +81,10 @@ public sealed class StreamFramer(bool syslog, int max)
                     }
                     continue;
                 case State.Octets:
-                    if (_len < _buf.Length) _buf[_len++] = b;
+                    Add(b);
                     if (--_remaining == 0)
                     {
-                        if (_count > _buf.Length) Truncated++;
+                        if (_count > _max) Truncated++;
                         Emit(emit);
                     }
                     continue;
@@ -92,8 +94,7 @@ public sealed class StreamFramer(bool syslog, int max)
                         if (_len > 0 && _buf[_len - 1] == '\r') _len--;
                         Emit(emit);
                     }
-                    else if (_len < _buf.Length) _buf[_len++] = b;
-                    else
+                    else if (!Add(b))
                     {
                         Truncated++;
                         Emit(emit);
@@ -114,9 +115,13 @@ public sealed class StreamFramer(bool syslog, int max)
         _state = State.Start;
     }
 
-    private void Add(byte b)
+    /// <summary>Appends a byte; false when the message is already at the maximum length.</summary>
+    private bool Add(byte b)
     {
-        if (_len < _buf.Length) _buf[_len++] = b;
+        if (_len >= _max) return false;
+        if (_len == _buf.Length) Array.Resize(ref _buf, Math.Min(_max, _buf.Length * 2));
+        _buf[_len++] = b;
+        return true;
     }
 
     private void Emit(Action<string> emit)

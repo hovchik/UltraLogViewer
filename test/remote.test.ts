@@ -65,6 +65,9 @@ describe('remote targets', () => {
     'ssh://-oProxyCommand=evil/x',
     'ssh://-oProxyCommand=evil@host/x',
     'ssh://host;rm/x',
+    'ssh://a$(id)@host/x', // a user name with shell characters (CVE-2023-51385 in older ssh)
+    'ssh://a%60id%60@host/x',
+    "a'b@host:/x",
     'ssh://host/var/log/a\nrm -rf ~',
     'ssh://host/var/log/a%0Arm',
     'ssh://host/a%00b',

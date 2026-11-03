@@ -55,6 +55,9 @@ public sealed class RemoteTests : IDisposable
     [InlineData("ssh://-oProxyCommand=evil/x")]
     [InlineData("ssh://-oProxyCommand=evil@host/x")]
     [InlineData("ssh://host;rm/x")]
+    [InlineData("ssh://a$(id)@host/x")] // a user name with shell characters (CVE-2023-51385 in older ssh)
+    [InlineData("ssh://a%60id%60@host/x")]
+    [InlineData("a'b@host:/x")]
     [InlineData("ssh://host/var/log/a\nrm -rf ~")]
     [InlineData("ssh://host/var/log/a%0Arm")]
     [InlineData("ssh://host/a%00b")]

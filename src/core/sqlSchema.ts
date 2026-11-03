@@ -42,6 +42,9 @@ export const SQL_OPTIONAL = ['logger', 'thread', 'message', 'text'];
 const PARSED_BUILTINS = new Set(['time', 'level', 'logger', 'thread', 'message']);
 export const SQL_MAX_FIELDS = 100;
 export const SQL_DEFAULT_CAP = 2_000_000;
+/** A query (not the load) that runs longer than this is stopped: a recursive CTE or a cross join can run for ever. */
+export const SQL_TIME_LIMIT_MS = 120_000;
+export const sqlTimeLimitText = (ms: number) => `The query ran for more than ${Math.round(ms / 1000)} s and was stopped`;
 
 const KEYWORDS = new Set(
   (

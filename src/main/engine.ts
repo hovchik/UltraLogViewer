@@ -47,6 +47,8 @@ export class Engine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private progressAt = new Map<string, number>();
+  /** Queries run there, so one that never ends can be given up (absent when not built next to this file: unit tests). */
+  private sqlWorker = fs.existsSync(path.join(__dirname, 'sqlWorker.js')) ? path.join(__dirname, 'sqlWorker.js') : undefined;
   /** The SQL table of each document that ran a query (see logSql.ts). */
   private sql = new Map<number, LogSql>();
   /** Scans big files on all cores; absent when the worker script is not built next to this file (unit tests). */
@@ -278,7 +280,7 @@ export class Engine {
 
   private sqlFor(docId: number): LogSql {
     let s = this.sql.get(docId);
-    if (!s) this.sql.set(docId, (s = new LogSql(this.doc(docId))));
+    if (!s) this.sql.set(docId, (s = new LogSql(this.doc(docId), this.sqlWorker)));
     return s;
   }
   /** Columns of the document's SQL table. */

@@ -15,11 +15,17 @@
 // database, vacuum into a file or call load_extension (node:sqlite has no authorizer); and it runs on a second,
 // read-only connection to the same (shared-cache, in-memory) database, with extensions off. Same rules as LogSql.cs in
 // the Avalonia app, which uses an authorizer.
+//
+// node:sqlite cannot interrupt a statement, and a recursive CTE or a cross join can run for ever. So queries run on a
+// worker thread (sqlWorker.ts, over a third connection to the same database) while the engine thread stays free: Cancel,
+// a newer query or the time limit gives up on that worker. Its connection may still be inside SQLite, holding the
+// database, so the table moves to a new database and the old one is left alone (never closed: that would wait for it).
 
 import { DatabaseSync, StatementSync } from 'node:sqlite';
+import { Worker } from 'node:worker_threads';
 import type { LogDocument } from './document';
 import type { FileSource } from './fileSource';
-import { buildSqlColumns, guardSql, mentionedColumns, SQL_CORE, SQL_DEFAULT_CAP, SqlColumn, SqlResult, SqlValue, tokenizeSql } from './sqlSchema';
+import { buildSqlColumns, guardSql, mentionedColumns, SQL_CORE, SQL_DEFAULT_CAP, SQL_TIME_LIMIT_MS, SqlColumn, SqlResult, SqlValue, sqlTimeLimitText, tokenizeSql } from './sqlSchema';
 
 export class SqlCancelled extends Error {
   constructor() {
@@ -44,9 +50,16 @@ export class LogSql {
   batch = 8192;
   /** Tests: skip guardSql to check that the engine blocks on its own. */
   skipGuard = false;
+  /** A query running longer than this (on the worker) is given up. */
+  timeLimitMs = SQL_TIME_LIMIT_MS;
 
-  private writer: DatabaseSync;
-  private reader: DatabaseSync;
+  private writer!: DatabaseSync;
+  private reader!: DatabaseSync;
+  private uri = '';
+  private worker: Worker | null = null;
+  private queryId = 0;
+  /** Gives up the query running on the worker. */
+  private abortQuery: (() => void) | null = null;
   private schema: SqlColumn[] | null = null;
   /** Optional columns in the table now (lower-case names). */
   private loadedCols = new Set<string>();
@@ -62,21 +75,28 @@ export class LogSql {
   private cancelGen = 0;
   private closed = false;
   private unlisten: () => void;
-  private regexCache = new Map<string, RegExp>();
 
-  constructor(private doc: LogDocument) {
-    const uri = `file:ulvsql-${process.pid}-${++dbCounter}?mode=memory&cache=shared`;
-    this.writer = new DatabaseSync(uri);
-    this.reader = new DatabaseSync(uri, { readOnly: true });
+  /** `queryWorker`: the built sqlWorker.js (absent in unit tests: queries then run on this thread). */
+  constructor(
+    private doc: LogDocument,
+    private queryWorker?: string,
+  ) {
+    this.openDb();
+    this.unlisten = doc.onIndexChanged((first) => this.indexChanged(first));
+  }
+
+  /** A new, empty in-memory database (at the start, and after giving up a query that may still hold the old one). */
+  private openDb() {
+    this.uri = `file:ulvsql-${process.pid}-${++dbCounter}?mode=memory&cache=shared`;
+    this.writer = new DatabaseSync(this.uri);
+    this.reader = new DatabaseSync(this.uri, { readOnly: true });
     // Sorting temp data stays in memory, never in a temp file.
     for (const db of [this.writer, this.reader]) db.exec('PRAGMA temp_store = MEMORY');
-    this.reader.function('ulv_row', { deterministic: false }, (b) => (typeof b === 'number' || typeof b === 'bigint' ? this.doc.viewRowOfBase(Number(b)) : null));
-    this.reader.function('regexp', { deterministic: true }, (pattern, value) =>
-      pattern === null || value === null ? null : this.re(String(pattern)).test(String(value)) ? 1 : 0,
-    );
-    this.reader.function('regexp_extract', { deterministic: true }, (value, pattern) => this.extract(value, pattern, null));
-    this.reader.function('regexp_extract', { deterministic: true }, (value, pattern, group) => this.extract(value, pattern, group));
-    this.unlisten = doc.onIndexChanged((first) => this.indexChanged(first));
+    sqlFunctions(this.reader, (b) => this.doc.viewRowOfBase(b));
+    this.built = false;
+    this.loadedCols = new Set();
+    this.loadedPerSource = [];
+    this.loadedCount = 0;
   }
 
   get loaded() {
@@ -106,9 +126,10 @@ export class LogSql {
     return run;
   }
 
-  /** Stops a running load (it rolls back). */
+  /** Stops a running load (it rolls back) or gives up a running query. */
   cancel() {
     this.cancelGen = this.gen;
+    this.abortQuery?.();
   }
 
   // ------------------------------------------------------------------ schema
@@ -148,10 +169,11 @@ export class LogSql {
         await this.ensureLoaded(schema, need, gen, onProgress);
         loadMs = performance.now() - t0;
         const t1 = performance.now();
-        const r = this.run(sql, maxRows);
+        const r = await this.runSomewhere(sql, maxRows, gen);
         return this.result({ ...r, queryMs: performance.now() - t1, loadMs });
       } catch (e) {
         if (e instanceof SqlCancelled) return this.result({ cancelled: true, loadMs });
+        if (e instanceof SqlTimeLimit) return this.result({ error: e.message, loadMs });
         throw e;
       }
     });
@@ -161,31 +183,47 @@ export class LogSql {
     return { columns: [], rows: [], truncated: false, error: null, queryMs: 0, loadMs: 0, loaded: this.loadedCount, total: this.total, capped: this.capped, ...r };
   }
 
-  private run(sql: string, maxRows: number): Pick<SqlResult, 'columns' | 'rows' | 'truncated' | 'error'> {
-    let st: StatementSync;
+  /** The query on the worker when there is one, else here. Throws SqlCancelled when it was given up. */
+  private async runSomewhere(sql: string, maxRows: number, gen: number): Promise<QueryRows> {
     try {
       if (this.writes(sql)) return { columns: [], rows: [], truncated: false, error: 'not authorized' };
-      st = this.reader.prepare(sql);
     } catch (e) {
       return { columns: [], rows: [], truncated: false, error: cleanError(e) };
     }
-    const columns = st.columns().map((c) => c.name);
-    const arrays = typeof (st as unknown as { setReturnArrays?: (on: boolean) => void }).setReturnArrays === 'function';
-    if (arrays) (st as unknown as { setReturnArrays: (on: boolean) => void }).setReturnArrays(true);
-    const rows: SqlValue[][] = [];
-    let truncated = false;
-    try {
-      for (const row of st.iterate()) {
-        if (rows.length >= maxRows) {
-          truncated = true;
-          break;
-        }
-        rows.push(arrays ? (row as unknown as SqlValue[]) : columns.map((c) => (row as Record<string, SqlValue>)[c]));
-      }
-    } catch (e) {
-      return { columns: [], rows: [], truncated: false, error: cleanError(e) };
-    }
-    return { columns, rows, truncated, error: null };
+    if (!this.queryWorker) return runQuery(this.reader, sql, maxRows);
+    if (this.cancelGen >= gen) throw new SqlCancelled();
+    const w = (this.worker ??= new Worker(this.queryWorker));
+    w.unref(); // a query left running never keeps the process alive
+    const id = ++this.queryId;
+    const { view, base } = this.doc.viewSnapshot();
+    return new Promise<QueryRows>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        w.off('message', onMessage);
+        w.off('error', onError);
+        this.abortQuery = null;
+      };
+      const giveUp = (err: Error) => {
+        done();
+        // The worker may be inside SQLite, holding the database: leave both behind and load into a new one next time.
+        void w.terminate();
+        if (this.worker === w) this.worker = null;
+        abandoned.push(this.writer, this.reader);
+        if (!this.closed) this.openDb();
+        reject(err);
+      };
+      const onMessage = (m: { id: number; result: QueryRows }) => {
+        if (m.id !== id) return;
+        done();
+        resolve(m.result);
+      };
+      const onError = (e: Error) => giveUp(e);
+      const timer = setTimeout(() => giveUp(new SqlTimeLimit(sqlTimeLimitText(this.timeLimitMs))), this.timeLimitMs);
+      this.abortQuery = () => giveUp(new SqlCancelled());
+      w.on('message', onMessage);
+      w.on('error', onError);
+      w.postMessage({ id, uri: this.uri, sql, maxRows, view, base });
+    });
   }
 
   // -------------------------------------------------------------------- load
@@ -343,34 +381,92 @@ export class LogSql {
     );
   }
 
-  private re(pattern: string): RegExp {
-    let r = this.regexCache.get(pattern);
-    if (!r) {
-      if (this.regexCache.size > 64) this.regexCache.clear();
-      this.regexCache.set(pattern, (r = new RegExp(pattern)));
-    }
-    return r;
-  }
-
-  /** regexp_extract(value, pattern[, group]): the group's text (group 1 when the pattern has groups, else the match), or null. */
-  private extract(value: unknown, pattern: unknown, group: unknown): string | null {
-    if (value === null || pattern === null) return null;
-    const m = this.re(String(pattern)).exec(String(value));
-    if (!m) return null;
-    const g = group === null ? (m.length > 1 ? 1 : 0) : Number(group);
-    return m[g] ?? null;
-  }
-
   close() {
     if (this.closed) return;
     this.closed = true;
     this.unlisten();
+    this.abortQuery?.();
+    void this.worker?.terminate();
+    this.worker = null;
     // After whatever runs has stopped (a load sees `closed` and rolls back).
     void this.serial(async () => {
+      if (abandoned.includes(this.writer)) return; // a given-up query may still be inside it
       this.reader.close();
       this.writer.close();
     });
   }
+}
+
+class SqlTimeLimit extends Error {}
+
+/** Connections of queries that were given up: never closed (that could wait for them for ever) nor collected. */
+const abandoned: DatabaseSync[] = [];
+
+type QueryRows = Pick<SqlResult, 'columns' | 'rows' | 'truncated' | 'error'>;
+
+/** Runs a (checked) query on a connection: at most `maxRows` rows. Also used by the query worker (sqlWorker.ts). */
+export function runQuery(db: DatabaseSync, sql: string, maxRows: number): QueryRows {
+  let st: StatementSync;
+  try {
+    st = db.prepare(sql);
+  } catch (e) {
+    return { columns: [], rows: [], truncated: false, error: cleanError(e) };
+  }
+  const columns = st.columns().map((c) => c.name);
+  const arrays = typeof (st as unknown as { setReturnArrays?: (on: boolean) => void }).setReturnArrays === 'function';
+  if (arrays) (st as unknown as { setReturnArrays: (on: boolean) => void }).setReturnArrays(true);
+  const rows: SqlValue[][] = [];
+  let truncated = false;
+  try {
+    for (const row of st.iterate()) {
+      if (rows.length >= maxRows) {
+        truncated = true;
+        break;
+      }
+      rows.push(arrays ? (row as unknown as SqlValue[]) : columns.map((c) => (row as Record<string, SqlValue>)[c]));
+    }
+  } catch (e) {
+    return { columns: [], rows: [], truncated: false, error: cleanError(e) };
+  }
+  return { columns, rows, truncated, error: null };
+}
+
+/** The functions queries can call: ulv_row (the view row of a base position), regexp and regexp_extract. */
+export function sqlFunctions(db: DatabaseSync, viewRowOfBase: (base: number) => number | null) {
+  const cache = new Map<string, RegExp>();
+  const re = (pattern: string) => {
+    let r = cache.get(pattern);
+    if (!r) {
+      if (cache.size > 64) cache.clear();
+      cache.set(pattern, (r = new RegExp(pattern)));
+    }
+    return r;
+  };
+  // regexp_extract(value, pattern[, group]): the group's text (group 1 when the pattern has groups, else the match), or null.
+  const extract = (value: unknown, pattern: unknown, group: unknown): string | null => {
+    if (value === null || pattern === null) return null;
+    const m = re(String(pattern)).exec(String(value));
+    if (!m) return null;
+    const g = group === null ? (m.length > 1 ? 1 : 0) : Number(group);
+    return m[g] ?? null;
+  };
+  db.function('ulv_row', { deterministic: false }, (b) => (typeof b === 'number' || typeof b === 'bigint' ? viewRowOfBase(Number(b)) : null));
+  db.function('regexp', { deterministic: true }, (pattern, value) => (pattern === null || value === null ? null : re(String(pattern)).test(String(value)) ? 1 : 0));
+  db.function('regexp_extract', { deterministic: true }, (value, pattern) => extract(value, pattern, null));
+  db.function('regexp_extract', { deterministic: true }, (value, pattern, group) => extract(value, pattern, group));
+}
+
+/** ulv_row over a snapshot of a view (null: every base row), as LogDocument.viewRowOfBase. */
+export function viewRowIn(view: Uint32Array | null, base: number, b: number): number | null {
+  if (!view) return b >= 0 && b < base ? b : null;
+  let lo = 0,
+    hi = view.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (view[mid] < b) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < view.length && view[lo] === b ? lo : null;
 }
 
 /** "no such column: x" from node:sqlite's error. */

@@ -8,6 +8,7 @@ import { ChildProcess, spawn } from 'node:child_process';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { ensureFolder } from './captureFile';
 import {
   explainSsh,
   globCommand,
@@ -166,7 +167,7 @@ export class RemoteFile {
 
   private async start() {
     this.expected = await this.probeSize();
-    fs.mkdirSync(this.opts.cacheDir, { recursive: true });
+    ensureFolder(this.opts.cacheDir); // owner-only: the copies hold the remote logs
     sessions.get(this.localPath)?.close(); // a failed session of the same file
     this.fd = fs.openSync(this.localPath, 'w', 0o600);
     sessions.set(this.localPath, this);

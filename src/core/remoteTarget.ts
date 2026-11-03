@@ -10,6 +10,7 @@ export interface RemoteTarget {
 }
 
 const HOST = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+const USER = /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/;
 const IPV6 = /^\[[0-9A-Fa-f:.%]+\]$/;
 const SCP = /^(?:([^@\s/]+)@)?([A-Za-z0-9_][A-Za-z0-9_.-]*|\[[0-9A-Fa-f:.%]+\]):(\/.*)$/s;
 
@@ -71,7 +72,8 @@ export function tryParseRemote(s: string | null | undefined): RemoteTarget | nul
 /** Rejects what could be read as an ssh option or break the remote command. */
 export function validateRemote(t: RemoteTarget) {
   if (!HOST.test(t.host) && !IPV6.test(t.host)) throw new Error(`Bad host name "${t.host}"`);
-  if (t.user !== null && (!t.user.length || t.user.startsWith('-') || /[\s/:@\x00-\x1f\x7f]/.test(t.user))) throw new Error(`Bad user name "${t.user}"`);
+  // Plain names only: older OpenSSH clients pass the user to a shell unquoted (%r in ProxyCommand, Match exec).
+  if (t.user !== null && !USER.test(t.user)) throw new Error(`Bad user name "${t.user}"`);
   if (t.port !== null && !(Number.isInteger(t.port) && t.port >= 1 && t.port <= 65535)) throw new Error(`Bad port ${t.port}`);
   if (!t.path.startsWith('/')) throw new Error('The remote path must be absolute (start with /)');
   if (t.path.length > 4096) throw new Error('The remote path is too long');

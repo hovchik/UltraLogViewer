@@ -30,6 +30,11 @@ public sealed record SqlResult(IReadOnlyList<string> Columns, IReadOnlyList<obje
 /// </summary>
 public static partial class SqlSchema
 {
+    /// <summary>A query (not the load) that runs longer than this is stopped.</summary>
+    public static readonly TimeSpan TimeLimit = TimeSpan.FromMinutes(2);
+
+    public static string TimeLimitText(TimeSpan limit) => $"The query ran for more than {Math.Round(limit.TotalSeconds)} s and was stopped";
+
     /// <summary>Always there; logger, thread, message and text (and the fields) are loaded only when a query names them.</summary>
     public static readonly string[] Core = ["row", "line", "source", "time", "time_iso", "level"];
     public static readonly string[] Optional = ["logger", "thread", "message", "text"];
