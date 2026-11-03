@@ -805,6 +805,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         else _tabs.Add(tab);
         Activate(tab);
+        RemoteOpened();
         try
         {
             // A zip opens as its text members, merged; all files of a merge are indexed in parallel.

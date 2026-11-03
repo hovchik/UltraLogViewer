@@ -371,10 +371,10 @@ public sealed class RemoteFile : IDisposable
     {
         _expected = await ProbeSizeAsync(ct);
         Directory.CreateDirectory(_opts.CacheDir);
+        if (ByLocal.TryGetValue(LocalPath, out var old)) old.Dispose(); // a closed session of the same file (it deletes the copy)
         var create = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.ReadWrite | FileShare.Delete, BufferSize = 0 };
         if (!OperatingSystem.IsWindows()) create.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         _out = new FileStream(LocalPath, create);
-        if (ByLocal.TryGetValue(LocalPath, out var old)) old.Dispose(); // a failed session of the same file
         ByLocal[LocalPath] = this;
         State = _expected == 0 ? RemoteState.Live : RemoteState.Copying;
         _loop = Task.Run(Loop);
@@ -382,7 +382,6 @@ public sealed class RemoteFile : IDisposable
         var deadline = Environment.TickCount64 + 20_000;
         while (Received < want && State is RemoteState.Copying or RemoteState.Connecting && Environment.TickCount64 < deadline)
             await Task.Delay(15, ct);
-        if (State == RemoteState.Failed) throw new IOException(_error);
     }
 
     private async Task<long> ProbeSizeAsync(CancellationToken ct)

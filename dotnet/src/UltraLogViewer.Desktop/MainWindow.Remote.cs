@@ -33,6 +33,31 @@ public sealed partial class MainWindow
     private async Task<string[]?> LocalCopiesAsync(string[] paths)
     {
         if (!paths.Any(RemoteTarget.LooksRemote)) return paths;
+        _remoteOpening++;
+        string[]? local = null;
+        try
+        {
+            return local = await LocalCopiesCoreAsync(paths);
+        }
+        finally
+        {
+            _remoteOpening--;
+            if (local is null) RemoteOpened(); // no new copies to keep
+        }
+    }
+
+    /// <summary>Remote opens running: a tab closed meanwhile does not prune, as their new copies are in no tab yet.</summary>
+    private int _remoteOpening;
+    private bool _pruneLater;
+
+    /// <summary>The prune put off while remote files were opened, once their tab has them (called by OpenTab).</summary>
+    private void RemoteOpened()
+    {
+        if (_pruneLater && _remoteOpening == 0) PruneRemote();
+    }
+
+    private async Task<string[]?> LocalCopiesCoreAsync(string[] paths)
+    {
         var hosts = paths.Where(RemoteTarget.LooksRemote).Select(p => RemoteTarget.Parse(p)?.Host).OfType<string>().Distinct().ToList();
         if (hosts.Count > 0) Toast(hosts.Count == 1 ? $"Connecting to {hosts[0]}…" : $"Connecting to {hosts.Count} hosts…");
         var opts = RemoteOptions;
@@ -69,7 +94,11 @@ public sealed partial class MainWindow
     }
 
     /// <summary>Ends the ssh sessions that no open tab shows any more (after a tab is closed or replaced).</summary>
-    private void PruneRemote() => RemoteFile.Prune(AllTabs().SelectMany(t => t.Paths.Concat(t.Info.Sources.Select(s => s.Path))));
+    private void PruneRemote()
+    {
+        _pruneLater = _remoteOpening > 0;
+        if (!_pruneLater) RemoteFile.Prune(AllTabs().SelectMany(t => t.Paths.Concat(t.Info.Sources.Select(s => s.Path))));
+    }
 
     /// <summary>The Sources list shows the connection state, which changes without new data.</summary>
     private void TickRemote()
