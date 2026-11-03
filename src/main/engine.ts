@@ -12,6 +12,8 @@ import { ScanPool } from '../core/scanPool';
 import { LogSql } from '../core/logSql';
 import { SqlColumn, SqlResult } from '../core/sqlSchema';
 import { Encoding } from '../core/fileSource';
+import { closeAllRemote, findRemote, pruneRemote } from '../core/remote';
+import { listRemoteFolder, localCopies, remoteCacheDir } from './engineRemote';
 import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
 
 export interface OpenOptions {
@@ -55,6 +57,48 @@ export class Engine {
     this.timer = setInterval(() => void this.poll(), POLL_MS);
   }
 
+  // ------------------------------------------------- remote files (engineRemote.ts)
+
+  /** Local copies being opened by `openRemote` and not yet passed to `open`: never pruned. */
+  private pendingRemote = new Set<string>();
+  /** The paths each document was opened with (its sources appear only once indexing has started). */
+  private docPaths = new Map<number, string[]>();
+  /** `openRemote` calls running: their new copies are in no document yet, so pruning waits for them. */
+  private remoteOpening = 0;
+  /** The connection state last sent per document, so a change is pushed even without new data. */
+  private remoteSent = new Map<number, string>();
+
+  /**
+   * Remote files (ssh:// URLs, user@host:/path, patterns with * or ?) replaced by local copies that are kept up to
+   * date, all hosts at once; local paths pass through. Pass the result to `open`.
+   */
+  async openRemote(paths: string[], opts: { ssh?: string | null } = {}): Promise<{ paths: string[]; errors: string[] }> {
+    this.remoteOpening++;
+    try {
+      const r = await localCopies(paths, { ssh: opts.ssh, cacheDir: remoteCacheDir(this.cacheDir) });
+      for (const p of r.paths) this.pendingRemote.add(p);
+      return r;
+    } finally {
+      this.remoteOpening--;
+    }
+  }
+
+  /** The entries of a remote folder (for the Browse button of "Open remote file…"). */
+  listRemote(url: string, ssh?: string | null): Promise<string[]> {
+    return listRemoteFolder(url, ssh);
+  }
+
+  /** The app quits: every ssh process goes. */
+  closeRemote() {
+    closeAllRemote();
+  }
+
+  /** Ends the ssh sessions that no open document shows any more. */
+  private pruneRemote() {
+    if (this.remoteOpening > 0) return; // (open() prunes once they are in a document)
+    pruneRemote([...this.pendingRemote, ...[...this.docPaths.values()].flat(), ...[...this.docs.values()].flatMap((d) => d.sources.map((s) => s.path))]);
+  }
+
   /**
    * Progress events, at most every 50 ms per document and phase (and always the last one): a scan on all cores
    * reports a thousand batches a second, and redrawing the status bar for each would take CPU from the scan.
@@ -75,10 +119,14 @@ export class Engine {
 
   /** Opens one document over the given files (several files = merged timeline). Indexing continues in the background. */
   open(paths: string[], opts: OpenOptions = {}): number {
+    const wasPending = paths.filter((p) => this.pendingRemote.delete(p)).length > 0;
     const id = this.nextId++;
-    const title = paths.length === 1 ? path.basename(paths[0]) : `${path.basename(paths[0])} + ${paths.length - 1} more`;
+    // (displayName: "host:path" for the local copy of a remote file)
+    const title = paths.length === 1 ? displayName(paths[0]) : `${displayName(paths[0])} + ${paths.length - 1} more`;
     const doc = new LogDocument(id, title);
     this.docs.set(id, doc);
+    this.docPaths.set(id, paths);
+    if (wasPending) this.pruneRemote(); // one that openRemote put off
     const { cache, cacheMaxBytes, ...rest } = opts;
     const sourceOpts = { ...rest, scanPool: this.scanPool, cacheDir: cache && this.cacheDir ? this.cacheDir : undefined, cacheMaxBytes };
     void (async () => {
@@ -113,6 +161,7 @@ export class Engine {
     if (src.indexing) throw new Error('The file is still being indexed');
     const id = this.nextId++;
     this.docs.set(id, src.duplicate(id));
+    this.docPaths.set(id, this.docPaths.get(docId) ?? []);
     return id;
   }
 
@@ -126,7 +175,10 @@ export class Engine {
     this.sql.delete(docId);
     this.docs.get(docId)?.close();
     this.docs.delete(docId);
+    this.remoteSent.delete(docId);
+    this.docPaths.delete(docId);
     for (const k of this.progressAt.keys()) if (k.startsWith(`${docId}:`)) this.progressAt.delete(k);
+    this.pruneRemote();
   }
 
   info(docId: number): DocInfo {
@@ -269,6 +321,7 @@ export class Engine {
         try {
           if (err) throw err;
           if (await d.sync()) this.emit({ type: 'doc-updated', docId: id, info: d.info(), reset: false });
+          else this.pushRemoteState(id, d);
         } catch (e) {
           this.emit({ type: 'doc-error', docId: id, message: (e as Error).message });
         }
@@ -278,10 +331,21 @@ export class Engine {
     }
   }
 
+  /** A remote file's connection state changes without new data: the Sources list shows it. */
+  private pushRemoteState(id: number, d: LogDocument) {
+    if (!d.sources.some((s) => findRemote(s.path))) return;
+    const info = d.info();
+    const key = info.sources.map((s) => (s.remote ? `${s.remote.state}:${s.remote.attempt}:${s.remote.state === 'copying' ? s.remote.received : ''}` : '')).join('|');
+    if (this.remoteSent.get(id) === key) return;
+    this.remoteSent.set(id, key);
+    this.emit({ type: 'doc-updated', docId: id, info, reset: false });
+  }
+
   dispose() {
     if (this.timer) clearInterval(this.timer);
     for (const id of [...this.docs.keys()]) this.close(id);
     this.scanPool?.close();
+    closeAllRemote();
   }
 }
 

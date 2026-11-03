@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { displayName, openDecompressed, splitMember } from './archives';
+import { findRemote } from './remote';
 import { detectFormatInfo, FormatDetection, formatLabel, LogFormat } from './formats';
 import { CacheEntry, cacheFileFor, customFormatsKey, evictCache, HASH_BYTES, hashRange, readCache, touchCache, writeCache } from './indexCache';
 import { OpenWindow, windowEmpty } from './timeWindow';
@@ -146,6 +147,7 @@ export class FileSource {
       windowFrom: this.windowFrom,
       windowTo: this.windowTo,
       cacheState: this.cacheState,
+      remote: findRemote(this.path)?.status(),
     };
   }
 

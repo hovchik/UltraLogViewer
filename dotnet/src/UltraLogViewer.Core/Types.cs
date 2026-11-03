@@ -101,10 +101,12 @@ public record ColumnDef(string Key, string Title, double Width);
 /// <param name="Compression">"gzip", "bzip2", "zip" or "" for a plain file.</param>
 /// <param name="Partial">Only a time window was opened (<paramref name="WindowFrom"/>..<paramref name="WindowTo"/>, either may be open).</param>
 /// <param name="CacheState">"hit" or "grown" when the index came from the index cache.</param>
+/// <param name="Remote">For the local copy of a remote file: where it comes from and the state of the connection.</param>
 public sealed record SourceInfo(int Id, string Path, string DisplayName, long Size, int Lines, int Entries,
     string Format, string Encoding, bool Compressed, bool Live,
     string FormatId = "", string FormatLabel = "", bool FormatAuto = true, int FormatMatched = 0, int FormatSampled = 0,
-    string Compression = "", bool Indexing = false, double Progress = 1, bool Partial = false, long? WindowFrom = null, long? WindowTo = null, string CacheState = "");
+    string Compression = "", bool Indexing = false, double Progress = 1, bool Partial = false, long? WindowFrom = null, long? WindowTo = null, string CacheState = "",
+    RemoteStatus? Remote = null);
 
 public sealed record DocInfo(int Total, int ViewCount, int[] LevelCounts, bool Indexing, double Progress,
     long? TimeMin, long? TimeMax, bool Merged, IReadOnlyList<SourceInfo> Sources, IReadOnlyList<ColumnDef> Columns);

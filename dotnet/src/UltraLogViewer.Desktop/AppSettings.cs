@@ -85,6 +85,11 @@ public sealed class AppSettings
     public string EditorCommand { get; set; } = "";
     /// <summary>Folders that relative source paths (and paths from the build machine) are looked up under, in order.</summary>
     public List<string> SourceRoots { get; set; } = [];
+    /// <summary>The ssh program for remote files (empty: $ULV_SSH, else ssh from the PATH).</summary>
+    public string SshProgram { get; set; } = "";
+    /// <summary>What "Multi-host tail…" was last opened with.</summary>
+    public string MultiHostHosts { get; set; } = "";
+    public string MultiHostPath { get; set; } = "";
     /// <summary>AI features (off by default). The API keys are not here: see <see cref="AiKeyStore"/>.</summary>
     public AiSettings Ai { get; set; } = new();
 

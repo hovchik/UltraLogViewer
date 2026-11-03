@@ -209,6 +209,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Open and _merge…", () => Run(() => PickAndOpen(true)), new KeyGesture(Key.O, KeyModifiers.Control | KeyModifiers.Shift)),
                         Item("Open _last…", () => Run(() => PickAndOpenWindow(false))),
                         Item("Open time _range…", () => Run(() => PickAndOpenWindow(true))),
+                        Item("Open re_mote file…", () => Run(PickRemoteFile)),
+                        Item("Multi-_host tail…", () => Run(PickMultiHost)),
                         _recentMenu,
                         new Separator(),
                         Item("Open _workspace…", () => Run(PickOpenWorkspace)),
@@ -698,7 +700,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                 Cursor = new Cursor(StandardCursorType.Hand),
                 Child = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { label, close } },
             };
-            ToolTip.SetTip(cell, string.Join("\n", t.Paths));
+            ToolTip.SetTip(cell, string.Join("\n", t.Paths.Select(SourceUrl)));
             cell.ContextMenu = new ContextMenu
             {
                 Items =
@@ -744,6 +746,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         var wasActive = OwnerOf(_active) == tab;
         DropSql(tab);
         tab.Dispose();
+        PruneRemote();
         if (wasActive) Activate(_tabs.Count == 0 ? null : _tabs[Math.Min(i, _tabs.Count - 1)]);
         else RebuildTabStrip();
     }
@@ -765,7 +768,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
     /// <param name="window">Open only this time window of the files (null: everything).</param>
     public async Task OpenPaths(string[] paths, bool merge, OpenWindow? window = null)
     {
-        paths = paths.Select(Path.GetFullPath).ToArray();
+        // remote files as ssh:// URLs, the form kept in recent files
+        paths = paths.Select(p => RemoteTarget.LooksRemote(p) ? RemoteTarget.Parse(p)?.Url ?? p : Path.GetFullPath(p)).ToArray();
         _settings.AddRecent(paths);
         _settings.Save();
         if (window is { IsEmpty: true }) window = null;
@@ -776,7 +780,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         foreach (var p in paths)
         {
-            var existing = window is null ? _tabs.FirstOrDefault(t => t.Paths.Length == 1 && t.Window is null && string.Equals(t.Paths[0], p, StringComparison.Ordinal)) : null;
+            var key = RemoteTarget.Parse(p) is { } remote ? RemoteFile.LocalPathFor(remote, RemoteOptions.CacheDir) : p; // a remote file's local copy
+            var existing = window is null ? _tabs.FirstOrDefault(t => t.Paths.Length == 1 && t.Window is null && string.Equals(t.Paths[0], key, StringComparison.Ordinal)) : null;
             if (existing is not null)
             {
                 Activate(existing);
@@ -788,6 +793,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
 
     private async Task<DocumentTab?> OpenTab(string[] paths, string encoding, DocumentTab? replacing, Action<DocumentTab>? init = null)
     {
+        if (await LocalCopiesAsync(paths) is not { } local) return null; // remote files: their local copies (MainWindow.Remote.cs)
+        paths = local;
         var doc = new LogDocument(paths.Length == 1 ? Path.GetFileName(paths[0]) : "Merged");
         var tab = new DocumentTab(paths, doc) { Encoding = encoding, BusyLabel = "Indexing", BusyProgress = 0, Window = replacing?.Window };
         init?.Invoke(tab);
@@ -801,6 +808,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         }
         else _tabs.Add(tab);
         Activate(tab);
+        RemoteOpened();
         try
         {
             // A zip opens as its text members, merged; all files of a merge are indexed in parallel.
@@ -853,6 +861,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private void OnTick()
     {
         _tickCount++;
+        TickRemote();
         var tab = _active;
         if (tab is not null && tab.BusyProgress is not null)
         {
@@ -1668,6 +1677,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         foreach (var t in _tabs) t.Dispose();
         _tabs.Clear();
         _stdin?.Dispose();
+        RemoteFile.CloseAll();
     }
 
     // ===================================================== overview & timeline

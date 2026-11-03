@@ -485,3 +485,15 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .sql-table tr:hover td { background: var(--bg-2); }
 .sql-table tr.sel td { background: var(--sel); color: var(--sel-fg); }
 .sql-chart { flex: 1; min-height: 0; width: 100%; display: block; }
+
+/* remote files (remote.ts) */
+.badge.remote { margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10.5px; background: var(--accent-bg); color: var(--accent); vertical-align: 1px; }
+.src .remote-state.reconnecting, .src .remote-state.failed { color: var(--warn); }
+.remote-row { display: flex; gap: 6px; }
+.remote-row input { flex: 1; }
+.modal input.mono { font-family: var(--mono); }
+.remote-list { max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; font-family: var(--mono); font-size: 12.5px; }
+.remote-list .item { padding: 2px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.remote-list .item.dir { font-weight: 600; }
+.remote-list .item:hover { background: var(--accent-bg); }
+.remote-list .item.on { background: var(--accent); color: #fff; }

@@ -530,8 +530,8 @@ public sealed class UiTests : IDisposable
         grid.Select(errRow);
         w.LogView.Focus();
         w.KeyPressQwerty(PhysicalKey.ArrowRight, RawInputModifiers.None);
-        await Until(() => grid.ExpansionForTest(errRow).Contains("… 3 framework frames"));
-        Assert.Contains("com.shop.Api.handle", grid.ExpansionForTest(errRow));
+        // A background refresh can re-lay the rows out in between, so wait for both in one go.
+        await Until(() => grid.ExpansionForTest(errRow) is var x && x.Contains("… 3 framework frames") && x.Contains("com.shop.Api.handle"));
         await Until(() => grid.BoxForTest(errRow) is { ExpTop: > 0 });
         Screenshot(w, "folded-frames.png");
 

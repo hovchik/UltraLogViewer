@@ -95,7 +95,7 @@ public sealed class DocumentTab : IDisposable
     /// <summary>Column choices of this tab alone (duplicates and split panes); null: the per-format ones in the settings.</summary>
     public TabColumns? OwnColumns { get; set; }
 
-    public string Title => (Paths.Length == 1 ? Path.GetFileName(Paths[0]) : $"{Path.GetFileName(Paths[0])} + {Paths.Length - 1}") + (Copy > 0 ? $" ({Copy + 1})" : "");
+    public string Title => (Paths.Length == 1 ? MainWindow.ShortName(Paths[0]) : $"{MainWindow.ShortName(Paths[0])} + {Paths.Length - 1}") + (Copy > 0 ? $" ({Copy + 1})" : "");
     public int SelectionStart => Math.Min(Anchor, Focus);
     public int SelectionEnd => Math.Max(Anchor, Focus);
 
