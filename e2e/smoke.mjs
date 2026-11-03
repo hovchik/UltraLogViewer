@@ -61,6 +61,11 @@ await step('filters by a cell value from the row menu', async () => {
   await shot('08-row-menu');
   await item.click();
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // The status can change a frame before the grid redraws its rows.
+  await win.waitForFunction((l) => {
+    const cells = [...document.querySelectorAll('.grid-rows .r .c[data-col="logger"]')];
+    return cells.length > 0 && cells.every((c) => c.textContent.trim() === l);
+  }, logger, { timeout: 20000 }).catch(() => {});
   const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
   assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === logger), `loggers: ${loggers.slice(0, 5)}`);
   assert.ok((await win.locator('#sidebar .rule .txt').allInnerTexts()).includes(`Logger = ${logger}`));

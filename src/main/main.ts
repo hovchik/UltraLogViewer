@@ -70,6 +70,38 @@ function callEngine(method: string, args: unknown[]): Promise<unknown> {
  * then launched as a URL (vscode://, idea://…) or as a command line. With ULV_SOURCE_LAUNCH_LOG set (UI tests) the
  * launch is written to that file instead.
  */
+/** Custom editor commands the user has allowed, kept by the main process only (not in the renderer's settings). */
+const approvedEditorsFile = () => path.join(app.getPath('userData'), 'approved-editors.json');
+
+async function confirmEditorCommand(template: string): Promise<boolean> {
+  let approved: string[] = [];
+  try {
+    const v = JSON.parse(fs.readFileSync(approvedEditorsFile(), 'utf-8'));
+    if (Array.isArray(v)) approved = v.filter((x): x is string => typeof x === 'string');
+  } catch {
+    // none yet
+  }
+  if (approved.includes(template)) return true;
+  const opts = {
+    type: 'question' as const,
+    buttons: ['Allow', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Open in editor',
+    message: 'Allow this editor command?',
+    detail: `UltraLogViewer will run:\n\n${template}\n\nOnly allow a command you set up yourself under Edit › Editor and source roots….`,
+  };
+  const { response } = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+  if (response !== 0) return false;
+  try {
+    fs.mkdirSync(path.dirname(approvedEditorsFile()), { recursive: true });
+    fs.writeFileSync(approvedEditorsFile(), JSON.stringify([...approved, template]), { mode: 0o600 });
+  } catch {
+    // allowed for this launch only
+  }
+  return true;
+}
+
 async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unknown; command?: unknown }): Promise<{ ok: boolean; file?: string; target?: string; error?: string }> {
   if (!ref || typeof ref.path !== 'string' || typeof ref.line !== 'number') return { ok: false, error: 'bad location' };
   const roots = Array.isArray(opts?.roots) ? opts.roots.filter((r): r is string => typeof r === 'string') : [];
@@ -80,6 +112,9 @@ async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unkn
   const col = typeof ref.col === 'number' ? ref.col : 0;
   if (isUnsafeUrlTemplate(template)) return { ok: false, file, error: 'A file:// editor URL would run the file instead of opening it in an editor; set another one under Edit › Editor and source roots…' };
   const log = process.env.ULV_SOURCE_LAUNCH_LOG;
+  // The editor and its command come from the renderer. A custom one runs only after the user confirms it here, in the
+  // main process, once per distinct command, so page content can never start a program on its own.
+  if (opts?.editor === 'custom' && !log && !(await confirmEditorCommand(template))) return { ok: false, file, error: 'The editor command was not allowed' };
   if (isUrlTemplate(template)) {
     const target = expandUrl(template, file, ref.line, col);
     if (log) fs.appendFileSync(log, target + '\n');
