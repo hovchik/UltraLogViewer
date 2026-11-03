@@ -419,8 +419,8 @@ public sealed partial class MainWindow
             var fk = FormatKey(t);
             w.Tabs.Add(new WorkspaceTab
             {
-                Paths = t.Paths,
-                RelPaths = t.Paths.Select(p => Workspace.Relative(p, dir)).ToArray(),
+                Paths = t.Paths.Select(SourceUrl).ToArray(), // remote files as ssh:// URLs
+                RelPaths = t.Paths.Select(p => RemoteFile.Find(p) is null ? Workspace.Relative(p, dir) : SourceUrl(p)).ToArray(),
                 Format = t.FormatId,
                 FormatKey = fk,
                 Encoding = t.Encoding,

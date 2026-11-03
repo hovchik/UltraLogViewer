@@ -31,6 +31,7 @@ public static class Archives
     /// <summary>Display name of a path: the file name, or the member's file name for a zip member.</summary>
     public static string DisplayName(string path)
     {
+        if (RemoteFile.DisplayNameOf(path) is { } remote) return remote; // the local copy of a remote file: "host:path"
         var m = SplitMember(path);
         var name = m is { } x ? x.Member : path;
         var slash = name.LastIndexOfAny(['/', '\\']);

@@ -696,7 +696,9 @@ public sealed class Sidebar : ScrollViewer
         var state = s.Indexing ? $"Indexing {s.Progress:P0} · " : "";
         var extra = (s.Compression.Length > 0 ? " · " + s.Compression : s.Compressed ? " · gzip" : "") + (s.Live ? "" : " · static")
             + (s.Partial ? " · partial" : "") + (s.CacheState.Length > 0 ? " · cached index" : "");
-        return $"{s.DisplayName}\n{state}{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{extra}";
+        // a remote file: its connection state, which changes without new data
+        var remote = (RemoteFile.Find(s.Path)?.Status ?? s.Remote) is { } r ? r.Text + "\n" : "";
+        return $"{s.DisplayName}\n{remote}{state}{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{extra}";
     }
 
     public static string FormatSize(long b) => b switch

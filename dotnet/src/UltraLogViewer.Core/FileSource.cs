@@ -157,7 +157,7 @@ public sealed class FileSource : IDisposable
 
     public SourceInfo Info() => new(Id, Path, Archives.DisplayName(Path), DataEnd, LineCount, EntryCount, Format.Name, EncodingName, Compressed, Live,
         Format.Id, FormatDetector.Label(Format), Detection.Auto, Detection.Matched, Detection.Sampled,
-        Compression, Indexing, Indexing ? Progress : 1, Partial, WindowFrom, WindowTo, CacheState);
+        Compression, Indexing, Indexing ? Progress : 1, Partial, WindowFrom, WindowTo, CacheState, RemoteFile.Find(Path)?.Status);
 
     /// <summary>
     /// Prepares the file (decompress / transcode if needed), detects the format and indexes it: from the index

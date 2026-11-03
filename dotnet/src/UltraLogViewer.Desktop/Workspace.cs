@@ -72,7 +72,7 @@ public static class Workspace
         var list = new List<string>();
         for (var i = 0; i < tab.Paths.Length; i++)
         {
-            if (exists(tab.Paths[i])) list.Add(tab.Paths[i]);
+            if (exists(tab.Paths[i]) || RemoteTarget.LooksRemote(tab.Paths[i])) list.Add(tab.Paths[i]); // ssh:// URLs connect again
             else if (i < tab.RelPaths.Length && System.IO.Path.GetFullPath(System.IO.Path.Combine(dir, tab.RelPaths[i])) is var rel && exists(rel)) list.Add(rel);
         }
         return list.ToArray();
