@@ -67,6 +67,60 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 
 Press `F1` in the app for all keyboard shortcuts.
 
+### Open a view from a script, an alert or a ticket
+
+Both apps keep one window per user: a later launch, a clicked link or a script call opens its files there and
+brings the window to the front.
+
+**Command line.** `ultralogviewer [files|globs|archive.zip::member|-] [switches]`
+
+| Switch | Example | What it does |
+|---|---|---|
+| `--since`, `--until`, `--last` | `--since -1h`, `--last 30m` | Opens only this time window (already supported) |
+| `--filter` | `--filter "level:error db"` | Sets the quick filter |
+| `--search` | `--search timeout` | Finds this text and jumps to the first hit |
+| `--goto` | `--goto "2024-05-01 10:00:05"`, `--goto 1234`, `--goto app.log:1234`, `--goto line:2:30` | Selects the entry at a time, or a line (of the first file, or of a file by position or name) |
+| `--levels` | `--levels error,warn` | Shows only these levels |
+| `--format` | `--format json` | Uses this format instead of detecting it |
+| `--merge`, `--new-tab` | | Opens several files as one timeline; always opens a new tab (otherwise a tab over the same files is reused) |
+
+**Links.** `ultralogviewer://open?path=/var/log/app.log&since=2024-05-01T10:00:00Z&filter=level%3Aerror&goto=2024-05-01T10:12:03.120Z`
+takes the same keys (`path` can repeat; `merge=1`, `newtab=1`). Right-click a row (or use the command palette) and
+choose **Copy link to this view** to get one for the files, filter, levels and selected entry. A link can come from
+any web page, so the app never runs anything from it, refuses relative, network and control-character paths, and
+always asks before opening, naming the files (and warning about files that do not look like logs).
+
+The Windows installer and the Electron packages register the `ultralogviewer:` scheme. For the Avalonia app on
+Linux, add a desktop entry and make it the handler:
+
+```ini
+# ~/.local/share/applications/ultralogviewer.desktop
+[Desktop Entry]
+Type=Application
+Name=UltraLogViewer
+Exec=/opt/UltraLogViewer/UltraLogViewer %u
+MimeType=x-scheme-handler/ultralogviewer;
+NoDisplay=true
+```
+
+then run `xdg-mime default ultralogviewer.desktop x-scheme-handler/ultralogviewer`. On macOS, add a
+`CFBundleURLTypes` entry with the scheme `ultralogviewer` to the app bundle's `Info.plist`.
+
+**Local HTTP API** (off by default: *File › Local API › Enable local HTTP API*). It listens on `127.0.0.1` only, on
+port 7700 (or the next free one), and every request needs the token kept in the settings, as
+`Authorization: Bearer <token>` or `?token=`. Requests from web pages are refused (any Host other than
+127.0.0.1/localhost, any foreign Origin; no CORS). *Copy API example* puts a ready `curl` command with your token on
+the clipboard; *New API token* replaces the token.
+
+| Endpoint | Body / query | Answer |
+|---|---|---|
+| `POST /open` | `{"paths": ["/var/log/app.log"], "last": "1h", "filter": "level:error", "goto": "...", "levels": "error,warn", "merge": false, "newTab": false}` (full paths) | `{"ok": true, "tab": 3}` |
+| `GET /tabs` | | `[{"id", "title", "paths", "total", "shown", "filter", "ready", "active"}]` |
+| `POST /tabs/{id}/filter` | `{"filter": "...", "levels": "...", "search": "..."}` | `{"ok": true, "tab": 3}` |
+| `POST /tabs/{id}/goto` | `{"goto": "2024-05-01T10:12:03Z"}` or `{"goto": "line:1234"}` | `{"ok": true, "tab": 3}` |
+| `GET /tabs/{id}/rows?from=0&count=100` | at most 5000 rows | JSON lines: `row`, `source`, `line`, `time`, `level`, `fields`, `text` |
+| `GET /health` | | `{"ok": true}` |
+
 ## Getting started
 
 ```bash

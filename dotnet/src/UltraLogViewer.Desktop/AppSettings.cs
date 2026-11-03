@@ -77,9 +77,30 @@ public sealed class AppSettings
     public bool IndexCache { get; set; } = true;
     /// <summary>Upper bound of the index cache folder; the least recently used indexes go first.</summary>
     public long IndexCacheMaxMb { get; set; } = 2048;
+    /// <summary>Pinned entries (the strip above the grid), as 1-based line numbers per file, like bookmarks.</summary>
+    public Dictionary<string, List<int>> Pins { get; set; } = [];
+    /// <summary>Where source locations in stack traces open: "vscode", "rider", "intellij" or "custom" (<see cref="EditorCommand"/>).</summary>
+    public string Editor { get; set; } = "vscode";
+    /// <summary>A URL template or command line with {path}, {line} and {col}, for the "custom" editor.</summary>
+    public string EditorCommand { get; set; } = "";
+    /// <summary>Folders that relative source paths (and paths from the build machine) are looked up under, in order.</summary>
+    public List<string> SourceRoots { get; set; } = [];
+    /// <summary>The ssh program for remote files (empty: $ULV_SSH, else ssh from the PATH).</summary>
+    public string SshProgram { get; set; } = "";
+    /// <summary>What "Multi-host tail…" was last opened with.</summary>
+    public string MultiHostHosts { get; set; } = "";
+    public string MultiHostPath { get; set; } = "";
+    /// <summary>AI features (off by default). The API keys are not here: see <see cref="AiKeyStore"/>.</summary>
+    public AiSettings Ai { get; set; } = new();
+    /// <summary>The last choices in the Listen… dialog.</summary>
+    public ReceiverSettings Receiver { get; set; } = new();
+    /// <summary>The local HTTP API (off by default), see <see cref="LocalApiSettings"/>.</summary>
+    public LocalApiSettings LocalApi { get; set; } = new();
 
     /// <summary>The index cache folder, next to the settings file.</summary>
     [JsonIgnore] public string IndexCacheDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "index-cache");
+    /// <summary>Where receivers and event log exports write their capture files, next to the settings file.</summary>
+    [JsonIgnore] public string ReceiversDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "receivers");
 
     [JsonIgnore] public bool Comfortable => Density == "comfortable";
 

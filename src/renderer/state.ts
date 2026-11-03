@@ -1,3 +1,4 @@
+import type { AiSettings } from '../core/aiClient';
 import type { TimeMode } from '../core/timestamp';
 import type { OpenWindow } from '../core/timeWindow';
 import { DEFAULT_FRAMEWORK_PACKAGES } from '../core/folding';
@@ -21,6 +22,16 @@ export interface Bookmark {
   row?: number | null;
 }
 
+/** A row kept in the strip above the grid. */
+export interface Pin {
+  key: string;
+  line: number;
+  source: number;
+  preview: string;
+  /** Position in the current view (null when filtered out); refreshed after each view change. */
+  row?: number | null;
+}
+
 export interface FilterPreset {
   name: string;
   rules: FilterRule[];
@@ -28,11 +39,18 @@ export interface FilterPreset {
 }
 
 export interface Settings {
+  /** The last choices in the Listen… dialog. */
+  receiver?: import('./receivers').ReceiverSettings;
   theme?: 'light' | 'dark' | 'system';
   highlights?: HighlightRule[];
   presets?: FilterPreset[];
   customFormats?: CustomFormat[];
   recent?: string[];
+  /** The ssh program for remote files (empty: $ULV_SSH, else ssh from the PATH). */
+  sshProgram?: string;
+  /** What "Multi-host tail…" was last opened with. */
+  multiHostHosts?: string;
+  multiHostPath?: string;
   showHistogram?: boolean;
   showDetail?: boolean;
   showSidebar?: boolean;
@@ -68,6 +86,18 @@ export interface Settings {
   recentWorkspaces?: string[];
   /** Save the index of big files so reopening them is instant (default on). */
   indexCache?: boolean;
+  /** Pinned rows by file path: their 1-based lines. */
+  pins?: Record<string, number[]>;
+  /** Editor for source links: vscode, rider, intellij or custom (default vscode). */
+  editor?: string;
+  /** Command line of the custom editor, with {path}, {line} and {col}. */
+  editorCommand?: string;
+  /** Folders that relative source paths in stack traces are resolved against, first match wins. */
+  sourceRoots?: string[];
+  /** AI features (off by default). The API keys are not here: the main process keeps them (safeStorage). */
+  ai?: AiSettings;
+  /** The local HTTP API (off by default); main writes it, see main/openMain.ts. */
+  localApi?: { enabled?: boolean; port?: number; token?: string };
 }
 
 /** Display settings with their defaults resolved. */
@@ -131,6 +161,8 @@ export interface Tab {
   scanCost?: string;
   /** The latest filter run (rows it finds arrive as partial views tagged with it) and the epoch the grid shows. */
   filterSeq?: number;
+  /** onDocReady is still restoring bookmarks, pins and the tab's filter (a request waits for it, see openRequests.ts). */
+  settling?: boolean;
   filtering?: boolean;
   partialEpoch?: number;
   /** "Show in context": every entry is shown, rows the filter hides are dimmed. */
@@ -155,11 +187,30 @@ export interface Tab {
   patternsBusy?: boolean;
   /** When the last patterns run started (ms). */
   patternsAt?: number;
+  /** Pinned rows, by entry key (see pins.ts). */
+  pins?: Map<string, Pin>;
+  /** The field the timeline is stacked by ('level' when unset). */
+  histogramGroup?: string;
   /** Rows appended to the view while not following (the "↓ N new" pill). */
   newRows?: number;
+  /** The right-hand pane of a split view: a document over the same files, with its own filter. */
+  split?: Tab | null;
+  /** For a split pane: the tab it belongs to. */
+  splitOf?: Tab;
+  /** Selecting an entry in one pane of a split scrolls the other to it, or to the nearest entry by time (default on). */
+  syncSplit?: boolean;
+  /** Number shown after the title of a duplicated tab ("app.log (2)"); 0 or absent for the first one. */
+  copy?: number;
+  /** Column choices of this tab alone (duplicates and split panes, not saved); absent: the per-format settings. */
+  columns?: { extra: string[]; order: string[]; hidden: string[] };
+  /** The receiver or event log writing this tab's capture file (main process id); stopped when the tab closes. */
+  capture?: { id: number; status: string; running: boolean };
+  /** Detect the format again once the (empty when opened) capture has lines. */
+  detectOnData?: boolean;
   /** Settings to apply once the tab's document is ready (workspace load). */
   pending?: {
     bookmarks: { path: string; line: number; note: string }[];
+    pins?: { path: string; line: number }[];
     columns?: { extraColumns: string[]; columnOrder: string[]; hiddenColumns: string[] };
   };
 }

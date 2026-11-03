@@ -2,9 +2,11 @@
 // fields and pretty-printed JSON/XML.
 
 import { fold } from '../core/folding';
+import type { SourceRef } from '../core/sourceLinks';
 import type { PatternStat, RowData } from '../core/types';
 import { formatDuration, formatTime } from '../core/timestamp';
 import type { Tab, ViewSettings } from './state';
+import { linkifySources, refOfLink } from './sourceLinksView';
 import { esc, fmtNum, h, prettyEntry, toast } from './util';
 
 /** The raw entry as HTML, with runs of framework frames folded into clickable placeholders. */
@@ -42,7 +44,16 @@ export class DetailView {
     private view: () => ViewSettings,
     /** Click on a "… N framework frames" placeholder. */
     private onUnfold: (key: string) => void,
+    /** Click on a source location (Foo.java:42…) in the entry. */
+    private onOpenSource?: (ref: SourceRef) => void,
   ) {}
+
+  /** The AI answer pane, kept at the top of the pane's body across re-renders. */
+  aiPane: HTMLElement | null = null;
+
+  private withAi(...els: HTMLElement[]): HTMLElement[] {
+    return this.aiPane ? [this.aiPane, ...els] : els;
+  }
 
   /** The selected pattern of the patterns view: its template and sample message. */
   renderPattern(p: PatternStat | undefined, scanned: number) {
@@ -51,7 +62,7 @@ export class DetailView {
     resizer.addEventListener('mousedown', (e) => this.startResize(e));
     this.el.append(resizer);
     if (!p) {
-      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), h('div', { class: 'placeholder' }, 'Select a pattern to see a sample message.'));
+      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), ...this.withAi(h('div', { class: 'placeholder' }, 'Select a pattern to see a sample message.')));
       return;
     }
     const pct = scanned ? ((p.count / scanned) * 100).toFixed(1) : '0.0';
@@ -66,7 +77,7 @@ export class DetailView {
     const tpl = h('div', { class: 'fields' }, h('table', {}, h('tr', {}, h('td', { class: 'k' }, 'template'), h('td', {}, p.template))));
     const pre = h('pre', { class: 'pattern-sample' });
     pre.textContent = p.sample;
-    this.el.append(bar, h('div', { class: 'body' }, tpl, pre));
+    this.el.append(bar, h('div', { class: 'body' }, ...this.withAi(tpl, pre)));
   }
 
   private dockButton() {
@@ -80,7 +91,7 @@ export class DetailView {
     resizer.addEventListener('mousedown', (e) => this.startResize(e));
     this.el.append(resizer);
     if (!tab || !row) {
-      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), h('div', { class: 'placeholder' }, 'Select a row to see the full entry.'));
+      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), ...this.withAi(h('div', { class: 'placeholder' }, 'Select a row to see the full entry.')));
       return;
     }
     const src = tab.info.sources[row.source];
@@ -121,10 +132,15 @@ export class DetailView {
     fields.append(table);
     const pre = h('pre');
     pre.innerHTML = foldedEntryHtml(row.text, this.view(), tab.unfolded.has(row.key));
+    linkifySources(pre);
     pre.addEventListener('click', (e) => {
-      if ((e.target as HTMLElement).closest('.fold')) this.onUnfold(row.key);
+      if ((e.target as HTMLElement).closest('.fold')) return this.onUnfold(row.key);
+      const link = (e.target as HTMLElement).closest('.src-link') as HTMLElement | null;
+      // (not at the end of a drag that selected text)
+      const ref = link && document.getSelection()?.isCollapsed !== false ? refOfLink(link) : null;
+      if (ref) this.onOpenSource?.(ref);
     });
-    const body = h('div', { class: 'body' }, table.rows.length ? fields : null, pre);
+    const body = h('div', { class: 'body' }, ...this.withAi(...(table.rows.length ? [fields] : []), pre));
     this.el.append(bar, body);
   }
 

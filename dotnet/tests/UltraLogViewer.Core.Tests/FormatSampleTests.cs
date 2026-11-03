@@ -66,7 +66,7 @@ public class FormatSampleTests
     [Fact]
     public void NewFormatsCanBeChosenByHand()
     {
-        foreach (var id in new[] { "logfmt", "postgres", "mysql-error", "mysql-general", "mysql-slow", "mongodb", "rust", "macos", "laravel" })
+        foreach (var id in new[] { "logfmt", "postgres", "mysql-error", "mysql-general", "mysql-slow", "mongodb", "rust", "macos", "laravel", "winevent" })
         {
             var d = FormatDetector.DetectWithInfo(["hello"], 2024, force: id);
             Assert.Equal(id, d.Format.Id);

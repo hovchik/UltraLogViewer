@@ -418,9 +418,13 @@ public sealed class JsonFormat : LogFormat
     }
 }
 
+/// <summary>
+/// RFC 3164 / BSD syslog as files hold it ("Oct  3 04:05:06 host app[pid]: text"), also with the "&lt;PRI&gt;" that
+/// network captures keep; with a PRI the level comes from its severity, and facility and severity become fields.
+/// </summary>
 public sealed partial class SyslogFormat(int year) : LogFormat
 {
-    [GeneratedRegex(@"^([A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) (\S+) ([^\s:\[]+)(?:\[(\d+)\])?:? ?(.*)$")]
+    [GeneratedRegex(@"^(?:<(\d{1,3})>)?([A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) (\S+) ([^\s:\[]+)(?:\[(\d+)\])?:? ?(.*)$")]
     internal static partial Regex Re();
 
     public override string Id => "syslog";
@@ -429,26 +433,39 @@ public sealed partial class SyslogFormat(int year) : LogFormat
     public override bool Multiline => true;
     public override bool IsEntryStart(string line) => Re().IsMatch(line);
 
+    private static Level Lv(Match m) => m.Groups[1].Success && int.TryParse(m.Groups[1].Value, out var pri) && pri <= 191
+        ? Levels.FromNumber(pri % 8) : Levels.Detect(m.Groups[6].Value);
+
     public override QuickInfo Quick(string line)
     {
         var m = Re().Match(line);
         if (!m.Success) return new QuickInfo(Levels.Detect(line), Timestamps.None);
-        Timestamps.TryMatch(m.Groups[1].Value, year, out var ms, out _);
-        return new QuickInfo(Levels.Detect(m.Groups[5].Value), ms);
+        Timestamps.TryMatch(m.Groups[2].Value, year, out var ms, out _);
+        return new QuickInfo(Lv(m), ms);
     }
 
     public override Dictionary<string, string> Parse(string entry)
     {
         var m = Re().Match(FirstLine(entry));
         if (!m.Success) return new() { ["message"] = entry };
-        return new()
+        var d = new Dictionary<string, string>
         {
-            ["time"] = m.Groups[1].Value, ["host"] = m.Groups[2].Value, ["app"] = m.Groups[3].Value, ["pid"] = m.Groups[4].Value,
-            ["level"] = L(Levels.Detect(m.Groups[5].Value)), ["message"] = m.Groups[5].Value + RestLines(entry),
+            ["time"] = m.Groups[2].Value, ["host"] = m.Groups[3].Value, ["app"] = m.Groups[4].Value, ["pid"] = m.Groups[5].Value,
+            ["level"] = L(Lv(m)), ["message"] = m.Groups[6].Value + RestLines(entry),
         };
+        if (m.Groups[1].Success && int.TryParse(m.Groups[1].Value, out var pri) && pri <= 191)
+        {
+            d["facility"] = Syslog.FacilityName(pri);
+            d["severity"] = Syslog.SeverityName(pri);
+        }
+        return d;
     }
 }
 
+/// <summary>
+/// RFC 5424, which is also what the syslog receivers write. Facility, severity, the structured data and each of its
+/// parameters ("SD-ID.name") become fields.
+/// </summary>
 public sealed partial class Syslog5424Format : LogFormat
 {
     [GeneratedRegex(@"^<(\d{1,3})>1 (\S+) (\S+) (\S+) (\S+) (\S+) (-|\[.*?\](?:\[.*?\])*) ?(.*)$")]
@@ -471,14 +488,17 @@ public sealed partial class Syslog5424Format : LogFormat
 
     public override Dictionary<string, string> Parse(string entry)
     {
-        var m = Re().Match(FirstLine(entry));
-        if (!m.Success) return new() { ["message"] = entry };
-        var sd = m.Groups[7].Value == "-" ? "" : m.Groups[7].Value + " ";
-        return new()
+        var first = FirstLine(entry);
+        if (!Re().IsMatch(first) || Syslog.Parse(first) is not { Rfc: 5424 } m) return new() { ["message"] = entry };
+        var d = new Dictionary<string, string>
         {
-            ["time"] = m.Groups[2].Value, ["host"] = m.Groups[3].Value, ["app"] = m.Groups[4].Value, ["pid"] = m.Groups[5].Value,
-            ["msgid"] = m.Groups[6].Value, ["level"] = L(Sev(m)), ["message"] = sd + m.Groups[8].Value + RestLines(entry),
+            ["time"] = m.Time, ["host"] = m.Host, ["app"] = m.App, ["pid"] = m.Pid, ["msgid"] = m.MsgId,
+            ["level"] = L(Levels.FromNumber(m.Severity)), ["message"] = m.Message + RestLines(entry),
+            ["facility"] = Syslog.FacilityName(m.Pri), ["severity"] = Syslog.SeverityName(m.Pri),
         };
+        if (m.StructuredData.Length > 0) d["sd"] = m.StructuredData;
+        foreach (var (k, v) in m.Params) d.TryAdd(k, v);
+        return d;
     }
 }
 
@@ -667,7 +687,7 @@ public static class FormatDetector
         ("access", "Apache / Nginx"), ("logcat", "Android logcat"), ("logfmt", "logfmt"), ("postgres", "PostgreSQL"),
         ("mysql-error", "MySQL error log"), ("mysql-general", "MySQL general log"), ("mysql-slow", "MySQL slow log"),
         ("mongodb", "MongoDB JSON"), ("rust", "Rust tracing"), ("macos", "macOS unified log"), ("laravel", "Laravel"),
-        ("plain", "Plain text"),
+        ("winevent", "Windows event log"), ("plain", "Plain text"),
     ];
 
     /// <summary>Short name for the format picker and the status bar.</summary>
@@ -707,6 +727,7 @@ public static class FormatDetector
         // formats need fewer matching lines (stack traces, SQL), but their first line must match.
         var slow = new MySqlSlowFormat();
         candidates.Add((slow, lines.Any(l => l.StartsWith("# Query_time:", StringComparison.Ordinal)) ? 0 : 2, slow.IsEntryStart));
+        candidates.Add((new WinEventFormat(), 0.6, l => WinEventFormat.Head().IsMatch(l)));
         candidates.Add((new MongoFormat(), 0.6, l => MongoFormat.Head().IsMatch(l)));
         candidates.Add((new JsonFormat(), 0.6, l => JsonFormat.TryJson(l) is not null));
         candidates.Add((new AccessLogFormat(), 0.6, l => AccessLogFormat.Re().IsMatch(l)));

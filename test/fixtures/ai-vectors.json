@@ -1,0 +1,177 @@
+{
+  "redact": [
+    {
+      "in": "user alice@example.com logged in from 10.0.0.12",
+      "out": "user <email> logged in from <ip>",
+      "count": 2
+    },
+    {
+      "in": "Authorization: Bearer abc.DEF-123_xyz== sent",
+      "out": "Authorization: Bearer <token> sent",
+      "count": 1
+    },
+    {
+      "in": "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk ok",
+      "out": "token <jwt> ok",
+      "count": 1
+    },
+    {
+      "in": "login password=hunter2 user=bob",
+      "out": "login password=<redacted> user=bob",
+      "count": 1
+    },
+    {
+      "in": "{\"password\": \"s3cr3t value\", \"api_key\":\"xyz\"}",
+      "out": "{\"password\": <redacted>, \"api_key\":<redacted>}",
+      "count": 2
+    },
+    {
+      "in": "key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv used, aws AKIAIOSFODNN7EXAMPLE",
+      "out": "key <key> used, aws <key>",
+      "count": 2
+    },
+    {
+      "in": "paid with 4111 1111 1111 1111 at 2024-05-01 10:00:00",
+      "out": "paid with <card> at 2024-05-01 10:00:00",
+      "count": 1
+    },
+    {
+      "in": "order 4111111111111112 is not a card, epoch 1714557600000",
+      "out": "order 4111111111111112 is not a card, epoch 1714557600000",
+      "count": 0
+    },
+    {
+      "in": "peer fe80::1ff:fe23:4567:890a and ::1 and 2001:0db8:85a3:0000:0000:8a2e:0370:7334 connected",
+      "out": "peer <ipv6> and <ipv6> and <ipv6> connected",
+      "count": 3
+    },
+    {
+      "in": "time 10:20:30 and std::io and version 1.2.3",
+      "out": "time 10:20:30 and std::io and version 1.2.3",
+      "count": 0
+    },
+    {
+      "in": "ip 192.168.1.1:8080, not 999.1.1.1 or 1.2.3.4.5",
+      "out": "ip <ip>:8080, not 999.1.1.1 or 1.2.3.4.5",
+      "count": 1
+    },
+    {
+      "in": "request id 3f2b8c1e-9a4d-4e6f-b7a1-0c9d8e7f6a5b hash d41d8cd98f00b204e9800998ecf8427e",
+      "out": "request id 3f2b8c1e-9a4d-4e6f-b7a1-0c9d8e7f6a5b hash d41d8cd98f00b204e9800998ecf8427e",
+      "count": 0
+    },
+    {
+      "in": "session AbCdEf0123456789GhIjKl9876543210MnOp end",
+      "out": "session <key> end",
+      "count": 1
+    },
+    {
+      "in": "nothing secret here, 42 items in 3.5s",
+      "out": "nothing secret here, 42 items in 3.5s",
+      "count": 0
+    },
+    {
+      "in": "env DB_PASSWORD=hunter2 POSTGRES_PASSWORD='x y' bypass=1",
+      "out": "env DB_PASSWORD=<redacted> POSTGRES_PASSWORD=<redacted> bypass=1",
+      "count": 2
+    },
+    {
+      "in": "ssh passphrase: correct-horse credentials=abc",
+      "out": "ssh passphrase: <redacted> credentials=<redacted>",
+      "count": 2
+    },
+    {
+      "in": "Authorization: Token 0123456789abcdef and Proxy-Authorization: Digest username1",
+      "out": "Authorization: Token <token> and Proxy-Authorization: Digest <token>",
+      "count": 2
+    },
+    {
+      "in": "key -----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA1+2/3\nabc\n-----END RSA PRIVATE KEY----- done",
+      "out": "key <private key> done",
+      "count": 1
+    }
+  ],
+  "guess": [
+    {
+      "line": "2024-05-01 10:00:00,001 [main] INFO  com.acme.App - Starting app",
+      "pattern": "^(?<time>\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2},\\d+)\\s+\\[(?<thread>[^\\]]*)\\]\\s+(?<level>[A-Za-z]+)\\s+(?<logger>[\\w.$]+)\\s+-\\s+(?<message>.*)$",
+      "groups": {
+        "time": "2024-05-01 10:00:00,001",
+        "thread": "main",
+        "level": "INFO",
+        "logger": "com.acme.App",
+        "message": "Starting app"
+      }
+    },
+    {
+      "line": "2024-05-01T10:00:00.123Z ERROR Db: connection lost after 3 retries",
+      "pattern": "^(?<time>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d+Z)\\s+(?<level>[A-Za-z]+)\\s+(?<logger>[\\w.$]+):\\s+(?<message>.*)$",
+      "groups": {
+        "time": "2024-05-01T10:00:00.123Z",
+        "level": "ERROR",
+        "logger": "Db",
+        "message": "connection lost after 3 retries"
+      }
+    },
+    {
+      "line": "[2024-05-01 10:00:00] [WARN] 10.0.0.12:443 user=bob status=200 took 12ms",
+      "pattern": "^\\[(?<time>\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2})\\]\\s+\\[\\s*(?<level>[A-Za-z]+)\\s*\\]\\s+(?<ip>\\d{1,3}(?:\\.\\d{1,3}){3}):(?<port>\\d+)\\s+user=(?<user>\\S*)\\s+status=(?<status>\\S*)\\s+(?<message>.*)$",
+      "groups": {
+        "time": "2024-05-01 10:00:00",
+        "level": "WARN",
+        "ip": "10.0.0.12",
+        "port": "443",
+        "user": "bob",
+        "status": "200",
+        "message": "took 12ms"
+      }
+    },
+    {
+      "line": "May  1 10:00:00 myhost sshd[123]: Accepted publickey for bob",
+      "pattern": "^(?<time>[A-Z][a-z]{2}\\s+\\d{1,2}\\s+\\d{2}:\\d{2}:\\d{2})\\s+(?<message>.*)$",
+      "groups": {
+        "time": "May  1 10:00:00",
+        "message": "myhost sshd[123]: Accepted publickey for bob"
+      }
+    },
+    {
+      "line": "INFO 2024-05-01 10:00:00 request done",
+      "pattern": "^(?<level>[A-Za-z]+)\\s+(?<time>\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2})\\s+(?<message>.*)$",
+      "groups": {
+        "level": "INFO",
+        "time": "2024-05-01 10:00:00",
+        "message": "request done"
+      }
+    },
+    {
+      "line": "12:00:01.500 DEBUG [worker-1] [req-7] com.acme.Cache: miss key=\"user 42\" size=3",
+      "pattern": "^(?<time>\\d{2}:\\d{2}:\\d{2}\\.\\d+)\\s+(?<level>[A-Za-z]+)\\s+\\[(?<thread>[^\\]]*)\\]\\s+\\[(?<field>[^\\]]*)\\]\\s+(?<logger>[\\w.$]+):\\s+(?<message>.*)$",
+      "groups": {
+        "time": "12:00:01.500",
+        "level": "DEBUG",
+        "thread": "worker-1",
+        "field": "req-7",
+        "logger": "com.acme.Cache",
+        "message": "miss key=\"user 42\" size=3"
+      }
+    },
+    {
+      "line": "plain text with no structure at all",
+      "pattern": "^(?<message>.*)$",
+      "groups": {
+        "message": "plain text with no structure at all"
+      }
+    },
+    {
+      "line": "127.0.0.1 - - \"GET /index.html HTTP/1.1\" 200 512",
+      "pattern": "^(?<ip>\\d{1,3}(?:\\.\\d{1,3}){3})\\s+-\\s+-\\s+\"(?<text>[^\"]*)\"\\s+(?<number>-?\\d+(?:\\.\\d+)?)\\s+(?<number2>-?\\d+(?:\\.\\d+)?)\\s*(?<message>.*)$",
+      "groups": {
+        "ip": "127.0.0.1",
+        "text": "GET /index.html HTTP/1.1",
+        "number": "200",
+        "number2": "512",
+        "message": ""
+      }
+    }
+  ]
+}

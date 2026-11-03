@@ -302,6 +302,7 @@ function fieldNode(field: string, op: string, value: string, quoted: boolean, cs
     }
     if (!value) return { node: null, skip: true }; // "logger:" is still being typed
     const regex = !quoted && value.length > 1 && value.startsWith('/') && value.endsWith('/');
+    if (!regex && !quoted && value.includes('*')) return { node: { kind: 'text', field: f, pattern: { text: globRegex(value), regex: true, caseSensitive: cs, wholeWord: false } }, skip: true };
     return { node: { kind: 'text', field: f, pattern: { text: regex ? value.slice(1, -1) : value, regex, caseSensitive: cs, wholeWord: false } }, skip: true };
   }
   // "a->b" and "x.>y" are text, not comparisons.
@@ -312,8 +313,17 @@ function fieldNode(field: string, op: string, value: string, quoted: boolean, cs
   return { node, skip: true };
 }
 
+/**
+ * The regex of a `field:value` wildcard: "*" is any run of characters and the whole value must match. A trailing ".*"
+ * is a package (logger hierarchy): `logger:com.acme.*` matches com.acme itself and everything below it.
+ */
+export function globRegex(glob: string): string {
+  if (glob.length > 2 && glob.endsWith('.*') && !glob.slice(0, -2).includes('*')) return `^${escapeRe(glob.slice(0, -2))}(?:\\..*)?$`;
+  return `^${glob.split('*').map(escapeRe).join('.*')}$`;
+}
+
 /** Reads `a, b, "c d")` after "in (". Values is null when the list is not closed yet. */
-function readList(q: string, i: number): [string[] | null, number] {
+export function readList(q: string, i: number): [string[] | null, number] {
   const values: string[] = [];
   let cur = '';
   let quoted = false;

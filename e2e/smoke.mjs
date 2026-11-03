@@ -4,7 +4,10 @@ import { _electron as electron } from 'playwright';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
+import * as http from 'node:http';
+import * as net from 'node:net';
 import assert from 'node:assert/strict';
 
 const out = path.resolve('e2e/out');
@@ -14,13 +17,26 @@ const log = path.join(tmp, 'app.log');
 execFileSync(process.execPath, ['scripts/gen-sample.mjs', log, '5']);
 const other = path.join(tmp, 'other.log');
 fs.writeFileSync(other, '2024-05-01 08:00:00,500 [main] ERROR com.acme.Other - from the other file\n');
+const launchLog = path.join(tmp, 'launched.txt');
+const linkLog = path.join(tmp, 'link-confirm.txt');
+const profile = path.join(tmp, 'profile');
 const notes = path.join(tmp, 'notes.txt');
+// remote files: a fake ssh serves hosts/<host>/ as each host's "/" (test/fixtures/fake-ssh)
+const hosts = path.join(tmp, 'hosts');
+const hostFile = (host, p, text) => {
+  const f = path.join(hosts, host, p);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, text);
+  return f;
+};
 fs.writeFileSync(notes, 'Release notes for build 4.2\n\nInstalled packages:\n  - libfoo 1.2\nWARNING: disk almost full\nerror: could not copy config.ini\ndone\n');
 
 const app = await electron.launch({
   // a fresh profile so settings from earlier runs (theme, wrap, dock…) don't leak in
-  args: ['--no-sandbox', `--user-data-dir=${path.join(tmp, 'profile')}`, '.', log],
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1' },
+  args: ['--no-sandbox', `--user-data-dir=${profile}`, '.', log],
+  // source links write what they would open to launchLog instead of starting an editor; links record the files they
+  // would ask about in linkLog instead of showing the dialog; ssh is the fake one
+  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', ULV_SOURCE_LAUNCH_LOG: launchLog, ULV_LINK_CONFIRM_LOG: linkLog, ULV_SSH: path.resolve('test/fixtures/fake-ssh/ssh'), FAKE_SSH_ROOT: hosts },
 });
 const win = await app.firstWindow();
 win.on('pageerror', (e) => console.error('pageerror:', e));
@@ -59,6 +75,11 @@ await step('filters by a cell value from the row menu', async () => {
   await shot('08-row-menu');
   await item.click();
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // The status can change a frame before the grid redraws its rows.
+  await win.waitForFunction((l) => {
+    const cells = [...document.querySelectorAll('.grid-rows .r .c[data-col="logger"]')];
+    return cells.length > 0 && cells.every((c) => c.textContent.trim() === l);
+  }, logger, { timeout: 20000 });
   const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
   assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === logger), `loggers: ${loggers.slice(0, 5)}`);
   assert.ok((await win.locator('#sidebar .rule .txt').allInnerTexts()).includes(`Logger = ${logger}`));
@@ -104,7 +125,7 @@ await step('suggests field values in the quick filter', async () => {
 await step('searches with highlights and navigation', async () => {
   await win.fill('#search', 'ConnectionPool');
   await win.waitForFunction(() => /\d+ \/ [\d,]+/.test(document.querySelector('#search-count')?.textContent ?? ''));
-  assert.ok((await win.locator('.grid-rows mark').count()) > 0);
+  await win.waitForSelector('.grid-rows mark', { timeout: 20000 }); // the rows redraw a frame after the count
   await win.waitForFunction(() => /^Searched [\d,]+ entries in \d+\.\d\d s$/.test(document.querySelector('#status .scan-cost')?.textContent ?? ''));
   await win.press('#search', 'Enter');
   await shot('02-search');
@@ -113,6 +134,10 @@ await step('searches with highlights and navigation', async () => {
 await step('typed queries filter, bad ones are reported, time shortcuts set From', async () => {
   await win.fill('#quick', 'level>=error and not level:fatal');
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForFunction(() => {
+    const tags = [...document.querySelectorAll('.grid-rows .r .lvtag')];
+    return tags.length > 0 && tags.every((t) => t.textContent === 'ERROR');
+  }, null, { timeout: 20000 }).catch(() => {}); // the rows redraw a frame after the status
   const levels = await win.locator('.grid-rows .r .lvtag').allInnerTexts();
   assert.ok(levels.length > 0 && levels.every((l) => l === 'ERROR'), `levels: ${levels.slice(0, 5)}`);
   const shown = (await status()).match(/[\d,]+ shown/)?.[0];
@@ -143,6 +168,10 @@ await step('typed queries filter, bad ones are reported, time shortcuts set From
 await step('quick filter narrows the view', async () => {
   await win.fill('#quick', 'level:error OR level:fatal');
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForFunction(() => {
+    const tags = [...document.querySelectorAll('.grid-rows .r .lvtag')];
+    return tags.length > 0 && tags.every((t) => t.textContent === 'ERROR');
+  }, null, { timeout: 20000 }).catch(() => {}); // the rows redraw a frame after the status
   const levels = await win.locator('.grid-rows .r .lvtag').allInnerTexts();
   assert.ok(levels.length > 0 && levels.every((l) => l === 'ERROR' || l === 'FATAL'), `levels: ${levels.slice(0, 5)}`);
   // The search that runs again over the new view keeps the filter's cost on show.
@@ -170,7 +199,11 @@ await step('colours tokens in messages', async () => {
   assert.notEqual(await win.$eval('.grid-rows .r:not(.sel) .c.msg .tk-number', (e) => getComputedStyle(e).color), await win.$eval('.grid-rows .r:not(.sel) .c.msg', (e) => getComputedStyle(e).color));
   // the level stripe replaces the row tint by default
   assert.equal(await win.locator('#grid.tint').count(), 0);
-  assert.equal(await win.$eval('.grid-rows .r.l5:not(.sel)', (e) => getComputedStyle(e, '::after').width), '3px');
+  // (polled: under load the rows can be redrawn between finding one and reading its style)
+  await win.waitForFunction(() => {
+    const r = document.querySelector('.grid-rows .r.l5:not(.sel)');
+    return !!r && getComputedStyle(r, '::after').width === '3px';
+  }, null, { timeout: 10000 });
   await shot('11-tokens');
 });
 
@@ -179,9 +212,8 @@ await step('wraps long messages with Alt+Z', async () => {
   await win.setViewportSize({ width: 1000, height: 900 });
   await win.focus('#grid');
   await win.keyboard.press('Alt+z');
-  await win.waitForSelector('#grid.wrap .grid-rows .r.var');
-  const tallest = await win.$$eval('.grid-rows .r.var', (els) => Math.max(...els.map((e) => e.offsetHeight)));
-  assert.ok(tallest > 30, `tallest wrapped row: ${tallest}px`);
+  // (rows are drawn again as they arrive: wait for a wrapped one rather than reading the first frame)
+  await win.waitForFunction(() => [...document.querySelectorAll('#grid.wrap .grid-rows .r.var')].some((e) => e.offsetHeight > 30), null, { timeout: 10000 });
   await shot('12-wrap');
   await win.keyboard.press('Alt+z');
   await win.waitForSelector('#grid:not(.wrap)');
@@ -196,7 +228,8 @@ await step('expands a multi-line entry inline with the arrow keys', async () => 
   const open = win.locator('.grid-rows .r.cur.open');
   await open.waitFor();
   assert.match(await open.locator('.rx').innerText(), /at com\.acme/);
-  assert.ok((await open.evaluate((e) => e.offsetHeight)) > 60);
+  // the open row gets its height when the grid measures it, a frame after the text is in
+  await win.waitForFunction(() => (document.querySelector('.grid-rows .r.cur.open')?.offsetHeight ?? 0) > 60, null, { timeout: 10000 });
   await shot('13-expand');
   await win.keyboard.press('ArrowLeft');
   await win.waitForSelector('.grid-rows .r.open', { state: 'detached' });
@@ -323,6 +356,42 @@ await step('lists patterns and filters to one with a double-click', async () => 
   await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
 });
 
+await step('runs SQL over the entries and jumps to a result row', async () => {
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+Q');
+  await win.waitForSelector('#sql:not(.hidden) .sql-editor');
+  assert.ok(await win.evaluate(() => document.activeElement?.classList.contains('sql-editor')));
+  await win.fill('#sql .sql-editor', "SELECT line, level, logger, message\nFROM view\nWHERE level = 'ERROR'\nORDER BY line DESC\nLIMIT 20");
+  await win.keyboard.press('Control+Enter');
+  await win.waitForSelector('#sql .sql-table tbody tr', { timeout: 30000 });
+  assert.deepEqual(await win.locator('#sql .sql-table th').allInnerTexts(), ['line', 'level', 'logger', 'message']);
+  assert.match(await win.locator('#sql .sql-status').innerText(), /^\d+ rows? in \d+ ms/);
+  assert.ok((await win.locator('#sql .sql-table td:nth-child(2)').allInnerTexts()).every((l) => l === 'ERROR'));
+  const target = win.locator('#sql .sql-table tbody tr').nth(2);
+  const line = (await target.locator('td').first().innerText()).trim();
+  await target.click();
+  await win.waitForFunction((ln) => (document.querySelector('#grid .grid-rows .r.sel .g')?.textContent ?? '').endsWith(ln), line, { timeout: 10000 });
+  assert.ok(await target.evaluate((e) => e.classList.contains('sel')));
+  // a write is refused inline
+  await win.fill('#sql .sql-editor', 'DELETE FROM logs');
+  await win.click('#sql .sql-head .btn.primary');
+  await win.waitForSelector('#sql .sql-error:not(.hidden)');
+  assert.match(await win.locator('#sql .sql-error').innerText(), /read-only/);
+  // an example with a chart
+  await win.locator('#sql .sql-head select').selectOption({ label: 'Errors per minute' });
+  await win.waitForFunction(() => !document.querySelector('#sql .sql-head .tog-btn')?.disabled, null, { timeout: 30000 });
+  await win.click('#sql .sql-head .tog-btn');
+  await win.waitForSelector('#sql .sql-chart:not(.hidden)');
+  await shot('26-sql-chart');
+  await win.click('#sql .sql-head .tog-btn');
+  await win.fill('#sql .sql-editor', "SELECT line, level, logger, message\nFROM view\nWHERE level = 'ERROR'\nORDER BY line DESC\nLIMIT 20");
+  await win.keyboard.press('Control+Enter');
+  await win.waitForSelector('#sql .sql-table tbody tr');
+  await shot('26-sql');
+  await win.keyboard.press('Control+Shift+Q');
+  await win.waitForSelector('#sql.hidden', { state: 'attached' });
+});
+
 await step('shows a new-lines pill while not following and follows on click', async () => {
   await win.focus('#grid');
   await win.keyboard.press('Home');
@@ -344,10 +413,162 @@ await step('Clear hides every entry so far', async () => {
   await win.waitForFunction(() => /[\d,]+ cleared · Show/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   await win.waitForFunction(() => document.querySelectorAll('.grid-rows .r .c').length === 0);
   fs.appendFileSync(log, '2030-01-01 00:00:03,000 [main] WARN  com.acme.Tail - after clear\n');
-  await win.waitForSelector('.grid-rows .r:has-text("after clear")', { timeout: 10000 });
-  assert.equal(await win.locator('.grid-rows .r .c[data-col="message"]').count(), 1);
+  // one entry since the clear (an update redraws the rows: wait for the drawn state, not a frame of it)
+  await win.waitForFunction(() => {
+    const msgs = [...document.querySelectorAll('.grid-rows .r .c[data-col="message"]')];
+    return msgs.length === 1 && /after clear/.test(msgs[0].textContent);
+  }, null, { timeout: 10000 });
   await win.locator('#status .show-cleared').click();
   await win.waitForFunction(() => !/cleared/.test(document.querySelector('#status')?.textContent ?? '') && document.querySelectorAll('.grid-rows .r .c').length > 20, null, { timeout: 20000 });
+});
+
+await step('pins rows to a strip above the grid that stays while scrolling', async () => {
+  await win.focus('#grid');
+  await win.keyboard.press('Home');
+  await win.keyboard.press('ArrowDown');
+  await win.keyboard.press('ArrowDown');
+  await win.keyboard.press('Control+p');
+  await win.waitForSelector('#pins:not(.hidden) .pin');
+  // the row menu pins too
+  const row = win.locator('.grid-rows .r').nth(8);
+  const rowIndex = Number(await row.getAttribute('data-row'));
+  await row.locator('.c.msg').click({ button: 'right' });
+  await win.locator('.ctxmenu .item', { hasText: 'Pin row' }).click();
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 2);
+  assert.match(await win.locator('#pins .pin').first().innerText(), /^📌\s*\d+\s/);
+  // scrolled far away, the strip is still there and a click jumps back
+  for (let k = 0; k < 6; k++) await win.keyboard.press('PageDown');
+  await win.waitForFunction(() => window.__ulv.state().active.topRow > 60);
+  assert.equal(await win.locator('#pins .pin').count(), 2);
+  await shot('pinned-rows');
+  await win.locator('#pins .pin').nth(1).click();
+  await win.waitForFunction((r) => window.__ulv.state().active.focus === r, rowIndex);
+  // saved per file
+  await win.waitForFunction(async () => JSON.stringify(Object.values((await window.ulv.getSettings()).pins ?? {}).map((l) => l.length)) === '[2]');
+});
+
+await step('groups the timeline by logger and filters from the legend', async () => {
+  // a tab of its own: the main log has lines from 2030 appended by now
+  const groupLog = path.join(tmp, 'group.log');
+  execFileSync(process.execPath, ['scripts/gen-sample.mjs', groupLog, '2']);
+  await win.evaluate((p) => window.__ulv.openPaths([p], false), groupLog);
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 2);
+  await win.waitForFunction(() => !/Indexing/.test(document.querySelector('#status')?.textContent ?? '') && document.querySelectorAll('.grid-rows .r .c').length > 0, null, { timeout: 30000 });
+  await win.click('#histogram .hist-group');
+  await win.locator('.ctxmenu .item', { hasText: 'Logger' }).click();
+  await win.waitForFunction(() => window.__ulv.timelineGroups()?.keys.length === 5, null, { timeout: 20000 });
+  assert.match(await win.locator('#histogram .hist-group').innerText(), /^Group by: Logger/);
+  assert.equal(await win.locator('#histogram .hist-legend .lg').count(), 5);
+  await shot('timeline-grouped');
+  const key = await win.evaluate(() => window.__ulv.timelineGroups().keys[1]);
+  assert.equal(await win.locator('#histogram .hist-legend .lg .k').nth(1).innerText(), key.split('.').pop()); // short names
+  await win.locator('#histogram .hist-legend .lg').nth(1).click();
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.equal(await win.inputValue('#quick'), `logger==${key}`);
+  await win.waitForFunction((k) => {
+    const cells = [...document.querySelectorAll('.grid-rows .r .c[data-col="logger"]')];
+    return cells.length > 0 && cells.every((c) => c.textContent.trim() === k);
+  }, key, { timeout: 20000 });
+  const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
+  assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === key), `loggers: ${loggers.slice(0, 3)}`);
+  // the grouping follows the filter: one logger left
+  await win.waitForFunction(() => window.__ulv.timelineGroups()?.keys.length === 1, null, { timeout: 20000 });
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.evaluate(() => window.__ulv.setHistogramGroup('level'));
+  await win.waitForFunction(() => window.__ulv.timelineGroups() === null);
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 1);
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 2);
+});
+
+await step('picks several loggers with Ctrl+click and a whole package', async () => {
+  const fld = win.locator('#sidebar .fields-sec .fld', { hasText: 'logger' });
+  if (!(await fld.evaluate((e) => e.classList.contains('open')))) await fld.click();
+  const values = win.locator('#sidebar .fields-sec .fv:not(.pkg)', { hasText: 'com.acme.' });
+  await values.first().waitFor();
+  const a = (await values.nth(0).locator('.v').innerText()).trim();
+  const b = (await values.nth(1).locator('.v').innerText()).trim();
+  await values.nth(0).click({ modifiers: ['Control'] });
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.locator('#sidebar .fields-sec .fv:not(.pkg)', { hasText: b }).click({ modifiers: ['Control'] });
+  await win.waitForFunction((q) => document.querySelector('#quick').value === q, `logger in (${a},${b})`);
+  await win.waitForFunction(() => document.querySelectorAll('#sidebar .fields-sec .fv.picked').length === 2, null, { timeout: 20000 });
+  const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
+  assert.ok(loggers.every((l) => l.trim() === a || l.trim() === b), `loggers: ${loggers.slice(0, 3)}`);
+  await shot('field-picks');
+  // the package node: everything under com.acme
+  await win.locator('#sidebar .fields-sec .fv.pkg', { hasText: 'com.acme.*' }).click();
+  await win.waitForFunction(() => document.querySelector('#quick').value === 'logger:com.acme.*');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.fill('#quick', '');
+  await win.press('#quick', 'Enter');
+});
+
+await step('highlights a double-clicked word and a selection in the details on screen', async () => {
+  const cell = win.locator('.grid-rows .r .c[data-col="thread"]', { hasText: 'main' }).first();
+  await cell.dblclick({ position: { x: 12, y: 8 } });
+  await win.waitForFunction(() => window.__ulv.autoHighlight() === 'main');
+  const marked = await win.evaluate(() => CSS.highlights.get('auto-hl')?.size ?? 0);
+  assert.ok(marked > 1, `marked ${marked}`);
+  assert.match(await win.locator('#sidebar').innerText(), /Bookmarks \(1\)/i); // a word, not a bookmark
+  await shot('auto-highlight');
+  // a single click clears it
+  await win.locator('.grid-rows .r .c.msg').nth(2).click();
+  await win.waitForFunction(() => window.__ulv.autoHighlight() === null);
+  // selecting text in the details pane highlights it until the selection clears
+  await win.evaluate(() => {
+    const pre = document.querySelector('#detail pre');
+    const text = pre.firstChild;
+    const r = document.createRange();
+    const i = text.data.indexOf('[') + 1;
+    r.setStart(text, i);
+    r.setEnd(text, text.data.indexOf(']'));
+    document.getSelection().removeAllRanges();
+    document.getSelection().addRange(r);
+  });
+  await win.waitForFunction(() => !!window.__ulv.autoHighlight());
+  await win.evaluate(() => document.getSelection().removeAllRanges());
+  await win.waitForFunction(() => window.__ulv.autoHighlight() === null);
+});
+
+await step('opens source locations under the source roots in the editor', async () => {
+  await win.fill('#quick', 'level:error');
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.locator('.grid-rows .r', { has: win.locator('.more') }).first().locator('.c.msg').click();
+  const link = win.locator('#detail pre .src-link', { hasText: 'OrderController.java:42' });
+  await link.waitFor();
+  // no source roots yet: a toast says how to set them
+  await link.click();
+  await win.waitForFunction(() => /Editor and source roots/.test(document.querySelector('#toast')?.textContent ?? ''));
+  assert.ok(!fs.existsSync(launchLog));
+  const root = path.join(tmp, 'src', 'main', 'java');
+  fs.mkdirSync(path.join(root, 'com', 'acme', 'api'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'com', 'acme', 'api', 'OrderController.java'), 'class OrderController {}\n');
+  await win.focus('#grid');
+  await win.keyboard.press('F1');
+  await win.keyboard.type('source roots');
+  await win.keyboard.press('Enter');
+  await win.locator('.modal .src-roots').fill(path.join(tmp, 'missing') + '\n' + root);
+  await win.locator('.modal .btn.primary', { hasText: 'Save' }).click();
+  await win.waitForSelector('#modal.hidden', { state: 'attached' });
+  await link.click();
+  await win.waitForFunction(() => /Opening OrderController\.java:42/.test(document.querySelector('#toast')?.textContent ?? ''));
+  const file = path.join(root, 'com', 'acme', 'api', 'OrderController.java');
+  assert.deepEqual(fs.readFileSync(launchLog, 'utf-8').trim().split('\n'), [`vscode://file/${file.replace(/^\//, '')}:42`]);
+  // and from an expanded entry
+  await win.focus('#grid');
+  await win.keyboard.press('ArrowRight');
+  const inline = win.locator('.grid-rows .r.cur.open .rx .src-link', { hasText: 'OrderController.java:42' });
+  await inline.waitFor();
+  await shot('source-links');
+  await inline.click();
+  for (let k = 0; k < 50 && fs.readFileSync(launchLog, 'utf-8').trim().split('\n').length < 2; k++) await new Promise((r) => setTimeout(r, 100));
+  await win.keyboard.press('ArrowLeft');
+  await win.waitForSelector('.grid-rows .r.open', { state: 'detached' });
+  assert.equal(fs.readFileSync(launchLog, 'utf-8').trim().split('\n').length, 2);
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
 });
 
 await step('saves a workspace and opens it again', async () => {
@@ -365,6 +586,7 @@ await step('saves a workspace and opens it again', async () => {
   assert.equal(ws.tabs[0].filter.query, 'ConnectionPool');
   assert.equal(ws.tabs[0].search.text, 'Acquired');
   assert.equal(ws.tabs[0].bookmarks.length, 1);
+  assert.equal(ws.tabs[0].pins.length, 2);
   assert.equal(await win.title(), 'round trip.ulvw — UltraLogViewer');
   // close the tab and reset the boxes, then reopen
   await win.locator('.tab .x').click();
@@ -377,6 +599,7 @@ await step('saves a workspace and opens it again', async () => {
   assert.equal(await win.inputValue('#quick'), 'ConnectionPool');
   assert.equal(await win.inputValue('#search'), 'Acquired');
   await win.waitForFunction(() => /Bookmarks \(1\)/i.test(document.querySelector('#sidebar')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 2, null, { timeout: 20000 });
   await shot('22-workspace');
   await win.fill('#search', '');
   await win.press('#search', 'Escape');
@@ -389,6 +612,61 @@ await step('clears the filter and follows appended lines', async () => {
   fs.appendFileSync(log, '2030-01-01 00:00:00,000 [main] ERROR com.acme.Tail - appended while following\n');
   await win.waitForSelector('.grid-rows .r:has-text("appended while following")', { timeout: 10000 });
   await shot('05-follow');
+});
+
+await step('duplicates a tab over the same file, filters it differently and splits a tab', async () => {
+  const splitLog = path.join(tmp, 'split.log');
+  const lines = Array.from({ length: 300 }, (_, i) => `2024-05-01 09:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')},000 [main] ${i % 3 === 0 ? 'ERROR' : 'INFO '} com.acme.Split - entry ${i}`);
+  fs.writeFileSync(splitLog, lines.join('\n') + '\n');
+  const before = await win.locator('.tab').count();
+  await win.evaluate((p) => window.__ulv.openPaths([p], false), splitLog);
+  await win.waitForFunction(() => /300 entries/.test(document.querySelector('#status')?.textContent ?? '') && !/Indexing/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  const counts = () => win.evaluate(() => window.__ulv.state().tabs.filter((t) => t.paths[0].endsWith('split.log')).map((t) => [t.info.viewCount, t.info.total]));
+
+  // A pin, which the duplicate and the split pane must keep (pins are saved per file).
+  await win.focus('#grid');
+  await win.keyboard.press('Control+p');
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 1);
+
+  // Duplicate: opens at once over the same index, then gets its own filter.
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+T');
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 2, before);
+  assert.equal(await win.locator('.tab.active .name').innerText(), 'split.log (2)');
+  assert.equal(await win.locator('#pins .pin').count(), 1);
+  await win.fill('#quick', 'level:error');
+  await win.waitForFunction(() => /100 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.deepEqual(await counts(), [[300, 300], [100, 300]]);
+  // The tail reads the file once and both tabs see the new entry.
+  fs.appendFileSync(splitLog, '2024-05-01 09:05:00,000 [main] ERROR com.acme.Split - appended to both\n');
+  await win.waitForFunction(() => window.__ulv.state().tabs.filter((t) => t.paths[0].endsWith('split.log')).every((t) => t.info.total === 301), null, { timeout: 10000 });
+  await win.waitForFunction(() => /101 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 10000 });
+  assert.deepEqual(await counts(), [[301, 301], [101, 301]]);
+  await win.locator('.tab', { hasText: 'split.log (2)' }).locator('.x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before);
+  assert.match(await status(), /301 entries/);
+
+  // Split right: a second grid with its own quick filter; selecting in one pane moves the other to the same entry.
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Backslash');
+  await win.waitForSelector('#pane-split:not(.hidden) #grid2 .grid-rows .r .c', { timeout: 10000 });
+  assert.equal(await win.locator('#pins .pin').count(), 1); // the split pane (now active) has the tab's pin
+  await win.fill('#head-main .pane-quick', 'level:error');
+  await win.waitForFunction(() => document.querySelector('#head-main .pane-count')?.textContent === '101 of 301', null, { timeout: 10000 });
+  assert.equal(await win.locator('#head-split .pane-count').innerText(), '301');
+  await win.locator('#grid .grid-rows .r', { hasText: 'entry 30' }).first().click();
+  await win.waitForFunction(() => window.__ulv.state().tabs.find((t) => t.split)?.split.focus === 30, null, { timeout: 10000 });
+  await win.waitForSelector('#grid2 .grid-rows .r.sel', { timeout: 5000 });
+  const picked = await win.evaluate(() => {
+    const [main] = window.__ulv.state().tabs.filter((t) => t.split);
+    return [main.focus, main.split.focus, main.info.viewCount, main.split.info.viewCount];
+  });
+  assert.equal(picked[1], 30, `right pane focus ${picked}`);
+  await shot('26-split-view');
+  await win.click('#head-split .pane-close');
+  await win.waitForSelector('#pane-split.hidden', { state: 'attached' });
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n, before);
 });
 
 await step('merges two files into one timeline', async () => {
@@ -408,6 +686,7 @@ await step('names the detected format and opens plain text without timestamps', 
   assert.match(await win.locator('#status .fmt').innerText(), /Plain text\s*auto/);
   assert.match(await win.locator('#status .fmt').getAttribute('title'), /no known log layout, so each line is one entry/);
   assert.equal(await win.locator('#format option[value=""]').innerText(), 'Auto: Plain text');
+  await win.waitForFunction(() => [...document.querySelectorAll('.grid-header .h')].map((h) => h.textContent).join() === 'Level,Message', null, { timeout: 10000 }).catch(() => {});
   assert.deepEqual(await win.locator('.grid-header .h').allInnerTexts(), ['Level', 'Message']);
   assert.equal((await win.locator('.grid-rows .r:has-text("could not copy") .c[data-col="level"]').innerText()).trim(), 'ERROR');
   await win.waitForSelector('#histogram.hidden', { state: 'attached' });
@@ -443,6 +722,288 @@ await step('opens only a time window, says so, and loads the whole file', async 
     const m = document.querySelector('#status')?.textContent?.match(/([\d,]+) entries/);
     return !!m && Number(m[1].replace(/,/g, '')) > n && !/Indexing/.test(document.querySelector('#status')?.textContent ?? '');
   }, partial, { timeout: 30000 });
+});
+
+await step('AI: extract fields offline, consent preview (Cancel sends nothing), explain and a reviewed filter', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['AI › Explain selected entry', 'AI › Extract fields from selected line…', 'AI › Ask AI for a filter… (? in the quick filter)', 'AI › AI settings…'])
+    assert.ok(labels.includes(l), `menu item ${l}`);
+  // A local OpenAI-compatible endpoint stands in for the provider: nothing leaves the machine.
+  const seen = [];
+  let answer = 'Disk space is low.';
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen.push({ url: req.url, body });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: answer } }] }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}/v1`;
+  try {
+    await win.click('.tab:has-text("notes.txt")');
+    const row = win.locator('.grid-rows .r:has-text("disk almost full") .c[data-col="message"]');
+    await row.click({ button: 'right' });
+    await win.locator('.ctxmenu .item', { hasText: 'Explain this entry' }).waitFor();
+    await win.locator('.ctxmenu .item', { hasText: 'Extract fields…' }).click();
+    // AI is off: the existing custom format editor opens with a guess from the tokens
+    const guess = await win.locator('.modal .cf-pattern').inputValue();
+    assert.match(guess, /^\^.*\(\?<message>\.\*\)\$$/);
+    await win.locator('.modal .btn', { hasText: 'Cancel' }).click();
+    // turn AI on, pointed at the local endpoint
+    const settingsId = (await win.evaluate(() => window.ulv.menuItems())).find((m) => m.label === 'AI › AI settings…').id;
+    await win.evaluate((id) => window.ulv.runMenuItem(id), settingsId);
+    await win.waitForSelector('#ai-enabled');
+    await win.waitForTimeout(300);
+    await win.check('#ai-enabled');
+    await win.check('.modal input[value="openai"]');
+    await win.locator('.modal input[placeholder="http://localhost:11434/v1"]').fill(base);
+    await win.locator('.modal .btn.primary', { hasText: 'Save' }).click();
+    await win.waitForSelector('.modal', { state: 'hidden' });
+    // the consent preview appears; Cancel sends nothing
+    await row.click({ button: 'right' });
+    await win.locator('.ctxmenu .item', { hasText: 'Explain this entry' }).click();
+    await win.waitForSelector('.modal .ai-consent-text');
+    assert.match(await win.locator('.modal .ai-consent-text').inputValue(), />>> Entry to explain:\nWARNING: disk almost full\n<<</);
+    assert.match(await win.locator('.modal').innerText(), /This will be sent to 127\.0\.0\.1:\d+, model llama3\.1/);
+    await shot('26-ai-consent');
+    await win.locator('.modal .ai-cancel').click();
+    await win.waitForTimeout(300);
+    assert.equal(seen.length, 0, 'Cancel must send nothing');
+    // Send: the answer shows in the details pane
+    await row.click({ button: 'right' });
+    await win.locator('.ctxmenu .item', { hasText: 'Explain this entry' }).click();
+    await win.locator('.modal .ai-send').click();
+    await win.waitForSelector('#detail .ai-pane:not(.hidden):not(.running) .ai-text:has-text("Disk space is low.")');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].url, '/v1/chat/completions');
+    assert.match(JSON.parse(seen[0].body).messages[1].content, /WARNING: disk almost full/);
+    await shot('27-ai-answer');
+    // "? question" in the quick filter: the proposed query is reviewed before it runs
+    answer = '{"query": "level:error", "explanation": "Only errors"}';
+    await win.fill('#quick', '? only the errors');
+    await win.press('#quick', 'Enter');
+    await win.locator('.modal .ai-send').click();
+    await win.waitForSelector('.modal .ai-query');
+    assert.equal(await win.locator('.modal .ai-query').inputValue(), 'level:error');
+    assert.doesNotMatch(await status(), /filtered|shown/);
+    await win.locator('.modal .ai-apply').click();
+    await win.waitForFunction(() => /1 of 7|1 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+    assert.equal(await win.inputValue('#quick'), 'level:error');
+    assert.equal(seen.length, 2);
+  } finally {
+    server.close();
+  }
+});
+
+await step('opens a remote file over ssh: browse, follow, multi-host merge, and no ssh left after closing', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['File › Open remote file…', 'File › Multi-host tail…']) assert.ok(labels.includes(l), `menu item ${l}`);
+  const ts = (s) => `2024-05-01 10:00:${String(s).padStart(2, '0')},000 [main] INFO  com.acme.Remote -`;
+  const remoteLog = hostFile('web1', 'var/log/app.log', `${ts(0)} remote one\n${ts(1)} remote two\n`);
+  const tabsBefore = await win.locator('.tab').count();
+
+  // File › Open remote file… from the palette, then Browse and a double-click on the file
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+P');
+  await win.waitForSelector('.modal .palette .pal-item');
+  await win.keyboard.type('open remote');
+  await win.waitForFunction(() => document.querySelectorAll('.palette .pal-item').length === 1);
+  await win.keyboard.press('Enter');
+  await win.waitForSelector('.modal .remote-dialog');
+  await win.fill('.remote-dialog input', 'ssh://web1/var/log/');
+  await win.locator('.remote-dialog .btn', { hasText: 'Browse' }).click();
+  await win.waitForSelector('.remote-list .item:has-text("app.log")', { timeout: 15000 });
+  await shot('30-remote-browse');
+  await win.locator('.remote-list .item', { hasText: 'app.log' }).dblclick();
+  await win.waitForFunction(() => document.querySelector('.tab.active .name')?.textContent === 'web1:/var/log/app.log', null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r:has-text("remote two")', { timeout: 20000 });
+  await win.waitForFunction(() => /remote · live/.test(document.querySelector('#sidebar .sources')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.match(await win.locator('#sidebar .sources .badge.remote').innerText(), /remote/);
+  fs.appendFileSync(remoteLog, `${ts(2)} remote three appended\n`);
+  await win.waitForSelector('.grid-rows .r:has-text("remote three appended")', { timeout: 20000 });
+  const recent = await win.evaluate(() => window.ulv.getSettings().then((s) => s.recent[0]));
+  assert.equal(recent, 'ssh://web1/var/log/app.log');
+
+  // multi-host tail: a pattern on one host and a file on another, merged by time and labelled by host
+  hostFile('a1', 'var/log/app/x.log', `${ts(10)} a1 first\n${ts(14)} a1 third\n`);
+  hostFile('a1', 'var/log/app/y.log', `${ts(15)} a1 fourth\n`);
+  hostFile('b2', 'var/log/app/x.log', `${ts(12)} b2 second\n`);
+  await win.evaluate(() => window.__ulv.openPaths(['ssh://a1/var/log/app/*.log', 'b2:/var/log/app/x.log'], true));
+  await win.waitForFunction(() => document.querySelector('.tab.active .name')?.textContent === 'a1:/var/log/app/x.log + 2 more', null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r:has-text("a1 fourth")', { timeout: 20000 });
+  const order = await win.evaluate(() => [...document.querySelectorAll('.grid-rows .r')].map((r) => r.querySelector('.c[data-col="message"]')?.textContent?.trim()));
+  assert.deepEqual(order.slice(0, 4), ['a1 first', 'b2 second', 'a1 third', 'a1 fourth']);
+  const sources = await win.evaluate(() => [...document.querySelectorAll('.grid-rows .r .c[data-col="__source"]')].map((c) => c.textContent?.trim()));
+  assert.equal(sources[1], 'b2:/var/log/app/x.log');
+  await win.waitForFunction(() => (document.querySelector('#sidebar .sources')?.textContent?.match(/remote · live/g) ?? []).length === 3, null, { timeout: 20000 });
+  await shot('31-multi-host');
+
+  const pids = () => fs.readdirSync(path.join(hosts, 'pids')).map(Number);
+  const alive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return !/\) Z /.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf-8'));
+    } catch {
+      return false;
+    }
+  };
+  assert.equal(pids().filter(alive).length, 4);
+  while ((await win.locator('.tab').count()) > tabsBefore) await win.locator('.tab.active .x').click();
+  const deadline = Date.now() + 10000;
+  while (pids().some(alive) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(pids().filter(alive), [], 'ssh processes left after closing the tabs');
+});
+
+await step('Listen… receives TCP lines into a live tab, and closing the tab frees the port', async () => {
+  const items = await win.evaluate(() => window.ulv.menuItems());
+  const listen = items.find((m) => m.label === 'File › Listen…');
+  assert.ok(listen, 'File › Listen… in the menu');
+  assert.equal(items.some((m) => m.label === 'File › Open Windows event log…'), process.platform === 'win32');
+  const freePort = () => new Promise((resolve) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+  const portFree = (p) => new Promise((resolve) => {
+    const s = net.createServer();
+    s.once('error', () => resolve(false));
+    s.listen(p, '127.0.0.1', () => s.close(() => resolve(true)));
+  });
+  const port = await freePort();
+  const before = await win.locator('.tab').count();
+  await win.evaluate((id) => window.ulv.runMenuItem(id), listen.id);
+  await win.waitForSelector('#receiver-protocol');
+  await win.selectOption('#receiver-protocol', 'tcp-lines');
+  await win.fill('#receiver-port', String(port));
+  await win.fill('#receiver-bind', '0.0.0.0');
+  assert.ok(await win.locator('#receiver-warning').isVisible(), 'warning for a non-loopback bind');
+  await win.fill('#receiver-bind', '127.0.0.1');
+  assert.ok(!(await win.locator('#receiver-warning').isVisible()));
+  await shot('27-listen');
+  await win.click('#receiver-ok');
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before);
+  await win.waitForFunction((p) => document.querySelector('.capture-status')?.textContent?.startsWith(`Listening on tcp://127.0.0.1:${p}`), port, { timeout: 10000 });
+  assert.equal(await portFree(port), false);
+  const c = net.connect(port, '127.0.0.1');
+  await new Promise((r) => c.once('connect', r));
+  c.write('{"@t":"2024-05-01T10:00:00Z","@l":"Error","@m":"payment failed"}\n{"@t":"2024-05-01T10:00:01Z","@m":"retrying"}\n');
+  await win.waitForFunction(() => /2 messages · 1 client/.test(document.querySelector('.capture-status')?.textContent ?? ''), null, { timeout: 10000 });
+  c.end();
+  await win.waitForSelector('.grid-rows .r:has-text("payment failed")', { timeout: 20000 });
+  // the capture was empty when it opened (plain text); with lines in it the format is detected again
+  await win.waitForFunction(() => /JSON lines/.test(document.querySelector('#status .fmt')?.textContent ?? ''), null, { timeout: 20000 });
+  await shot('28-receiver');
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n, before);
+  let free = false;
+  for (let i = 0; i < 50 && !free; i++) {
+    free = await portFree(port);
+    if (!free) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(free, 'the port is free again after closing the tab');
+});
+
+// A second launch of the app (same profile) hands its command line to this window and exits.
+const secondLaunch = (args) =>
+  new Promise((resolve, reject) => {
+    const electronBin = createRequire(import.meta.url)('electron');
+    const child = spawn(electronBin, ['--no-sandbox', `--user-data-dir=${profile}`, '.', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d));
+    child.stderr.on('data', (d) => (output += d));
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`the second launch did not exit:\n${output}`));
+    }, 20000);
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve(code ?? `${signal}\n${output}`);
+    });
+  });
+const apiLog = path.join(tmp, 'api.log');
+fs.writeFileSync(apiLog, Array.from({ length: 40 }, (_, i) => `2024-05-01 09:00:${String(i).padStart(2, '0')},000 [main] ${i % 4 === 3 ? 'ERROR' : 'INFO '} com.acme.Api - call ${i} ${i % 2 ? 'db=users' : 'db=orders'}`).join('\n') + '\n');
+const activeTab = () => win.locator('.tab.active .name').innerText();
+
+await step('a second launch hands its files, filter and "go to" to the running window', async () => {
+  const before = await win.locator('.tab').count();
+  assert.equal(await secondLaunch([apiLog, '--filter', 'db=users', '--goto', '2024-05-01 09:00:21']), 0);
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before, { timeout: 20000 });
+  assert.equal(await activeTab(), 'api.log');
+  await win.waitForFunction(() => document.querySelector('#quick')?.value === 'db=users');
+  await win.waitForFunction(() => /20 of 40|20 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r.sel:has-text("call 21 ")', { timeout: 20000 });
+  // a remote file on the command line opens over ssh, and handing it over again shows the same tab
+  const tabs = await win.locator('.tab').count();
+  assert.equal(await secondLaunch(['web1:/var/log/app.log']), 0);
+  await win.waitForFunction(() => document.querySelector('.tab.active .name')?.textContent === 'web1:/var/log/app.log', null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r:has-text("remote two")', { timeout: 20000 });
+  assert.equal(await secondLaunch(['ssh://web1/var/log/app.log']), 0);
+  await win.waitForTimeout(500);
+  assert.equal(await win.locator('.tab').count(), tabs + 1);
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n, tabs);
+});
+
+await step('a link asks before it opens, then shows its filter', async () => {
+  const before = await win.locator('.tab').count();
+  const link = `ultralogviewer://open?path=${encodeURIComponent(apiLog)}&filter=${encodeURIComponent('level:error')}&newtab=1`;
+  assert.equal(await secondLaunch([link]), 0);
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before, { timeout: 20000 });
+  assert.equal(fs.readFileSync(linkLog, 'utf-8').trim(), apiLog); // the confirmation named the file
+  await win.waitForFunction(() => document.querySelector('#quick')?.value === 'level:error');
+  await win.waitForFunction(() => /10 of 40|10 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // and a link with a relative path opens nothing
+  fs.writeFileSync(linkLog, '');
+  assert.equal(await secondLaunch(['ultralogviewer://open?path=api.log']), 0);
+  // nor does a link to a remote file (that would run ssh)
+  assert.equal(await secondLaunch([`ultralogviewer://open?path=${encodeURIComponent('ssh://web1/var/log/app.log')}`]), 0);
+  assert.equal(await secondLaunch(['ultralogviewer://open?path=web1:/var/log/app.log']), 0);
+  await win.waitForTimeout(500);
+  assert.equal(await win.locator('.tab').count(), before + 1);
+  assert.equal(fs.readFileSync(linkLog, 'utf-8'), '');
+});
+
+await step('the local HTTP API: enable it, POST /open, see the tab with the filter applied', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['File › Local API › Enable local HTTP API', 'File › Local API › Copy API example', 'Edit › Copy link to this view']) assert.ok(labels.includes(l), `menu item ${l}`);
+  assert.equal((await win.evaluate(() => window.ulv.apiStatus())).port, null); // off by default
+  await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById('local-api').click());
+  await win.waitForFunction(async () => !!(await window.ulv.apiStatus()).port, null, { timeout: 10000 });
+  const { port, token } = await win.evaluate(() => window.ulv.apiStatus());
+  assert.equal(token.length, 64);
+  const base = `http://127.0.0.1:${port}`;
+  const auth = { Authorization: `Bearer ${token}` };
+  assert.equal((await fetch(`${base}/tabs`)).status, 401);
+  assert.equal((await fetch(`${base}/tabs`, { headers: { Authorization: 'Bearer nope-nope-nope-nope' } })).status, 401);
+  const before = await win.locator('.tab').count();
+  const res = await fetch(`${base}/open`, { method: 'POST', headers: auth, body: JSON.stringify({ path: apiLog, filter: 'db=orders', levels: 'info', newTab: true }) });
+  assert.equal(res.status, 200);
+  const { tab } = await res.json();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before);
+  assert.equal(await win.inputValue('#quick'), 'db=orders');
+  await win.waitForFunction(() => /20 of 40|20 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await shot('28-api-open');
+  const tabs = await (await fetch(`${base}/tabs`, { headers: auth })).json();
+  assert.deepEqual(tabs.find((t) => t.id === tab), { id: tab, title: 'api.log', paths: [apiLog], total: 40, shown: 20, filter: 'db=orders', ready: true, active: true });
+  const rows = (await (await fetch(`${base}/tabs/${tab}/rows?from=0&count=2`, { headers: auth })).text()).trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => [r.line, r.level]), [[1, 'INFO'], [3, 'INFO']]);
+  assert.equal((await fetch(`${base}/tabs/${tab}/goto`, { method: 'POST', headers: auth, body: '{"goto":"line:9"}' })).status, 200);
+  await win.waitForSelector('.grid-rows .r.sel:has-text("call 8 ")', { timeout: 10000 });
+  // "Copy link to this view": the files, the filter, the levels and the selected entry's time
+  const copyId = (await win.evaluate(() => window.ulv.menuItems())).find((m) => m.label === 'Edit › Copy link to this view').id;
+  await win.evaluate((id) => window.ulv.runMenuItem(id), copyId);
+  let link = '';
+  for (let i = 0; i < 50 && !link.startsWith('ultralogviewer:'); i++, await win.waitForTimeout(100)) link = await app.evaluate(({ clipboard }) => clipboard.readText());
+  assert.ok(link.startsWith(`ultralogviewer://open?path=${encodeURIComponent(apiLog)}&levels=info&filter=db%3Dorders&goto=`), link);
+  assert.match(link, /goto=2024-05-01T\d\d%3A\d\d%3A08\.000Z$/);
+  await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById('local-api').click());
+  await win.waitForFunction(async () => !(await window.ulv.apiStatus()).port, null, { timeout: 10000 });
+  await assert.rejects(fetch(`${base}/health`, { headers: auth }));
 });
 
 await step('dark theme renders', async () => {

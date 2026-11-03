@@ -10,7 +10,7 @@ using UltraLogViewer.Core;
 namespace UltraLogViewer.Desktop;
 
 /// <summary>Left panel: levels, field values, filter rules and presets, time range, highlights, bookmarks and sources.</summary>
-public sealed class Sidebar : ScrollViewer
+public sealed partial class Sidebar : ScrollViewer
 {
     private readonly MainWindow _host;
     private readonly StackPanel _root = new();
@@ -169,7 +169,7 @@ public sealed class Sidebar : ScrollViewer
             return Section(Header("Fields", refresh), [.. body]);
         }
         if (stats.Fields.Count == 0) body.Add(Hint("No parsed fields in this view."));
-        else body.Add(Hint($"Top values in {stats.Scanned:N0} of {stats.ViewCount:N0} entries{(stats.Sampled ? " (sample)" : "")}. Click a value to show only it, right-click to exclude it."));
+        else body.Add(Hint($"Top values in {stats.Scanned:N0} of {stats.ViewCount:N0} entries{(stats.Sampled ? " (sample)" : "")}. Click a value to show only it, Ctrl+click to pick several, right-click to exclude it."));
         var p = Palette.Current;
         foreach (var f in stats.Fields)
         {
@@ -209,23 +209,44 @@ public sealed class Sidebar : ScrollViewer
             body.Add(head);
             if (!expanded) continue;
             var max = Math.Max(1, f.Present);
+            var (picked, pickedPkgs) = _host.FieldPicks(tab, f.Key);
+            var pickBg = new SolidColorBrush(((ISolidColorBrush)p.Accent).Color, 0.2);
+            foreach (var (prefix, depth, n) in Packages(f.Top))
+            {
+                var on = pickedPkgs.Contains(prefix);
+                var label = new TextBlock { Text = (on ? "✓ " : "") + prefix + "*", FontFamily = Fonts.Mono, FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+                var num = new TextBlock { Text = n.ToString("N0", CultureInfo.CurrentCulture), FontSize = 11, Opacity = 0.65, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
+                var row = new DockPanel { Background = on ? pickBg : Brushes.Transparent, Cursor = new Cursor(StandardCursorType.Hand), Margin = new Thickness(14 + 10 * depth, 0, 0, 0), Opacity = 0.85 };
+                DockPanel.SetDock(num, Dock.Right);
+                row.Children.Add(num);
+                row.Children.Add(label);
+                ToolTip.SetTip(row, $"Package {prefix}*: {n:N0} of the top values' entries. Click: only this package. Ctrl+click: add it to the picks.");
+                row.PointerPressed += (_, e) =>
+                {
+                    if (!e.GetCurrentPoint(row).Properties.IsLeftButtonPressed) return;
+                    _host.PickPackage(f.Key, prefix, toggle: e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta));
+                    e.Handled = true;
+                };
+                body.Add(row);
+            }
             foreach (var (value, n) in f.Top)
             {
                 var label = new TextBlock { Text = value, FontFamily = Fonts.Mono, FontSize = 11.5, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
                 var num = new TextBlock { Text = n.ToString("N0", CultureInfo.CurrentCulture), FontSize = 11, Opacity = 0.65, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
                 var bar = new Border { Height = 2, CornerRadius = new CornerRadius(1), Background = p.Accent, HorizontalAlignment = HorizontalAlignment.Left, Opacity = 0.7 };
-                var row = new DockPanel { Background = Brushes.Transparent, Cursor = new Cursor(StandardCursorType.Hand), Margin = new Thickness(14, 0, 0, 0) };
+                var row = new DockPanel { Background = picked.Contains(value) ? pickBg : Brushes.Transparent, Cursor = new Cursor(StandardCursorType.Hand), Margin = new Thickness(14, 0, 0, 0) };
                 DockPanel.SetDock(num, Dock.Right);
                 DockPanel.SetDock(bar, Dock.Bottom);
                 row.Children.Add(num);
                 row.Children.Add(bar);
                 row.Children.Add(label);
                 row.SizeChanged += (_, e) => bar.Width = Math.Max(2, e.NewSize.Width * n / max);
-                ToolTip.SetTip(row, $"{value}\n{n:N0} of {f.Present:N0} ({(double)n / max:P0}). Click: only this value. Right-click: exclude it.");
+                ToolTip.SetTip(row, $"{value}\n{n:N0} of {f.Present:N0} ({(double)n / max:P0}). Click: only this value. Ctrl+click: pick several. Right-click: exclude it.");
                 row.PointerPressed += (_, e) =>
                 {
                     var props = e.GetCurrentPoint(row).Properties;
-                    if (props.IsLeftButtonPressed) _host.AddValueRule(f.Key, value, RuleMode.Include);
+                    if (props.IsLeftButtonPressed && (e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta))) _host.TogglePick(f.Key, value);
+                    else if (props.IsLeftButtonPressed) _host.AddValueRule(f.Key, value, RuleMode.Include);
                     else if (props.IsRightButtonPressed) _host.AddValueRule(f.Key, value, RuleMode.Exclude);
                     e.Handled = true;
                 };
@@ -233,6 +254,30 @@ public sealed class Sidebar : ScrollViewer
             }
         }
         return Section(Header("Fields", refresh), [.. body]);
+    }
+
+    /// <summary>
+    /// The package tree of a field's top values when they are dotted names (loggers): every package shared by at least two
+    /// of them, in tree order, with its depth below the shallowest one shown and the entries of the values under it.
+    /// </summary>
+    internal static List<(string Prefix, int Depth, int Count)> Packages(IReadOnlyList<(string Value, int Count)> top)
+    {
+        var counts = new Dictionary<string, (int Values, int Entries)>(StringComparer.Ordinal);
+        foreach (var (v, n) in top)
+        {
+            if (!Query.IsDottedName(v)) continue;
+            foreach (var prefix in Query.PackagePrefixes(v))
+            {
+                var c = counts.GetValueOrDefault(prefix);
+                counts[prefix] = (c.Values + 1, c.Entries + n);
+            }
+        }
+        var shared = counts.Where(kv => kv.Value.Values >= 2).OrderBy(kv => kv.Key, StringComparer.Ordinal).ToList();
+        if (shared.Count == 0) return [];
+        // A package that holds exactly the same values as its only child adds nothing: com. above com.acme.
+        shared = shared.Where(kv => !shared.Any(o => o.Key.Length > kv.Key.Length && o.Key.StartsWith(kv.Key, StringComparison.Ordinal) && o.Value == kv.Value)).ToList();
+        var minDepth = shared.Min(kv => kv.Key.Count(ch => ch == '.'));
+        return shared.Take(8).Select(kv => (kv.Key, kv.Key.Count(ch => ch == '.') - minDepth, kv.Value.Entries)).ToList();
     }
 
     // ---------------------------------------------------------------- filters
@@ -651,7 +696,9 @@ public sealed class Sidebar : ScrollViewer
         var state = s.Indexing ? $"Indexing {s.Progress:P0} · " : "";
         var extra = (s.Compression.Length > 0 ? " · " + s.Compression : s.Compressed ? " · gzip" : "") + (s.Live ? "" : " · static")
             + (s.Partial ? " · partial" : "") + (s.CacheState.Length > 0 ? " · cached index" : "");
-        return $"{s.DisplayName}\n{state}{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{extra}";
+        // a remote file: its connection state, which changes without new data
+        var remote = (RemoteFile.Find(s.Path)?.Status ?? s.Remote) is { } r ? r.Text + "\n" : "";
+        return $"{s.DisplayName}\n{remote}{state}{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{extra}";
     }
 
     public static string FormatSize(long b) => b switch
@@ -666,6 +713,7 @@ public sealed class Sidebar : ScrollViewer
     {
         _sourcesInfo = new TextBlock { Classes = { "hint" }, Text = SourcesText(tab) };
         ToolTip.SetTip(_sourcesInfo, string.Join("\n", tab.Paths));
-        return Section(tab.Paths.Length > 1 ? "Sources (merged by time)" : "Source", _sourcesInfo);
+        var title = tab.Paths.Length > 1 ? "Sources (merged by time)" : "Source";
+        return Section(title, [.. CaptureControls(tab), _sourcesInfo]);
     }
 }

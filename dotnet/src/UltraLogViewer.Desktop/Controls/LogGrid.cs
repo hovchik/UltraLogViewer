@@ -32,6 +32,8 @@ public interface ILogGridHost
     void CopyRows(int from, int to);
     /// <summary>Ctrl+click on a token: search for its text, starting at the clicked row.</summary>
     void SearchFor(string text, int fromRow);
+    /// <summary>Click on a source location (Foo.java:42) in an expanded entry: open it in the editor.</summary>
+    void OpenSource(SourceRef r);
 }
 
 /// <summary>
@@ -76,6 +78,8 @@ public sealed class LogGrid : Control
     /// <summary>The token under the pointer while Ctrl is held (drawn underlined).</summary>
     private (int Row, bool InExpansion, int Start, int Length)? _hover;
     private DispatcherTimer? _flashTimer;
+    private string? _autoText;
+    private Regex? _autoRe;
     private static readonly TimeSpan FlashTime = TimeSpan.FromSeconds(1.5);
 
     public LogGrid(ILogGridHost host)
@@ -100,6 +104,50 @@ public sealed class LogGrid : Control
     }
 
     public DocumentTab? Tab => _tab;
+
+    /// <summary>
+    /// Text whose every occurrence in the rows on screen gets a temporary highlight: the word double-clicked in a row, or
+    /// the text selected in the details pane. Only what is painted is searched, so it costs nothing off screen.
+    /// </summary>
+    public string? AutoHighlight
+    {
+        get => _autoText;
+        set => SetAutoHighlight(value, false);
+    }
+
+    /// <summary>The highlight comes from a double-click in the grid (a click elsewhere clears it).</summary>
+    public bool AutoHighlightByGrid { get; private set; }
+
+    private void SetAutoHighlight(string? text, bool byGrid)
+    {
+        text = string.IsNullOrWhiteSpace(text) ? null : text;
+        AutoHighlightByGrid = byGrid && text is not null;
+        if (text == _autoText) return;
+        _autoText = text;
+        _autoRe = text is null ? null : new Regex(Regex.Escape(text), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(50));
+        InvalidateVisual();
+    }
+
+    /// <summary>The word (letters, digits, "_") under a point in the message cell or the expanded lines.</summary>
+    private string? WordAt(Point pt)
+    {
+        if (TextAt(pt) is not { } at) return null;
+        static bool W(char c) => char.IsLetterOrDigit(c) || c == '_';
+        if (!W(at.Text[at.Pos])) return null;
+        var a = at.Pos;
+        var b = at.Pos;
+        while (a > 0 && W(at.Text[a - 1])) a--;
+        while (b < at.Text.Length - 1 && W(at.Text[b + 1])) b++;
+        return at.Text[a..(b + 1)];
+    }
+
+    /// <summary>The source location under a point in an expanded entry.</summary>
+    private SourceRef? SourceAt(Point pt)
+    {
+        if (!_layout.Any(b => !double.IsNaN(b.ExpTop) && pt.Y >= b.ExpTop && pt.Y < b.Y + b.H)) return null;
+        if (TextAt(pt) is not { InExpansion: true } at) return null;
+        return SourceLinks.Find(at.Text).FirstOrDefault(r => at.Pos >= r.Start && at.Pos < r.Start + r.Length);
+    }
     public int Count => _tab?.Info.ViewCount ?? 0;
     private AppSettings Settings => _host.Settings;
     public double RowHeight => Settings.Comfortable ? 26 : 20;
@@ -766,6 +814,12 @@ public sealed class LogGrid : Control
                 ctx.DrawLine(new Pen(p.Border, 2), new Point(ex - 4, ey), new Point(ex - 4, ey + et.Height));
                 DrawMarks(ctx, p, et, moreAt >= 0 ? text[..moreAt] : text, new Point(ex, ey), isCurHit, tokens);
                 if (moreAt >= 0) et.SetForegroundBrush(p.Fg3, moreAt, text.Length - moreAt);
+                // source locations are links (click opens them in the editor)
+                foreach (var sr in SourceLinks.Find(moreAt >= 0 ? text[..moreAt] : text))
+                {
+                    et.SetForegroundBrush(p.Accent, sr.Start, sr.Length);
+                    et.SetTextDecorations(TextDecorations.Underline, sr.Start, sr.Length);
+                }
                 foreach (var (fs, fl) in LineRanges(text, folds))
                 {
                     if (fl == 0) continue;
@@ -804,6 +858,16 @@ public sealed class LogGrid : Control
             {
                 t.SetForegroundBrush(brush, s, len);
                 t.SetFontWeight(FontWeight.SemiBold, s, len);
+            }
+        }
+        if (_autoRe is not null)
+        {
+            var fill = new ImmutableSolidColorBrush(((ISolidColorBrush)p.Accent).Color, 0.25);
+            var pen = new Pen(p.Accent, 1);
+            foreach (var (s, len) in Query.Ranges(_autoRe, text, 200))
+            {
+                var geo = t.BuildHighlightGeometry(origin, s, len);
+                if (geo is not null) ctx.DrawGeometry(fill, pen, geo);
             }
         }
         if (_searchRe is null) return;
@@ -925,6 +989,13 @@ public sealed class LogGrid : Control
         }
         if (row is null || _tab is null || !props.IsLeftButtonPressed) return;
         var ctrl = e.KeyModifiers.HasFlag(KeyModifiers.Control) || e.KeyModifiers.HasFlag(KeyModifiers.Meta);
+        if (e.ClickCount == 1 && !e.KeyModifiers.HasFlag(KeyModifiers.Shift) && SourceAt(pt) is { } link)
+        {
+            _host.OpenSource(link);
+            e.Handled = true;
+            return;
+        }
+        if (e.ClickCount == 1 && AutoHighlightByGrid) SetAutoHighlight(null, false);
         if (ctrl && TokenAt(pt) is { } th)
         {
             var t = th.Text.Substring(th.Token.Start, th.Token.Length);
@@ -954,7 +1025,9 @@ public sealed class LogGrid : Control
         }
         if (e.ClickCount == 2)
         {
-            if (_cache.TryGetValue(row.Value, out var rd)) _host.ToggleBookmark(rd);
+            // a word: highlight it everywhere on screen; anywhere else (line number, other cells): bookmark
+            if (WordAt(pt) is { } word) SetAutoHighlight(word, true);
+            else if (_cache.TryGetValue(row.Value, out var rd)) _host.ToggleBookmark(rd);
             e.Handled = true;
             return;
         }
@@ -1006,7 +1079,7 @@ public sealed class LogGrid : Control
             _hover = hover;
             InvalidateVisual();
         }
-        Cursor = tok is not null ? new Cursor(StandardCursorType.Hand)
+        Cursor = tok is not null || (!ctrl && pt.Y >= HeaderHeight && SourceAt(pt) is not null) ? new Cursor(StandardCursorType.Hand)
             : pt.Y < HeaderHeight && ResizeHandleAt(pt.X) is not null ? new Cursor(StandardCursorType.SizeWestEast) : Cursor.Default;
     }
 

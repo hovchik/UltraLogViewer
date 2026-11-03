@@ -54,6 +54,7 @@ public sealed class FileSource : IDisposable
     private Encoding _decoder = new UTF8Encoding(false, false);
     /// <summary>First bytes of the file, used to detect that it was replaced (rotated) under the same name.</summary>
     private byte[] _head = [];
+    private int _remoteGeneration;
     /// <summary>Where indexing starts: the data start, or the first entry of an opened time window.</summary>
     private long _rangeStart;
     /// <summary>End of an opened time window that ends before the end of the file (null: index to the end and tail).</summary>
@@ -157,7 +158,7 @@ public sealed class FileSource : IDisposable
 
     public SourceInfo Info() => new(Id, Path, Archives.DisplayName(Path), DataEnd, LineCount, EntryCount, Format.Name, EncodingName, Compressed, Live,
         Format.Id, FormatDetector.Label(Format), Detection.Auto, Detection.Matched, Detection.Sampled,
-        Compression, Indexing, Indexing ? Progress : 1, Partial, WindowFrom, WindowTo, CacheState);
+        Compression, Indexing, Indexing ? Progress : 1, Partial, WindowFrom, WindowTo, CacheState, RemoteFile.Find(Path)?.Status);
 
     /// <summary>
     /// Prepares the file (decompress / transcode if needed), detects the format and indexes it: from the index
@@ -247,6 +248,7 @@ public sealed class FileSource : IDisposable
                 if (CacheState != "hit") await Task.Run(() => IndexFrom(end, progress, ct), ct);
             }
             if (Live) _head = ReadHead(Path, 256);
+            _remoteGeneration = RemoteFile.Find(Path)?.Generation ?? 0;
         }
         finally
         {
@@ -547,6 +549,8 @@ public sealed class FileSource : IDisposable
         {
             long size;
             bool replaced;
+            // A remote copy that started over (read before the size, so the size is at least the new file's)
+            var generation = RemoteFile.Find(Path)?.Generation ?? 0;
             try
             {
                 size = new FileInfo(Path).Length;
@@ -557,8 +561,9 @@ public sealed class FileSource : IDisposable
             {
                 return new(false, false, EntryCount);
             }
-            if (replaced || size < DataEnd)
+            if (replaced || size < DataEnd || generation != _remoteGeneration)
             {
+                _remoteGeneration = generation;
                 // Rotated or truncated: start over on the new file.
                 lock (_sync)
                 {

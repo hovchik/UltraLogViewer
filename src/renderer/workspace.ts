@@ -1,4 +1,4 @@
-// Saved workspaces (.ulvw, JSON): the open tabs with their files, format, filters, search, bookmarks and
+// Saved workspaces (.ulvw, JSON): the open tabs with their files, format, filters, search, bookmarks, pinned rows and
 // column settings, plus the highlight rules. Pure functions (no DOM, no Node) so they can be unit tested;
 // app.ts does the file IO and opens the tabs.
 
@@ -8,6 +8,12 @@ export interface WorkspaceBookmark {
   path: string;
   line: number;
   note: string;
+}
+
+/** A pinned row: its file and 1-based line. */
+export interface WorkspacePin {
+  path: string;
+  line: number;
 }
 
 export interface WorkspaceTab {
@@ -20,6 +26,7 @@ export interface WorkspaceTab {
   filter: FilterSpec;
   search: TextPattern;
   bookmarks: WorkspaceBookmark[];
+  pins: WorkspacePin[];
   extraColumns: string[];
   columnOrder: string[];
   hiddenColumns: string[];
@@ -40,6 +47,7 @@ export interface WorkspaceTabInput {
   filter: FilterSpec;
   search: TextPattern;
   bookmarks: WorkspaceBookmark[];
+  pins?: WorkspacePin[];
   extraColumns?: string[];
   columnOrder?: string[];
   hiddenColumns?: string[];
@@ -114,6 +122,7 @@ export function serializeWorkspace<H>(tabs: WorkspaceTabInput[], active: number,
         filter,
         search: { text: t.search.text, regex: t.search.regex, caseSensitive: t.search.caseSensitive, wholeWord: t.search.wholeWord },
         bookmarks: t.bookmarks.map((b) => ({ path: b.path, line: b.line, note: b.note ?? '' })),
+        pins: (t.pins ?? []).map((p) => ({ path: p.path, line: p.line })),
         extraColumns: [...(t.extraColumns ?? [])],
         columnOrder: [...(t.columnOrder ?? [])],
         hiddenColumns: [...(t.hiddenColumns ?? [])],
@@ -147,6 +156,10 @@ export function parseWorkspace<H = unknown>(text: string): Workspace<H> {
       bookmarks: (Array.isArray(t.bookmarks) ? t.bookmarks : [])
         .filter((b): b is WorkspaceBookmark => !!b && typeof b.path === 'string' && typeof b.line === 'number')
         .map((b) => ({ path: b.path, line: b.line, note: typeof b.note === 'string' ? b.note : '' })),
+      // (workspaces saved before pinned rows existed have none)
+      pins: (Array.isArray(t.pins) ? t.pins : [])
+        .filter((p): p is WorkspacePin => !!p && typeof p.path === 'string' && typeof p.line === 'number')
+        .map((p) => ({ path: p.path, line: p.line })),
       extraColumns: strs(t.extraColumns),
       columnOrder: strs(t.columnOrder),
       hiddenColumns: strs(t.hiddenColumns),
@@ -173,7 +186,7 @@ export function resolveWorkspace<H>(ws: Workspace<H>, workspaceFile: string, exi
   let active = 0;
   ws.tabs.forEach((t, i) => {
     const paths: string[] = [];
-    // bookmarks follow their file to its new location
+    // bookmarks and pins follow their file to its new location
     const moved = new Map<string, string>();
     t.paths.forEach((p, k) => {
       const rel = t.relPaths[k];
@@ -184,7 +197,8 @@ export function resolveWorkspace<H>(ws: Workspace<H>, workspaceFile: string, exi
     });
     if (i === ws.active) active = tabs.length;
     if (!paths.length) return;
-    tabs.push({ ...t, paths, bookmarks: t.bookmarks.map((b) => ({ ...b, path: moved.get(b.path) ?? b.path })) });
+    const follow = <T extends { path: string }>(x: T): T => ({ ...x, path: moved.get(x.path) ?? x.path });
+    tabs.push({ ...t, paths, bookmarks: t.bookmarks.map(follow), pins: t.pins.map(follow) });
   });
   return { tabs, active: Math.max(0, Math.min(tabs.length - 1, active)), missing, highlights: ws.highlights };
 }

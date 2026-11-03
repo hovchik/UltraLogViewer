@@ -4,8 +4,10 @@
 
 import type { LogFormat } from './formats';
 import { compileMatcher, compileQuery, Matcher, ruleMatcher, TIME_FIELD } from './query';
+import { fieldValue, groupValue } from './histogramGroups';
 import { fnv1a64, messageOf, repeatKey, template } from './patterns';
 import { FilterSpec, Level, TextPattern } from './types';
+import { SqlColumn, sqlRowValues } from './sqlSchema';
 
 /** Level names used when matching `level:` queries (WARNING also matches "warn"). */
 const LEVEL_MATCH_NAMES = ['NONE', 'TRACE', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'FATAL'];
@@ -79,16 +81,22 @@ export function compileTextTest(spec: TextFilter, fmt: LogFormat): ((text: strin
 export type RangeOp =
   | { kind: 'filter'; filter: TextFilter }
   | { kind: 'search'; pattern: TextPattern }
-  | { kind: 'repeat'; mode: 'exact' | 'pattern' };
+  | { kind: 'repeat'; mode: 'exact' | 'pattern' }
+  /** The SQL table's optional column values (see sqlRowValues). */
+  | { kind: 'sql'; columns: SqlColumn[] };
 
-/** filter / search: 1 per entry that passes. repeat: the 64-bit repeat-key hash of every entry as high/low halves. */
-export type RangeResult = Uint8Array | { hi: Uint32Array; lo: Uint32Array };
+/**
+ * filter / search: 1 per entry that passes. repeat: the 64-bit repeat-key hash of every entry as high/low halves.
+ * sql: the column values, row after row.
+ */
+export type RangeResult = Uint8Array | { hi: Uint32Array; lo: Uint32Array } | (string | number | bigint | null)[];
 
 /**
  * Evaluates a range op over a batch: `texts` and `levels` of its entries, and `candidates` (1 = test this entry, the
  * others are 0 without reading) or null for all of them.
  */
 export function rangeEvaluator(op: RangeOp, fmt: LogFormat): (texts: string[], levels: ArrayLike<number>, times: ArrayLike<number>, candidates: Uint8Array | null) => RangeResult {
+  if (op.kind === 'sql') return (texts) => sqlRowValues(fmt, op.columns, texts);
   if (op.kind === 'repeat') {
     return (texts, levels) => {
       const hi = new Uint32Array(texts.length);
@@ -110,9 +118,11 @@ export function rangeEvaluator(op: RangeOp, fmt: LogFormat): (texts: string[], l
 export type RowsOp =
   | { kind: 'patterns' }
   | { kind: 'fields' }
+  /** One field's value per row, as the grouped timeline counts it. */
+  | { kind: 'field'; key: string }
   | { kind: 'export'; format: 'text' | 'csv' | 'jsonl'; columns: string[]; source: string | null };
 
-/** patterns: template and sample of each row. fields: parsed fields. export: one output line per row (with "\n"). */
+/** patterns: template and sample of each row. fields: parsed fields. field: the value. export: one output line per row (with "\n"). */
 export type RowsResult = { templates: string[]; samples: string[] } | Record<string, string>[] | string[];
 
 /** First line of a message, at most 300 characters: what the patterns view shows for a template. */
@@ -140,6 +150,10 @@ export function rowsEvaluator(op: RowsOp, fmt: LogFormat): (texts: string[], lin
       };
     case 'fields':
       return (texts) => texts.map((t) => fmt.parse(t));
+    case 'field': {
+      const key = op.key;
+      return (texts) => texts.map((t) => groupValue(fieldValue(fmt.parse(t), key)));
+    }
     case 'export': {
       const { format, columns, source } = op;
       return (texts, lines) =>
@@ -179,7 +193,7 @@ export interface EntryJob {
 /** Evaluates a job's op over its entry texts. */
 export function evaluate(job: EntryJob, fmt: LogFormat, texts: string[]): RangeResult | RowsResult {
   const op = job.op;
-  return op.kind === 'filter' || op.kind === 'search' || op.kind === 'repeat'
+  return op.kind === 'filter' || op.kind === 'search' || op.kind === 'repeat' || op.kind === 'sql'
     ? rangeEvaluator(op, fmt)(texts, job.levels, job.times, job.candidates)
     : rowsEvaluator(op, fmt)(texts, job.lines);
 }
