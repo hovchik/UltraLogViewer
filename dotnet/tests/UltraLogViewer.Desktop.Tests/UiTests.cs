@@ -682,15 +682,22 @@ public sealed class UiTests : IDisposable
         w.Close();
     }
 
+    private static void SetQuery(MainWindow w, DocumentTab tab, string query)
+    {
+        w.SetQuickFilterText(query);
+        tab.Filter.Query = query;
+    }
+
     [AvaloniaFact]
     public async Task A_superseded_filter_leaves_the_newer_one_its_progress()
     {
         var (w, _) = NewWindow();
         var tab = await Open(w, Sample("slow.log", 200_000));
-        tab.Filter.Query = "/Handled request \\d+3 for/";
+        // Through the quick filter box too, so its debounce does not later "commit" an empty box over the query.
+        SetQuery(w, tab, "/Handled request \\d+3 for/");
         var first = w.ApplyFilterAsync(tab);
         await Until(() => tab.BusyLabel == "Filtering");
-        tab.Filter.Query = "/Handled request \\d+7 for/";
+        SetQuery(w, tab, "/Handled request \\d+7 for/");
         var second = w.ApplyFilterAsync(tab);
         await first; // returns at once: the second one superseded it
         Assert.False(second.IsCompleted);
