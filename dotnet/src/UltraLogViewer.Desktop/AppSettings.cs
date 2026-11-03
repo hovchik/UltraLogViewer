@@ -87,6 +87,8 @@ public sealed class AppSettings
     public List<string> SourceRoots { get; set; } = [];
     /// <summary>AI features (off by default). The API keys are not here: see <see cref="AiKeyStore"/>.</summary>
     public AiSettings Ai { get; set; } = new();
+    /// <summary>The local HTTP API (off by default), see <see cref="LocalApiSettings"/>.</summary>
+    public LocalApiSettings LocalApi { get; set; } = new();
 
     /// <summary>The index cache folder, next to the settings file.</summary>
     [JsonIgnore] public string IndexCacheDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "index-cache");

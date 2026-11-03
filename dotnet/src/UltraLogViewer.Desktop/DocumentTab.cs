@@ -34,6 +34,9 @@ public sealed class DocumentTab : IDisposable
         Info = doc.Info();
     }
 
+    private static int s_nextId;
+    /// <summary>Stable id of the tab for the local API (never reused while the app runs).</summary>
+    public int Id { get; } = Interlocked.Increment(ref s_nextId);
     public string[] Paths { get; }
     public LogDocument Doc { get; set; }
     public DocInfo Info { get; set; }
