@@ -84,6 +84,8 @@ if ($App -eq 'Avalonia') {
 
 if (-not $Version) { throw 'Could not determine the app version; pass -Version.' }
 if (-not (Test-Path (Join-Path $sourceDir 'UltraLogViewer.exe'))) { throw "UltraLogViewer.exe not found in $sourceDir" }
+# The SQL panel needs SQLite's native library next to the exe (Microsoft.Data.Sqlite publishes it for win-x64).
+if ($App -eq 'Avalonia' -and -not (Test-Path (Join-Path $sourceDir 'e_sqlite3.dll'))) { throw "e_sqlite3.dll not found in $sourceDir" }
 
 $iss = Join-Path $root 'installer/UltraLogViewer.iss'
 $outputDir = Join-Path $root 'release/installer'

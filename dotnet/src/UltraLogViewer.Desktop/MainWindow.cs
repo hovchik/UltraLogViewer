@@ -262,6 +262,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         TimeMenu(new MenuItem { Header = "Time _column" }),
                         new Separator(),
                         Check("_Patterns", () => _patternsShown, TogglePatterns, new KeyGesture(Key.A, KeyModifiers.Control | KeyModifiers.Shift)),
+                        Check("S_QL", () => _sqlShown, ToggleSql, new KeyGesture(Key.Q, KeyModifiers.Control | KeyModifiers.Shift)),
                         GroupMenu(),
                         Check("Fold framework frames", () => _settings.FoldFrames, () => { SetDisplay(() => _settings.FoldFrames = !_settings.FoldFrames); UpdateDetail(); }),
                         new Separator(),
@@ -400,7 +401,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             Child = _toastText,
         };
         _toastText.Foreground = Brushes.White;
-        var centerHost = new Panel { Children = { _center, _welcome, _toast } };
+        var centerHost = new Panel { Children = { BuildSqlDock(_center), _welcome, _toast } };
 
         _sidebar = new Sidebar(this);
         var sideBorder = new Border
@@ -648,6 +649,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab is null) RebuildRecent();
         UpdateTitle();
         if (_patternsShown) ShowPatterns(false);
+        SqlTabChanged();
         _search.Text = tab?.SearchPattern.Text ?? "";
         if (tab is not null)
         {
@@ -740,6 +742,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         CancelAi(tab);
         if (tab.Split is { } split) CancelAi(split);
         var wasActive = OwnerOf(_active) == tab;
+        DropSql(tab);
         tab.Dispose();
         if (wasActive) Activate(_tabs.Count == 0 ? null : _tabs[Math.Min(i, _tabs.Count - 1)]);
         else RebuildTabStrip();
@@ -1788,6 +1791,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             case Key.P when ctrl && shift: OpenPalette(); break;
             case Key.P when ctrl: TogglePinAtFocus(); break;
             case Key.A when ctrl && shift: TogglePatterns(); break;
+            case Key.Q when ctrl && shift: ToggleSql(); break;
             case Key.K when ctrl && !shift: ClearSoFar(); break;
             case Key.S when ctrl && e.KeyModifiers.HasFlag(KeyModifiers.Alt): Run(PickSaveWorkspace); break;
             case Key.F2: NextBookmark(shift ? -1 : 1); break;

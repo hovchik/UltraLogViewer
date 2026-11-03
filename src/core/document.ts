@@ -277,6 +277,7 @@ export class LogDocument implements SetMember {
 
   /** SetMember: called with this document's queue held after the index changed. */
   sourcesChanged(firstChanged: number[] | null) {
+    for (const fn of this.indexListeners) fn(firstChanged);
     if (!firstChanged) {
       this.verdict = [];
       this.repeatHi = [];
@@ -946,6 +947,46 @@ export class LogDocument implements SetMember {
     const src = this.sources[source];
     if (!src || !src.entryCount || line1 < 1 || line1 > src.lineCount) return null;
     return rowKey(source, src.entryForLine(line1 - 1));
+  }
+
+  // ------------------------------------------------- what the SQL table needs (logSql.ts)
+
+  private indexListeners = new Set<(firstChanged: number[] | null) => void>();
+
+  /** Calls `fn` (with the queue held) when the index changed: the first changed entry per source, or null for everything. */
+  onIndexChanged(fn: (firstChanged: number[] | null) => void): () => void {
+    this.indexListeners.add(fn);
+    return () => this.indexListeners.delete(fn);
+  }
+
+  /** Runs `fn` in this document's queue: no index change or filter runs meanwhile. */
+  inQueue<T>(fn: () => Promise<T>): Promise<T> {
+    return this.serial(fn);
+  }
+
+  get mergedNow(): boolean {
+    return !!this.merge;
+  }
+
+  /** Base position of an entry in the merge this document is synced to. */
+  baseOfEntry(src: number, entry: number): number {
+    return this.baseForEntry(src, entry);
+  }
+
+  /** How many entries of a source sit at base positions below `limit`. */
+  entriesBelow(src: number, limit: number): number {
+    const count = this.sources[src].entryCount;
+    if (!this.merge) return Math.min(count, limit);
+    const pos = this.merge.basePos[src];
+    return lowerBound(0, Math.min(count, pos.length), (i) => pos[i] >= limit);
+  }
+
+  /** View row of a base position, or null when the current view does not show it. */
+  viewRowOfBase(b: number): number | null {
+    const v = this.curView;
+    if (!v) return b >= 0 && b < this.baseCount() ? b : null;
+    const i = lowerBound(0, v.length, (k) => v[k] >= b);
+    return i < v.length && v[i] === b ? i : null;
   }
 
   /** Stops this document; the files close when no other document uses them. */

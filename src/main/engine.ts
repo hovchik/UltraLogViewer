@@ -9,6 +9,8 @@ import { SourceSet } from '../core/sourceSet';
 import { clearCache } from '../core/indexCache';
 import { OpenWindow } from '../core/timeWindow';
 import { ScanPool } from '../core/scanPool';
+import { LogSql } from '../core/logSql';
+import { SqlColumn, SqlResult } from '../core/sqlSchema';
 import { Encoding } from '../core/fileSource';
 import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
 
@@ -43,6 +45,8 @@ export class Engine {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private progressAt = new Map<string, number>();
+  /** The SQL table of each document that ran a query (see logSql.ts). */
+  private sql = new Map<number, LogSql>();
   /** Scans big files on all cores; absent when the worker script is not built next to this file (unit tests). */
   private scanPool = fs.existsSync(path.join(__dirname, 'scanWorker.js')) ? new ScanPool(path.join(__dirname, 'scanWorker.js')) : undefined;
 
@@ -118,6 +122,8 @@ export class Engine {
   }
 
   close(docId: number) {
+    this.sql.get(docId)?.close();
+    this.sql.delete(docId);
     this.docs.get(docId)?.close();
     this.docs.delete(docId);
     for (const k of this.progressAt.keys()) if (k.startsWith(`${docId}:`)) this.progressAt.delete(k);
@@ -216,6 +222,29 @@ export class Engine {
       this.emit({ type: 'doc-updated', docId: id, info: other.info(), reset: true });
     }
     return info;
+  }
+
+  private sqlFor(docId: number): LogSql {
+    let s = this.sql.get(docId);
+    if (!s) this.sql.set(docId, (s = new LogSql(this.doc(docId))));
+    return s;
+  }
+  /** Columns of the document's SQL table. */
+  sqlSchema(docId: number): Promise<SqlColumn[]> {
+    return this.sqlFor(docId).schemaColumns();
+  }
+  /**
+   * Runs an SQL query over the document's entries (loading the table first, with "sql" progress events). `cap`: load at
+   * most this many entries, 0 = all. A newer query or sqlCancel stops a load that is still running.
+   */
+  sqlQuery(docId: number, sql: string, cap?: number, maxRows?: number): Promise<SqlResult> {
+    const s = this.sqlFor(docId);
+    s.cancel();
+    if (cap !== undefined) s.cap = cap;
+    return s.query(sql, (f) => this.progress(docId, 'sql', f), maxRows).finally(() => this.progress(docId, 'sql', 1));
+  }
+  sqlCancel(docId: number) {
+    this.sql.get(docId)?.cancel();
   }
 
   /**

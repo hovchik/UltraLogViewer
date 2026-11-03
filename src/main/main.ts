@@ -161,7 +161,7 @@ function viewMenuState(s: Record<string, unknown>) {
 }
 let menuState = '';
 /** Per-tab state the menu shows (sent by the renderer when the active tab or its filter changes). */
-let tabMenu: { groupRepeats: string; patterns: boolean } = { groupRepeats: 'off', patterns: false };
+let tabMenu: { groupRepeats: string; patterns: boolean; sql: boolean } = { groupRepeats: 'off', patterns: false, sql: false };
 const menuKey = (s: Record<string, unknown>) => JSON.stringify([viewMenuState(s), tabMenu]);
 
 /** Gives every leaf item an id, so the command palette can list and run it. */
@@ -290,6 +290,7 @@ function buildMenu() {
         { label: 'Split right', accelerator: 'CmdOrCtrl+\\', registerAccelerator: false, click: () => send('split-right') },
         { label: 'Close split', click: () => send('close-split') },
         { label: 'Patterns', type: 'checkbox', checked: tabMenu.patterns, accelerator: 'CmdOrCtrl+Shift+A', registerAccelerator: false, click: () => send('toggle-patterns') },
+        { label: 'SQL', type: 'checkbox', checked: tabMenu.sql, accelerator: 'CmdOrCtrl+Shift+Q', registerAccelerator: false, click: () => send('toggle-sql') },
         {
           label: 'Group repeats',
           submenu: groupModes.map(([mode, label]): Electron.MenuItemConstructorOptions => ({ label, type: 'radio', checked: tabMenu.groupRepeats === mode, click: () => send('group-repeats', mode) })),
@@ -432,8 +433,8 @@ if (!app.requestSingleInstanceLock()) {
       // keep the View menu's check marks in sync with the renderer
       if (menuKey(s) !== menuState) buildMenu();
     });
-    ipcMain.handle('menu:state', (_e, st: { groupRepeats: string; patterns: boolean }) => {
-      tabMenu = { groupRepeats: String(st?.groupRepeats ?? 'off'), patterns: !!st?.patterns };
+    ipcMain.handle('menu:state', (_e, st: { groupRepeats: string; patterns: boolean; sql?: boolean }) => {
+      tabMenu = { groupRepeats: String(st?.groupRepeats ?? 'off'), patterns: !!st?.patterns, sql: !!st?.sql };
       if (menuKey(readSettings()) !== menuState) buildMenu();
     });
     ipcMain.handle('menu:items', () => menuItems());
