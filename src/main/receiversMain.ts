@@ -35,7 +35,7 @@ export function registerReceivers(userData: () => string) {
   const dir = () => path.join(userData(), 'receivers');
   ipcMain.handle('receivers:dir', () => dir());
   ipcMain.handle('receiver:start', async (_e, o: { protocol?: unknown; bind?: unknown; port?: unknown; maxMessage?: unknown; capMb?: unknown }) => {
-    if (!PROTOCOLS.includes(o?.protocol as ReceiverProtocol)) throw new Error('Unknown protocol');
+    if (!PROTOCOLS.includes(o?.protocol as ReceiverProtocol)) return { error: 'unknown protocol' };
     const opts: ReceiverOptions = {
       protocol: o.protocol as ReceiverProtocol,
       bind: String(o.bind ?? '127.0.0.1'),

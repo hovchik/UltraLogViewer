@@ -76,6 +76,17 @@ export class Receivers {
     }
   }
 
+  /** Opens the capture as a tab; when that fails, the receiver is stopped instead of running on with no tab. */
+  private async open(id: number, path: string, format: string, status: string): Promise<Tab | null> {
+    try {
+      return await this.host.openCapture(path, format, { id, status, running: true });
+    } catch (e) {
+      void ulv().captureStop(id, true);
+      toast(`Could not open the capture: ${(e as Error).message}`, true);
+      return null;
+    }
+  }
+
   forget(t: Tab) {
     if (t.capture) void ulv().captureStop(t.capture.id, true);
   }
@@ -89,7 +100,8 @@ export class Receivers {
     }
     // Syslog is always written as RFC 5424 and XML events as JSON; plain lines are detected once the first arrive.
     const format = o.protocol.startsWith('syslog') ? 'syslog5424' : o.protocol === 'log4j-xml' ? 'json' : '';
-    const tab = await this.host.openCapture(r.path!, format, { id: r.id, status: `Listening on ${r.endpoint}\n0 messages`, running: true });
+    const tab = await this.open(r.id, r.path!, format, `Listening on ${r.endpoint}\n0 messages`);
+    if (!tab) return null;
     tab.detectOnData = !format;
     this.ensureTimer();
     void this.tick();
@@ -190,7 +202,8 @@ export class Receivers {
       toast(`Could not read the ${channel} log: ${r.error}`, true);
       return null;
     }
-    const tab = await this.host.openCapture(r.path!, 'winevent', { id: r.id, status: `Windows event log ${channel}\nreading`, running: true });
+    const tab = await this.open(r.id, r.path!, 'winevent', `Windows event log ${channel}\nreading`);
+    if (!tab) return null;
     this.ensureTimer();
     const error = await ulv().eventLogFirst(r.id);
     if (error) toast(`Could not read the ${channel} log: ${error}`, true);
