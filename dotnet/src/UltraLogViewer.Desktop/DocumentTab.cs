@@ -54,6 +54,10 @@ public sealed class DocumentTab : IDisposable
     public string Encoding { get; set; } = "auto";
     /// <summary>The time window this tab was opened with (null: the whole file).</summary>
     public OpenWindow? Window { get; set; }
+    /// <summary>The receiver or event log writing this tab's capture file; stopped when the tab closes.</summary>
+    public ILiveCapture? Capture { get; set; }
+    /// <summary>Detect the format again once the (empty when opened) capture has lines.</summary>
+    public bool DetectOnData { get; set; }
     /// <summary>Only part of a file is shown (a time window): line numbers are relative and bookmarks are not saved.</summary>
     public bool IsPartial => Info.Sources.Any(s => s.Partial);
     public double? BusyProgress { get; set; }
@@ -127,6 +131,7 @@ public sealed class DocumentTab : IDisposable
     {
         Split?.Dispose();
         Split = null;
+        Capture?.Dispose();
         Doc.Dispose();
     }
 }

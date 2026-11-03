@@ -87,9 +87,13 @@ public sealed class AppSettings
     public List<string> SourceRoots { get; set; } = [];
     /// <summary>AI features (off by default). The API keys are not here: see <see cref="AiKeyStore"/>.</summary>
     public AiSettings Ai { get; set; } = new();
+    /// <summary>The last choices in the Listen… dialog.</summary>
+    public ReceiverSettings Receiver { get; set; } = new();
 
     /// <summary>The index cache folder, next to the settings file.</summary>
     [JsonIgnore] public string IndexCacheDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "index-cache");
+    /// <summary>Where receivers and event log exports write their capture files, next to the settings file.</summary>
+    [JsonIgnore] public string ReceiversDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "receivers");
 
     [JsonIgnore] public bool Comfortable => Density == "comfortable";
 

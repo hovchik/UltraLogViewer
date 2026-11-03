@@ -209,6 +209,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Open and _merge…", () => Run(() => PickAndOpen(true)), new KeyGesture(Key.O, KeyModifiers.Control | KeyModifiers.Shift)),
                         Item("Open _last…", () => Run(() => PickAndOpenWindow(false))),
                         Item("Open time _range…", () => Run(() => PickAndOpenWindow(true))),
+                        Item("_Listen…", () => Run(ListenAsync)),
+                        WindowsOnly(Item("Open _Windows event log…", () => Run(OpenEventLogAsync))),
                         _recentMenu,
                         new Separator(),
                         Item("Open _workspace…", () => Run(PickOpenWorkspace)),
@@ -792,6 +794,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             tab.Filter = replacing.Filter.Clone();
             tab.FormatId = replacing.FormatId;
+            (tab.Capture, replacing.Capture) = (replacing.Capture, null); // a receiver keeps running in the reopened tab
             var i = _tabs.IndexOf(replacing);
             _tabs[i] = tab;
             replacing.Dispose();

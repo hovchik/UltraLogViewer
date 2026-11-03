@@ -10,7 +10,7 @@ using UltraLogViewer.Core;
 namespace UltraLogViewer.Desktop;
 
 /// <summary>Left panel: levels, field values, filter rules and presets, time range, highlights, bookmarks and sources.</summary>
-public sealed class Sidebar : ScrollViewer
+public sealed partial class Sidebar : ScrollViewer
 {
     private readonly MainWindow _host;
     private readonly StackPanel _root = new();
@@ -711,6 +711,7 @@ public sealed class Sidebar : ScrollViewer
     {
         _sourcesInfo = new TextBlock { Classes = { "hint" }, Text = SourcesText(tab) };
         ToolTip.SetTip(_sourcesInfo, string.Join("\n", tab.Paths));
-        return Section(tab.Paths.Length > 1 ? "Sources (merged by time)" : "Source", _sourcesInfo);
+        var title = tab.Paths.Length > 1 ? "Sources (merged by time)" : "Source";
+        return tab.Capture is { } c ? Section(title, CaptureBox(tab, c), _sourcesInfo) : Section(title, _sourcesInfo);
     }
 }
