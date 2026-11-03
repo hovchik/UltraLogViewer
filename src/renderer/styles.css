@@ -462,3 +462,7 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .modal .box.ai-settings input[type='password'], .modal .box.ai-settings input[type='text'] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 12.5px var(--mono); }
 .err-text { color: var(--error); font-size: 12px; margin-top: 4px; }
 .err-text:empty { display: none; }
+
+/* receivers: the live line at the top of the Sources list */
+.sec .capture { display: flex; gap: 8px; align-items: flex-start; padding: 3px 0 8px; font-size: 12px; line-height: 1.45; }
+.sec .capture .capture-status { flex: 1; white-space: pre-line; overflow-wrap: anywhere; }

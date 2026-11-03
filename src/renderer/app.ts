@@ -14,6 +14,7 @@ import { HistogramView } from './histogram';
 import { openPalette } from './palette';
 import { PatternsView } from './patternsView';
 import { Pins } from './pins';
+import { Receivers } from './receivers';
 import { Sidebar } from './sidebar';
 import { editSourceSettings, openSourceRef } from './sourceLinksView';
 import type { TimeMode } from '../core/timestamp';
@@ -86,6 +87,20 @@ const mainGrid: Grid = new Grid($('#grid'), gridHost(() => mainGrid));
 const splitGrid: Grid = new Grid($('#grid2'), gridHost(() => splitGrid));
 /** The grid of the active tab: the main one, or the split pane's when that has focus. */
 let grid = mainGrid;
+
+const receivers = new Receivers({
+  settings: () => settings,
+  saveSettings,
+  tabs: () => tabs,
+  openCapture: async (path, format, capture) => {
+    const t = await openTab([path], { format });
+    t.capture = capture;
+    t.follow = true;
+    activate(t);
+    return t;
+  },
+  reformat: (t) => reformat(t),
+});
 
 const sidebar = new Sidebar($('#sidebar'), {
   settings: () => settings,
@@ -289,6 +304,7 @@ async function closeTab(tab: Tab) {
   const i = tabs.indexOf(tab);
   if (i < 0) return;
   tabs.splice(i, 1);
+  receivers.forget(tab); // stops the listener and frees the port
   const wasActive = ownerOf(active) === tab;
   for (const t of tab.split ? [tab, tab.split] : [tab]) {
     ai.requests.abort(t);
@@ -2364,6 +2380,10 @@ window.ulv.onMenu((cmd, ...args) => {
       return void openWindowDialog(false);
     case 'open-range':
       return void openWindowDialog(true);
+    case 'listen':
+      return receivers.listen();
+    case 'open-eventlog':
+      return receivers.openEventLog();
     case 'toggle-index-cache':
       settings.indexCache = settings.indexCache === false;
       saveSettings();
@@ -2558,6 +2578,7 @@ async function init() {
     setHistogramGroup: (field: string) => active && setHistogramGroup(active, field),
     autoHighlight: () => autoHighlight.current,
     ai,
+    receivers,
   };
 }
 

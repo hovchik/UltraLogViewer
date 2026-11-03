@@ -7,7 +7,9 @@
 
 import { detectLevel, levelFromSyslogSeverity, parseLevel } from './levels';
 import { matchTimestamp, parseTimestamp } from './timestamp';
+import { facilityName, parseSyslog, severityName } from './syslog';
 import { ColumnDef, CustomFormat, Level } from './types';
+import { WINEVENT_HEAD, winEventFormat } from './winEventFormat';
 
 export interface FormatContext {
   /** Year used for timestamps that don't carry one (syslog, logcat). */
@@ -63,7 +65,7 @@ export function plainFormat(): LogFormat {
 }
 
 const LEVEL_LABEL = ['', 'TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
-const levelText = (l: Level) => LEVEL_LABEL[l];
+export const levelText = (l: Level) => LEVEL_LABEL[l];
 
 // ---------------------------------------------- timestamped text (log4j & co)
 
@@ -189,7 +191,7 @@ function pickNamed(obj: Record<string, unknown>, keys: string[]): [unknown, stri
 const MAX_FIELDS = 60;
 
 /** Adds the remaining properties as fields, nested objects flattened to dotted names (http.request.path). */
-function addExtras(d: Record<string, string>, o: Record<string, unknown>, prefix: string, skip: Set<string>, depth: number, count: { n: number }) {
+export function addExtras(d: Record<string, string>, o: Record<string, unknown>, prefix: string, skip: Set<string>, depth: number, count: { n: number }) {
   for (const [k, v] of Object.entries(o)) {
     if (count.n >= MAX_FIELDS) return;
     const name = prefix + k;
@@ -206,9 +208,9 @@ function addExtras(d: Record<string, string>, o: Record<string, unknown>, prefix
   }
 }
 
-const str = (v: unknown) => (v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+export const str = (v: unknown) => (v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 
-function tryJson(line: string): Record<string, unknown> | null {
+export function tryJson(line: string): Record<string, unknown> | null {
   const t = line.trimStart();
   if (t.charCodeAt(0) !== 123 /* { */) return null;
   try {
@@ -256,7 +258,12 @@ export function jsonFormat(): LogFormat {
 
 // ------------------------------------------------------------------- syslog
 
-const RFC3164 = /^([A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) (\S+) ([^\s:[]+)(?:\[(\d+)\])?:? ?(.*)$/;
+// RFC 3164 / BSD syslog as files hold it ("Oct  3 04:05:06 host app[pid]: text"), also with the "<PRI>" that network
+// captures keep; with a PRI the level comes from its severity, and facility and severity become fields.
+const RFC3164 = /^(?:<(\d{1,3})>)?([A-Z][a-z]{2} {1,2}\d{1,2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) (\S+) ([^\s:[]+)(?:\[(\d+)\])?:? ?(.*)$/;
+
+const priOf = (m: RegExpExecArray) => (m[1] !== undefined && Number(m[1]) <= 191 ? Number(m[1]) : -1);
+const level3164 = (m: RegExpExecArray) => (priOf(m) >= 0 ? levelFromSyslogSeverity(priOf(m) % 8) : detectLevel(m[6]));
 
 export function syslogFormat(ctx: FormatContext): LogFormat {
   return {
@@ -268,16 +275,24 @@ export function syslogFormat(ctx: FormatContext): LogFormat {
     quick(line) {
       const m = RFC3164.exec(line);
       if (!m) return { level: detectLevel(line), time: null };
-      return { level: detectLevel(m[5]), time: matchTimestamp(m[1], ctx.year)?.ms ?? null };
+      return { level: level3164(m), time: matchTimestamp(m[2], ctx.year)?.ms ?? null };
     },
     parse(entry): Record<string, string> {
       const m = RFC3164.exec(firstLine(entry));
       if (!m) return { message: entry };
-      return { time: m[1], host: m[2], app: m[3], pid: m[4] ?? '', level: levelText(detectLevel(m[5])), message: m[5] + restLines(entry) };
+      const d: Record<string, string> = { time: m[2], host: m[3], app: m[4], pid: m[5] ?? '', level: levelText(level3164(m)), message: m[6] + restLines(entry) };
+      const pri = priOf(m);
+      if (pri >= 0) {
+        d.facility = facilityName(pri);
+        d.severity = severityName(pri);
+      }
+      return d;
     },
   };
 }
 
+// RFC 5424, which is also what the syslog receivers write. Facility, severity, the structured data and each of its
+// parameters ("SD-ID.name") become fields.
 const RFC5424 = /^<(\d{1,3})>1 (\S+) (\S+) (\S+) (\S+) (\S+) (-|\[.*?\](?:\[.*?\])*) ?(.*)$/;
 
 export function syslog5424Format(): LogFormat {
@@ -293,14 +308,17 @@ export function syslog5424Format(): LogFormat {
       return { level: levelFromSyslogSeverity(Number(m[1]) % 8), time: parseTimestamp(m[2]) };
     },
     parse(entry): Record<string, string> {
-      const m = RFC5424.exec(firstLine(entry));
-      if (!m) return { message: entry };
-      const sd = m[7] === '-' ? '' : m[7] + ' ';
-      return {
-        time: m[2], host: m[3], app: m[4], pid: m[5], msgid: m[6],
-        level: levelText(levelFromSyslogSeverity(Number(m[1]) % 8)),
-        message: sd + m[8] + restLines(entry),
+      const first = firstLine(entry);
+      const m = RFC5424.test(first) ? parseSyslog(first) : null;
+      if (!m || m.rfc !== 5424) return { message: entry };
+      const d: Record<string, string> = {
+        time: m.time, host: m.host, app: m.app, pid: m.pid, msgid: m.msgid,
+        level: levelText(levelFromSyslogSeverity(m.pri % 8)), message: m.message + restLines(entry),
+        facility: facilityName(m.pri), severity: severityName(m.pri),
       };
+      if (m.structuredData) d.sd = m.structuredData;
+      for (const [k, v] of m.params) if (!Object.hasOwn(d, k) && k !== '__proto__') d[k] = v;
+      return d;
     },
   };
 }
@@ -909,6 +927,7 @@ export function detectFormatInfo(sample: string[], opts: DetectOptions = {}): Fo
   const slow = mysqlSlowFormat();
   candidates.push(
     { f: slow, min: lines.some((l) => l.startsWith('# Query_time:')) ? 0 : 2, test: slow.isEntryStart },
+    { f: winEventFormat(), min: 0.6, test: (l) => WINEVENT_HEAD.test(l) },
     { f: mongoFormat(), min: 0.6, test: (l) => MONGO_HEAD.test(l) },
     { f: jsonFormat(), min: 0.6, test: (l) => tryJson(l) !== null },
     { f: accessLogFormat(), min: 0.6, test: (l) => ACCESS.test(l) },
@@ -943,7 +962,7 @@ export function detectFormatInfo(sample: string[], opts: DetectOptions = {}): Fo
 }
 
 export const FORMAT_IDS = [
-  'json', 'access', 'syslog5424', 'logcat', 'syslog', 'timestamped', 'logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel', 'plain',
+  'json', 'access', 'syslog5424', 'logcat', 'syslog', 'timestamped', 'logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel', 'winevent', 'plain',
 ] as const;
 
 /** Short names for the format picker and the status bar. */
@@ -964,6 +983,7 @@ export const FORMAT_LABELS: Record<string, string> = {
   rust: 'Rust tracing',
   macos: 'macOS unified log',
   laravel: 'Laravel',
+  winevent: 'Windows event log',
   plain: 'Plain text',
 };
 

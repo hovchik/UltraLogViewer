@@ -7,6 +7,7 @@ import type { AiSettings } from '../core/aiClient';
 import { registerAi } from './aiMain';
 import { editorTemplate, expandCommand, expandUrl, isUnsafeUrlTemplate, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
+import { registerReceivers, stopAllReceivers } from './receiversMain';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
 
 let win: BrowserWindow | null = null;
@@ -239,6 +240,8 @@ function buildMenu() {
         { label: 'Open and merge files…', accelerator: 'CmdOrCtrl+Shift+O', click: () => send('open-merge') },
         { label: 'Open last…', click: () => send('open-last') },
         { label: 'Open time range…', click: () => send('open-range') },
+        { label: 'Listen…', click: () => send('listen') },
+        ...(process.platform === 'win32' ? [{ label: 'Open Windows event log…', click: () => send('open-eventlog') }] : []),
         {
           label: 'Open recent',
           submenu: recentItems.length ? recentItems : [{ label: 'No recent files', enabled: false }],
@@ -438,6 +441,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     ipcMain.handle('menu:items', () => menuItems());
     registerAi(() => app.getPath('userData'), () => readSettings().ai as AiSettings | undefined);
+    registerReceivers(() => app.getPath('userData'));
     ipcMain.handle('menu:run', (_e, id: string) => {
       const item = Menu.getApplicationMenu()?.getMenuItemById(String(id));
       if (!item || !item.enabled) return false;
@@ -508,6 +512,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     quitting = true;
     void stdin.then((s) => s?.dispose());
+    void stopAllReceivers();
     void worker?.terminate();
   });
   app.on('window-all-closed', () => {

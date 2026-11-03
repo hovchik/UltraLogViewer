@@ -6,6 +6,7 @@ import { ColumnDef, FilterRule, Level, LEVEL_NAMES } from '../core/types';
 import { formatTime } from '../core/timestamp';
 import type { Bookmark, HighlightRule, Settings, Tab } from './state';
 import { uid } from './state';
+import { captureBox } from './receivers';
 import { ask, fmtBytes, fmtNum, h, toast } from './util';
 
 export interface SidebarHost {
@@ -57,6 +58,7 @@ export class Sidebar {
   private sourcesSection(tab: Tab) {
     const sources = tab.info.sources;
     const sec = h('div', { class: 'sec sources' }, h('h3', {}, sources.length > 1 ? 'Sources (merged by time)' : 'Source'));
+    if (tab.capture) sec.append(captureBox(tab));
     for (const s of sources) {
       const extra = [s.compression || (s.compressed ? 'gzip' : ''), s.live ? '' : 'static', s.partial ? 'partial' : '', s.cacheState ? 'cached index' : ''].filter(Boolean);
       sec.append(

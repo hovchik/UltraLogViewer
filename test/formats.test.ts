@@ -45,7 +45,7 @@ describe('format samples', () => {
   });
 
   it('can choose every new format by hand', () => {
-    for (const id of ['logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel']) {
+    for (const id of ['logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel', 'winevent']) {
       expect(detectFormatInfo(['hello'], { year: 2024, force: id })).toMatchObject({ auto: false, format: { id } });
       expect(FORMAT_IDS).toContain(id);
       expect(FORMAT_LABELS[id]).toBeTruthy();

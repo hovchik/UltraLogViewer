@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import * as http from 'node:http';
+import * as net from 'node:net';
 import assert from 'node:assert/strict';
 
 const out = path.resolve('e2e/out');
@@ -727,6 +728,57 @@ await step('AI: extract fields offline, consent preview (Cancel sends nothing), 
   } finally {
     server.close();
   }
+});
+
+await step('Listen… receives TCP lines into a live tab, and closing the tab frees the port', async () => {
+  const items = await win.evaluate(() => window.ulv.menuItems());
+  const listen = items.find((m) => m.label === 'File › Listen…');
+  assert.ok(listen, 'File › Listen… in the menu');
+  assert.equal(items.some((m) => m.label === 'File › Open Windows event log…'), process.platform === 'win32');
+  const freePort = () => new Promise((resolve) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+  const portFree = (p) => new Promise((resolve) => {
+    const s = net.createServer();
+    s.once('error', () => resolve(false));
+    s.listen(p, '127.0.0.1', () => s.close(() => resolve(true)));
+  });
+  const port = await freePort();
+  const before = await win.locator('.tab').count();
+  await win.evaluate((id) => window.ulv.runMenuItem(id), listen.id);
+  await win.waitForSelector('#receiver-protocol');
+  await win.selectOption('#receiver-protocol', 'tcp-lines');
+  await win.fill('#receiver-port', String(port));
+  await win.fill('#receiver-bind', '0.0.0.0');
+  assert.ok(await win.locator('#receiver-warning').isVisible(), 'warning for a non-loopback bind');
+  await win.fill('#receiver-bind', '127.0.0.1');
+  assert.ok(!(await win.locator('#receiver-warning').isVisible()));
+  await shot('27-listen');
+  await win.click('#receiver-ok');
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before);
+  await win.waitForFunction((p) => document.querySelector('.capture-status')?.textContent?.startsWith(`Listening on tcp://127.0.0.1:${p}`), port, { timeout: 10000 });
+  assert.equal(await portFree(port), false);
+  const c = net.connect(port, '127.0.0.1');
+  await new Promise((r) => c.once('connect', r));
+  c.write('{"@t":"2024-05-01T10:00:00Z","@l":"Error","@m":"payment failed"}\n{"@t":"2024-05-01T10:00:01Z","@m":"retrying"}\n');
+  await win.waitForFunction(() => /2 messages · 1 client/.test(document.querySelector('.capture-status')?.textContent ?? ''), null, { timeout: 10000 });
+  c.end();
+  await win.waitForSelector('.grid-rows .r:has-text("payment failed")', { timeout: 20000 });
+  // the capture was empty when it opened (plain text); with lines in it the format is detected again
+  await win.waitForFunction(() => /JSON lines/.test(document.querySelector('#status .fmt')?.textContent ?? ''), null, { timeout: 20000 });
+  await shot('28-receiver');
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n, before);
+  let free = false;
+  for (let i = 0; i < 50 && !free; i++) {
+    free = await portFree(port);
+    if (!free) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(free, 'the port is free again after closing the tab');
 });
 
 await step('dark theme renders', async () => {
