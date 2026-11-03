@@ -143,6 +143,7 @@ public sealed class UiTests : IDisposable
         tab.Filter.Query = "level:error";
         await w.ApplyFilterAsync(tab);
         Assert.Equal(260 / 13, tab.Info.ViewCount);
+        Assert.Matches(@"^Filtered 260 entries in \d+[.,]\d\d s$", w.ScanCostStatusForTest);
 
         tab.Filter.Query = "";
         Array.Fill(tab.Filter.Levels, false);
@@ -251,6 +252,7 @@ public sealed class UiTests : IDisposable
         await Until(() => tab.SearchResult is not null && tab.Focus > 0);
         Assert.Equal(4000 / 13, tab.SearchResult!.Total);
         Assert.Equal(12, tab.Focus);
+        Assert.Matches(@"^Searched 4[,.\u00a0\u202f]?000 entries in \d+[.,]\d\d s$", w.ScanCostStatusForTest);
 
         tab.Bookmarks["0:25"] = new Bookmark { Key = "0:25", Line = 27, Preview = "bookmarked", Row = 25 };
         w.LogView.Select(30, center: false);
@@ -264,6 +266,8 @@ public sealed class UiTests : IDisposable
         w.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
         await Until(() => tab.Info.ViewCount < 4000 && tab.BusyProgress is null);
         Assert.Equal(4000 / 13 + 528, tab.Info.ViewCount);
+        // The search that runs again over the new view keeps the filter's cost on show.
+        await Until(() => w.ScanCostStatusForTest.StartsWith("Filtered 4"));
         await Until(() => w.LogView.GetCached(5) is not null);
         Screenshot(w, "dark-filtered.png");
         Avalonia.Application.Current!.RequestedThemeVariant = ThemeVariant.Light;

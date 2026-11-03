@@ -127,6 +127,12 @@ export interface Tab {
   window?: OpenWindow | null;
   error?: string;
   progress?: { phase: string; fraction: number };
+  /** What the last filter or search scanned and how long it took, e.g. "Filtered 8,695,680 entries in 0.82 s". */
+  scanCost?: string;
+  /** The latest filter run (rows it finds arrive as partial views tagged with it) and the epoch the grid shows. */
+  filterSeq?: number;
+  filtering?: boolean;
+  partialEpoch?: number;
   /** "Show in context": every entry is shown, rows the filter hides are dimmed. */
   contextMode?: boolean;
   /** Line of the entry that was focused when context mode was entered (for the banner). */

@@ -105,6 +105,7 @@ await step('searches with highlights and navigation', async () => {
   await win.fill('#search', 'ConnectionPool');
   await win.waitForFunction(() => /\d+ \/ [\d,]+/.test(document.querySelector('#search-count')?.textContent ?? ''));
   assert.ok((await win.locator('.grid-rows mark').count()) > 0);
+  await win.waitForFunction(() => /^Searched [\d,]+ entries in \d+\.\d\d s$/.test(document.querySelector('#status .scan-cost')?.textContent ?? ''));
   await win.press('#search', 'Enter');
   await shot('02-search');
 });
@@ -144,6 +145,8 @@ await step('quick filter narrows the view', async () => {
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   const levels = await win.locator('.grid-rows .r .lvtag').allInnerTexts();
   assert.ok(levels.length > 0 && levels.every((l) => l === 'ERROR' || l === 'FATAL'), `levels: ${levels.slice(0, 5)}`);
+  // The search that runs again over the new view keeps the filter's cost on show.
+  await win.waitForFunction(() => /^Filtered [\d,]+ entries in \d+\.\d\d s$/.test(document.querySelector('#status .scan-cost')?.textContent ?? ''));
   await shot('03-filter');
 });
 

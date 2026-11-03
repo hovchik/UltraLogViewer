@@ -13,6 +13,7 @@ import { detectFormatInfo, FormatDetection, formatLabel, LogFormat } from './for
 import { CacheEntry, cacheFileFor, customFormatsKey, evictCache, HASH_BYTES, hashRange, readCache, touchCache, writeCache } from './indexCache';
 import { OpenWindow, windowEmpty } from './timeWindow';
 import { ChunkScan, FormatSpec, scanChunk } from './scanChunk';
+import { EntryJob, evaluate, RangeOp, RangeResult, RowsOp, RowsResult, splitEntries } from './entryScan';
 import type { ScanPool } from './scanPool';
 import { GrowF64, GrowU32, GrowU8, lowerBound } from './grow';
 import { CustomFormat, Level, LEVEL_COUNT, SourceInfo } from './types';
@@ -85,6 +86,8 @@ export class FileSource {
   private ino = 0;
   private dataStart = 0;
   private decoder!: TextDecoder;
+  /** Decodes entry texts. It keeps a U+FEFF at the start of a batch, so a text never depends on where a batch starts. */
+  private textDecoder!: TextDecoder;
   private tempFile: string | null = null;
   private lastTime = NaN;
   private chunkSize: number;
@@ -202,6 +205,7 @@ export class FileSource {
       this.dataStart = enc.bom;
     }
     this.decoder = new TextDecoder(this.encoding === 'utf-8' || this.encoding.startsWith('utf-16') ? 'utf-8' : 'windows-1252');
+    this.textDecoder = new TextDecoder(this.decoder.encoding, { ignoreBOM: true });
     const window = windowEmpty(this.opts.window) ? null : this.opts.window!;
     if (decompress && window) {
       await decompress; // a window is found by seeking around, which needs the whole file
@@ -273,7 +277,7 @@ export class FileSource {
     while (hi - lo > 1 << 20) {
       const mid = lo + Math.floor((hi - lo) / 2);
       let found: [number, number] | null = null;
-      this.scanEntries(mid, hi, (pos, t) => {
+      this.scanEntryTimes(mid, hi, (pos, t) => {
         found = [pos, t];
         return false;
       });
@@ -282,7 +286,7 @@ export class FileSource {
       else lo = f[0] + 1;
     }
     let result = size;
-    this.scanEntries(lo, size, (pos, t) => {
+    this.scanEntryTimes(lo, size, (pos, t) => {
       if (!pred(t)) return true;
       result = pos;
       return false;
@@ -294,7 +298,7 @@ export class FileSource {
   private newestTime(size: number): number | null {
     for (let span = 1 << 20; ; span *= 4) {
       let newest: number | null = null;
-      this.scanEntries(Math.max(this.dataStart, size - span), size, (_, t) => {
+      this.scanEntryTimes(Math.max(this.dataStart, size - span), size, (_, t) => {
         newest = t;
         return true;
       });
@@ -306,7 +310,7 @@ export class FileSource {
    * Calls `visit` with the start and time of each timestamped entry that starts in [from, limit), beginning at the
    * first full line at or after `from`; stops when it returns false.
    */
-  private scanEntries(from: number, limit: number, visit: (pos: number, time: number) => boolean) {
+  private scanEntryTimes(from: number, limit: number, visit: (pos: number, time: number) => boolean) {
     const fmt = this.format;
     let pos = from;
     if (pos > this.dataStart && this.readBytes(pos - 1, 1)[0] !== 10) {
@@ -675,41 +679,121 @@ export class FileSource {
     return line < this.lineCount ? this.lineStart.get(line) : this.dataEnd;
   }
 
+  /** Byte range of entries [from, to) (to <= entryCount) and the number of lines of each. */
+  private entrySpan(from: number, to: number): { start: number; end: number; counts: Uint32Array } {
+    const counts = new Uint32Array(to - from);
+    const lines = this.entryLine.data;
+    for (let e = from; e < to; e++) counts[e - from] = (e + 1 < this.entryCount ? lines[e + 1] : this.lineCount) - lines[e];
+    const endLine = to < this.entryCount ? lines[to] : this.lineCount;
+    return { start: this.byteOfLine(lines[from]), end: this.byteOfLine(endLine), counts };
+  }
+
   /** Texts of entries [from, to). Continuation lines are joined with "\n". */
   readEntries(from: number, to: number): string[] {
     to = Math.min(to, this.entryCount);
     if (from >= to || this.fd < 0) return [];
-    const firstLine = this.entryLine.get(from);
-    const endLine = to < this.entryCount ? this.entryLine.get(to) : this.lineCount;
-    const start = this.byteOfLine(firstLine);
-    const end = this.byteOfLine(endLine);
-    const buf = Buffer.allocUnsafe(end - start);
-    let got = 0;
-    while (got < buf.length) {
-      const n = fs.readSync(this.fd, buf, got, buf.length - got, start + got);
-      if (n <= 0) break;
-      got += n;
-    }
-    const lines = this.decoder.decode(buf.subarray(0, got)).split('\n');
-    const out: string[] = [];
-    let li = 0;
-    const strip = (l: string) => (l.charCodeAt(l.length - 1) === 13 ? l.slice(0, -1) : l);
-    for (let e = from; e < to; e++) {
-      const count = (e + 1 < this.entryCount ? this.entryLine.get(e + 1) : this.lineCount) - this.entryLine.get(e);
-      if (count === 1) out.push(strip(lines[li] ?? ''));
-      else out.push(lines.slice(li, li + count).map(strip).join('\n'));
-      li += count;
-    }
-    return out;
+    const { start, end, counts } = this.entrySpan(from, to);
+    return splitEntries(this.textDecoder.decode(this.readBytes(start, end - start)), counts);
   }
 
-  /** Streams entries [from, to) in batches, for filtering/searching/exporting large ranges. */
-  async forEachEntryBatch(from: number, to: number, fn: (first: number, texts: string[]) => void | false, batch = 4096): Promise<void> {
-    for (let e = from; e < to && !this.closed; e += batch) {
-      const texts = this.readEntries(e, Math.min(to, e + batch));
-      if (fn(e, texts) === false) return;
-      if (((e - from) / batch) % 16 === 15) await yieldNow();
+  /**
+   * A job for the scan pool over the given entries (ascending): byte runs of consecutive entries, which a worker reads
+   * from the file itself, plus the line count, level and line number of each entry.
+   */
+  private entryJob(n: number, at: (i: number) => number, op: RangeOp | RowsOp, candidates: Uint8Array | null = null): EntryJob {
+    const runs: number[] = [];
+    const runEntries: number[] = [];
+    const counts = new Uint32Array(n);
+    const levels = new Uint8Array(n);
+    const times = new Float64Array(n);
+    const lines = new Uint32Array(n);
+    const entryLine = this.entryLine.data;
+    for (let i = 0; i < n; ) {
+      let j = i + 1;
+      while (j < n && at(j) === at(j - 1) + 1) j++;
+      const span = this.entrySpan(at(i), at(j - 1) + 1);
+      runs.push(span.start, span.end);
+      runEntries.push(j - i);
+      counts.set(span.counts, i);
+      for (let k = i; k < j; k++) {
+        levels[k] = this.entryLevel.data[at(k)];
+        times[k] = this.entryTime.data[at(k)];
+        lines[k] = entryLine[at(k)] + 1;
+      }
+      i = j;
     }
+    return { path: this.readPath, ino: this.ino, encoding: this.decoder.encoding, runs: Float64Array.from(runs), runEntries: Uint32Array.from(runEntries), counts, levels, times, lines, candidates, op };
+  }
+
+  /** Runs a job here: reads the entries through our own handle and evaluates the op exactly as a worker would. */
+  private runJob(job: EntryJob, at: (i: number) => number): RangeResult | RowsResult {
+    const texts: string[] = [];
+    let i = 0;
+    for (const len of job.runEntries) {
+      for (const t of this.readEntries(at(i), at(i) + len)) texts.push(t);
+      i += len;
+      while (texts.length < i) texts.push(''); // the file shrank under us
+    }
+    return evaluate(job, this.format, texts);
+  }
+
+  /** Runs a job on the scan pool if there is one (falling back to this thread if a worker fails), else here. */
+  private async evalJob(job: () => EntryJob, at: (i: number) => number, pool: ScanPool | null): Promise<RangeResult | RowsResult> {
+    if (!pool) return this.runJob(job(), at);
+    // A failed worker: run the batch here instead (with a new job: the first one's arrays went to the worker).
+    return (await pool.entries(this.formatSpec, job()).catch(() => null)) ?? this.runJob(job(), at);
+  }
+
+  /**
+   * Evaluates `op` over entries [from, to) in batches and passes each batch's result to `commit` in entry order (return
+   * false to stop). With a scan pool, batches are read and evaluated on its threads, several at a time, and committed
+   * in order, so the result is exactly what a sequential pass gives. `candidate(e)` false skips an entry (its result is
+   * 0 without reading it); without it every entry is tested.
+   */
+  async scanEntries(
+    from: number,
+    to: number,
+    op: RangeOp,
+    candidate: ((e: number) => boolean) | null,
+    commit: (first: number, result: RangeResult) => boolean | void,
+    batch = 8192,
+  ): Promise<void> {
+    const pool = this.opts.scanPool?.usable && to - from > batch ? this.opts.scanPool : null;
+    const maxInFlight = pool ? pool.size * 2 : 1;
+    const inFlight: { first: number; result: Promise<RangeResult | RowsResult> }[] = [];
+    let next = from;
+    let stopped = false;
+    try {
+      while (!stopped && !this.closed && (next < to || inFlight.length)) {
+        while (next < to && inFlight.length < maxInFlight) {
+          const first = next;
+          const end = Math.min(to, first + batch);
+          next = end;
+          const at = (i: number) => first + i;
+          const mask = () => {
+            if (!candidate) return null;
+            const m = new Uint8Array(end - first);
+            for (let e = first; e < end; e++) m[e - first] = candidate(e) ? 1 : 0;
+            return m;
+          };
+          inFlight.push({ first, result: this.evalJob(() => this.entryJob(end - first, at, op, mask()), at, pool) });
+        }
+        const item = inFlight.shift()!;
+        const result = (await item.result) as RangeResult;
+        if (this.closed || commit(item.first, result) === false) stopped = true;
+        else if (!pool) await yieldNow();
+      }
+    } finally {
+      // Stopped early (or failed): the batches still running are dropped.
+      for (const item of inFlight) item.result.catch(() => undefined);
+    }
+  }
+
+  /** Evaluates a rows op over `entries` (ascending), on the scan pool when there is one. */
+  evalRows(entries: number[], op: RowsOp): Promise<RowsResult> {
+    const pool = this.opts.scanPool?.usable ? this.opts.scanPool : null;
+    const at = (i: number) => entries[i];
+    return this.evalJob(() => this.entryJob(entries.length, at, op), at, pool) as Promise<RowsResult>;
   }
 
   level(entry: number): Level {

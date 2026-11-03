@@ -885,36 +885,83 @@ public sealed class FileSource : IDisposable
             for (var e = from; e < to; e++)
                 counts[e - from] = (e + 1 < entryCount ? _entryLine[e + 1] : LineCount) - _entryLine[e];
         }
-        var buf = new byte[end - start];
-        var got = 0;
-        while (got < buf.Length)
+        // Decoded straight from the (pooled) bytes, line by line: no big intermediate string or line array, which kept
+        // the garbage collector busier than the actual matching when every core reads at once.
+        var len = (int)(end - start);
+        var buf = ArrayPool<byte>.Shared.Rent(Math.Max(1, len));
+        try
         {
-            var n = RandomAccess.Read(_handle!, buf.AsSpan(got), start + got);
-            if (n <= 0) break;
-            got += n;
+            var bytes = buf.AsSpan(0, ReadFully(buf.AsSpan(0, len), start));
+            var output = new string[counts.Length];
+            var pos = 0;
+            var more = true; // like string.Split: one more (possibly empty) line follows the last '\n'
+            for (var i = 0; i < counts.Length; i++)
+            {
+                if (!more)
+                {
+                    output[i] = ""; // the file shrank under us
+                    continue;
+                }
+                var from0 = pos;
+                var taken = 0;
+                for (; taken < counts[i] && more; taken++)
+                {
+                    var nl = bytes[pos..].IndexOf((byte)'\n');
+                    if (nl < 0)
+                    {
+                        pos = bytes.Length;
+                        more = false;
+                    }
+                    else pos += nl + 1;
+                }
+                var range = bytes[from0..(more ? pos - 1 : pos)];
+                // Each line loses its trailing '\r's (a byte that only ever means '\r' in UTF-8 and Windows-1252).
+                if (taken == 1) output[i] = _decoder.GetString(range.TrimEnd((byte)'\r'));
+                else if (range.IndexOf((byte)'\r') < 0) output[i] = _decoder.GetString(range);
+                else output[i] = JoinLines(range);
+            }
+            return output;
         }
-        var lines = _decoder.GetString(buf, 0, got).Split('\n');
-        var output = new string[counts.Length];
-        var li = 0;
-        for (var i = 0; i < counts.Length; i++)
+        catch (ObjectDisposedException) when (Closed)
         {
-            var c = counts[i];
-            if (c == 1) output[i] = li < lines.Length ? lines[li].TrimEnd('\r') : "";
-            else output[i] = string.Join('\n', lines.Skip(li).Take(c).Select(l => l.TrimEnd('\r')));
-            li += c;
+            return []; // closed while a batch was being read on another thread
         }
-        return output;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buf);
+        }
     }
 
-    /// <summary>Calls <paramref name="fn"/> with batches of entry texts in [from, to); return false to stop.</summary>
-    public void ForEachEntryBatch(int from, int to, Func<int, string[], bool> fn, CancellationToken ct = default, int batch = 4096)
+    /// <summary>Decodes a multi-line entry that has '\r's in it: every line is trimmed of them, then joined with '\n'.</summary>
+    private string JoinLines(ReadOnlySpan<byte> range)
     {
-        for (var e = from; e < to && !Closed; e += batch)
+        var sb = new StringBuilder(range.Length);
+        while (true)
         {
-            ct.ThrowIfCancellationRequested();
-            var texts = ReadEntries(e, Math.Min(to, e + batch));
-            if (!fn(e, texts)) return;
+            var nl = range.IndexOf((byte)'\n');
+            sb.Append(_decoder.GetString((nl < 0 ? range : range[..nl]).TrimEnd((byte)'\r')));
+            if (nl < 0) return sb.ToString();
+            sb.Append('\n');
+            range = range[(nl + 1)..];
         }
+    }
+
+    /// <summary>
+    /// Reads entries [from, to) in batches on all cores: each batch's texts go to <paramref name="work"/> on the thread
+    /// pool, several at a time, and the results to <paramref name="commit"/> on the calling thread in entry order, so
+    /// whatever commit builds comes out exactly as a sequential pass would build it. Commit gets the first entry, the
+    /// entry count and the result; it returns false to stop. <paramref name="work"/> must be thread safe.
+    /// </summary>
+    public void ForEachEntryBatch<T>(int from, int to, Func<int, string[], T> work, Func<int, int, T, bool> commit, CancellationToken ct = default, int batch = 4096,
+        bool parallel = true)
+    {
+        if (from >= to) return;
+        InOrder.Run((int)(((long)to - from + batch - 1) / batch), i =>
+        {
+            var first = from + i * batch;
+            var texts = Closed ? [] : ReadEntries(first, Math.Min(to, first + batch));
+            return (First: first, Count: texts.Length, Result: work(first, texts));
+        }, (_, r) => !Closed && commit(r.First, r.Count, r.Result), ct, parallel);
     }
 
     public void Dispose()
