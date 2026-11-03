@@ -4,7 +4,8 @@ import { _electron as electron } from 'playwright';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import assert from 'node:assert/strict';
@@ -17,6 +18,8 @@ execFileSync(process.execPath, ['scripts/gen-sample.mjs', log, '5']);
 const other = path.join(tmp, 'other.log');
 fs.writeFileSync(other, '2024-05-01 08:00:00,500 [main] ERROR com.acme.Other - from the other file\n');
 const launchLog = path.join(tmp, 'launched.txt');
+const linkLog = path.join(tmp, 'link-confirm.txt');
+const profile = path.join(tmp, 'profile');
 const notes = path.join(tmp, 'notes.txt');
 // remote files: a fake ssh serves hosts/<host>/ as each host's "/" (test/fixtures/fake-ssh)
 const hosts = path.join(tmp, 'hosts');
@@ -30,9 +33,10 @@ fs.writeFileSync(notes, 'Release notes for build 4.2\n\nInstalled packages:\n  -
 
 const app = await electron.launch({
   // a fresh profile so settings from earlier runs (theme, wrap, dock…) don't leak in
-  args: ['--no-sandbox', `--user-data-dir=${path.join(tmp, 'profile')}`, '.', log],
-  // source links write what they would open to launchLog instead of starting an editor
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', ULV_SOURCE_LAUNCH_LOG: launchLog, ULV_SSH: path.resolve('test/fixtures/fake-ssh/ssh'), FAKE_SSH_ROOT: hosts },
+  args: ['--no-sandbox', `--user-data-dir=${profile}`, '.', log],
+  // source links write what they would open to launchLog instead of starting an editor; links record the files they
+  // would ask about in linkLog instead of showing the dialog; ssh is the fake one
+  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1', ULV_SOURCE_LAUNCH_LOG: launchLog, ULV_LINK_CONFIRM_LOG: linkLog, ULV_SSH: path.resolve('test/fixtures/fake-ssh/ssh'), FAKE_SSH_ROOT: hosts },
 });
 const win = await app.firstWindow();
 win.on('pageerror', (e) => console.error('pageerror:', e));
@@ -890,6 +894,91 @@ await step('Listen… receives TCP lines into a live tab, and closing the tab fr
     if (!free) await new Promise((r) => setTimeout(r, 100));
   }
   assert.ok(free, 'the port is free again after closing the tab');
+});
+
+// A second launch of the app (same profile) hands its command line to this window and exits.
+const secondLaunch = (args) =>
+  new Promise((resolve, reject) => {
+    const electronBin = createRequire(import.meta.url)('electron');
+    const child = spawn(electronBin, ['--no-sandbox', `--user-data-dir=${profile}`, '.', ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d));
+    child.stderr.on('data', (d) => (output += d));
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`the second launch did not exit:\n${output}`));
+    }, 20000);
+    child.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve(code ?? `${signal}\n${output}`);
+    });
+  });
+const apiLog = path.join(tmp, 'api.log');
+fs.writeFileSync(apiLog, Array.from({ length: 40 }, (_, i) => `2024-05-01 09:00:${String(i).padStart(2, '0')},000 [main] ${i % 4 === 3 ? 'ERROR' : 'INFO '} com.acme.Api - call ${i} ${i % 2 ? 'db=users' : 'db=orders'}`).join('\n') + '\n');
+const activeTab = () => win.locator('.tab.active .name').innerText();
+
+await step('a second launch hands its files, filter and "go to" to the running window', async () => {
+  const before = await win.locator('.tab').count();
+  assert.equal(await secondLaunch([apiLog, '--filter', 'db=users', '--goto', '2024-05-01 09:00:21']), 0);
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before, { timeout: 20000 });
+  assert.equal(await activeTab(), 'api.log');
+  await win.waitForFunction(() => document.querySelector('#quick')?.value === 'db=users');
+  await win.waitForFunction(() => /20 of 40|20 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r.sel:has-text("call 21 ")', { timeout: 10000 });
+});
+
+await step('a link asks before it opens, then shows its filter', async () => {
+  const before = await win.locator('.tab').count();
+  const link = `ultralogviewer://open?path=${encodeURIComponent(apiLog)}&filter=${encodeURIComponent('level:error')}&newtab=1`;
+  assert.equal(await secondLaunch([link]), 0);
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before, { timeout: 20000 });
+  assert.equal(fs.readFileSync(linkLog, 'utf-8').trim(), apiLog); // the confirmation named the file
+  await win.waitForFunction(() => document.querySelector('#quick')?.value === 'level:error');
+  await win.waitForFunction(() => /10 of 40|10 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // and a link with a relative path opens nothing
+  fs.writeFileSync(linkLog, '');
+  assert.equal(await secondLaunch(['ultralogviewer://open?path=api.log']), 0);
+  await win.waitForTimeout(500);
+  assert.equal(await win.locator('.tab').count(), before + 1);
+  assert.equal(fs.readFileSync(linkLog, 'utf-8'), '');
+});
+
+await step('the local HTTP API: enable it, POST /open, see the tab with the filter applied', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['File › Local API › Enable local HTTP API', 'File › Local API › Copy API example', 'Edit › Copy link to this view']) assert.ok(labels.includes(l), `menu item ${l}`);
+  assert.equal((await win.evaluate(() => window.ulv.apiStatus())).port, null); // off by default
+  await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById('local-api').click());
+  await win.waitForFunction(async () => !!(await window.ulv.apiStatus()).port, null, { timeout: 10000 });
+  const { port, token } = await win.evaluate(() => window.ulv.apiStatus());
+  assert.equal(token.length, 64);
+  const base = `http://127.0.0.1:${port}`;
+  const auth = { Authorization: `Bearer ${token}` };
+  assert.equal((await fetch(`${base}/tabs`)).status, 401);
+  assert.equal((await fetch(`${base}/tabs`, { headers: { Authorization: 'Bearer nope-nope-nope-nope' } })).status, 401);
+  const before = await win.locator('.tab').count();
+  const res = await fetch(`${base}/open`, { method: 'POST', headers: auth, body: JSON.stringify({ path: apiLog, filter: 'db=orders', levels: 'info', newTab: true }) });
+  assert.equal(res.status, 200);
+  const { tab } = await res.json();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before);
+  assert.equal(await win.inputValue('#quick'), 'db=orders');
+  await win.waitForFunction(() => /20 of 40|20 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  await shot('28-api-open');
+  const tabs = await (await fetch(`${base}/tabs`, { headers: auth })).json();
+  assert.deepEqual(tabs.find((t) => t.id === tab), { id: tab, title: 'api.log', paths: [apiLog], total: 40, shown: 20, filter: 'db=orders', ready: true, active: true });
+  const rows = (await (await fetch(`${base}/tabs/${tab}/rows?from=0&count=2`, { headers: auth })).text()).trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(rows.map((r) => [r.line, r.level]), [[1, 'INFO'], [3, 'INFO']]);
+  assert.equal((await fetch(`${base}/tabs/${tab}/goto`, { method: 'POST', headers: auth, body: '{"goto":"line:9"}' })).status, 200);
+  await win.waitForSelector('.grid-rows .r.sel:has-text("call 8 ")', { timeout: 10000 });
+  // "Copy link to this view": the files, the filter, the levels and the selected entry's time
+  const copyId = (await win.evaluate(() => window.ulv.menuItems())).find((m) => m.label === 'Edit › Copy link to this view').id;
+  await win.evaluate((id) => window.ulv.runMenuItem(id), copyId);
+  let link = '';
+  for (let i = 0; i < 50 && !link.startsWith('ultralogviewer:'); i++, await win.waitForTimeout(100)) link = await app.evaluate(({ clipboard }) => clipboard.readText());
+  assert.ok(link.startsWith(`ultralogviewer://open?path=${encodeURIComponent(apiLog)}&levels=info&filter=db%3Dorders&goto=`), link);
+  assert.match(link, /goto=2024-05-01T\d\d%3A\d\d%3A08\.000Z$/);
+  await app.evaluate(({ Menu }) => Menu.getApplicationMenu().getMenuItemById('local-api').click());
+  await win.waitForFunction(async () => !(await window.ulv.apiStatus()).port, null, { timeout: 10000 });
+  await assert.rejects(fetch(`${base}/health`, { headers: auth }));
 });
 
 await step('dark theme renders', async () => {

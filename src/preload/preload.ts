@@ -28,6 +28,19 @@ const api = {
   /** Command-line window (--since/--until/--last), its errors, and whether stdin is being read. */
   startupOptions: (): Promise<{ window: { since?: number | null; until?: number | null; last?: number | null } | null; errors: string[]; stdin: boolean }> =>
     ipcRenderer.invoke('startup-options'),
+  /** The startup command line as an open request (files resolved, a link already confirmed), and whether stdin is read. */
+  startupRequest: (): Promise<{ request: import('../core/openRequest').OpenRequest | null; stdin: boolean }> => ipcRenderer.invoke('startup-request'),
+  /** Open requests and local API calls from the main process; answer each with apiReply. */
+  onApiCall: (cb: (id: number, method: string, args: unknown[]) => void) => {
+    ipcRenderer.on('api-call', (_e, id, method, args) => cb(id, method, args));
+    return ipcRenderer.invoke('api:ready');
+  },
+  apiReply: (id: number, result: unknown) => ipcRenderer.send('api:reply', id, result),
+  /** Turns the local HTTP API on or off (main keeps the token); returns the saved settings and the port. */
+  apiConfigure: (enabled: boolean): Promise<{ settings: { enabled?: boolean; port?: number; token?: string }; port: number | null; error: string }> =>
+    ipcRenderer.invoke('api:configure', enabled),
+  apiNewToken: (): Promise<{ settings: { enabled?: boolean; port?: number; token?: string }; port: number | null; error: string }> => ipcRenderer.invoke('api:new-token'),
+  apiStatus: (): Promise<{ port: number | null; token: string | null; error: string }> => ipcRenderer.invoke('api:status'),
   pathForFile: (f: File) => webUtils.getPathForFile(f),
   /** Which AI keys are saved (never the keys themselves) and how they are protected. */
   aiKeys: (): Promise<{ anthropic: boolean; openai: boolean; protection: string }> => ipcRenderer.invoke('ai:keys'),

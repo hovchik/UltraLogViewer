@@ -208,6 +208,7 @@ public sealed partial class MainWindow
         if (col is not null && col.Key != "__source" && CellValue(row, col.Key) is { Length: > 0 } cv)
             items.Add(Item("Copy value", () => Run(() => CopyText(cv, "Value copied"))));
         items.Add(Item("Copy entry", () => Run(() => CopyText(row.Text, "Entry copied"))));
+        items.Add(Item("Copy link to this view", () => Run(() => CopyViewLink(row))));
         items.Add(new Separator());
         items.AddRange(AiRowItems(tab, row));
         items.Add(new Separator());

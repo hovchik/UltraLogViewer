@@ -96,6 +96,8 @@ export interface Settings {
   sourceRoots?: string[];
   /** AI features (off by default). The API keys are not here: the main process keeps them (safeStorage). */
   ai?: AiSettings;
+  /** The local HTTP API (off by default); main writes it, see main/openMain.ts. */
+  localApi?: { enabled?: boolean; port?: number; token?: string };
 }
 
 /** Display settings with their defaults resolved. */
