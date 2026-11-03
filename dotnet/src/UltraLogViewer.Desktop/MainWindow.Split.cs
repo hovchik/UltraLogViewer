@@ -174,6 +174,9 @@ public sealed partial class MainWindow
 
     private bool SplitShown => _splitPane.IsVisible;
 
+    /// <summary>The grids on screen: display settings and highlights apply to both panes of a split.</summary>
+    private IEnumerable<LogGrid> VisibleGrids => SplitShown ? [_gridMain, _gridSplit] : [_gridMain];
+
     /// <summary>Puts a tab (and its split pane) in the grids; <paramref name="tab"/> is the focused pane.</summary>
     private void ShowPanes(DocumentTab? tab)
     {
@@ -251,8 +254,12 @@ public sealed partial class MainWindow
         dup.Info = dup.Doc.Info();
         _tabs.Insert(_tabs.IndexOf(owner) + 1, dup);
         Activate(dup);
-        if (!dup.Filter.IsTrivial) await ApplyFilterAsync(dup);
-        else UpdateBookmarkRows(dup);
+        if (!dup.Filter.IsTrivial) await ApplyFilterAsync(dup); // runs the search too
+        else
+        {
+            UpdateBookmarkRows(dup);
+            if (dup.SearchPattern.Text.Length > 0 && dup == _active) await RunSearch(false, showCost: false);
+        }
         ScheduleFieldStats(dup);
         return dup;
     }

@@ -391,6 +391,54 @@ await step('clears the filter and follows appended lines', async () => {
   await shot('05-follow');
 });
 
+await step('duplicates a tab over the same file, filters it differently and splits a tab', async () => {
+  const splitLog = path.join(tmp, 'split.log');
+  const lines = Array.from({ length: 300 }, (_, i) => `2024-05-01 09:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')},000 [main] ${i % 3 === 0 ? 'ERROR' : 'INFO '} com.acme.Split - entry ${i}`);
+  fs.writeFileSync(splitLog, lines.join('\n') + '\n');
+  const before = await win.locator('.tab').count();
+  await win.evaluate((p) => window.__ulv.openPaths([p], false), splitLog);
+  await win.waitForFunction(() => /300 entries/.test(document.querySelector('#status')?.textContent ?? '') && !/Indexing/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  const counts = () => win.evaluate(() => window.__ulv.state().tabs.filter((t) => t.paths[0].endsWith('split.log')).map((t) => [t.info.viewCount, t.info.total]));
+
+  // Duplicate: opens at once over the same index, then gets its own filter.
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Shift+T');
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 2, before);
+  assert.equal(await win.locator('.tab.active .name').innerText(), 'split.log (2)');
+  await win.fill('#quick', 'level:error');
+  await win.waitForFunction(() => /100 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.deepEqual(await counts(), [[300, 300], [100, 300]]);
+  // The tail reads the file once and both tabs see the new entry.
+  fs.appendFileSync(splitLog, '2024-05-01 09:05:00,000 [main] ERROR com.acme.Split - appended to both\n');
+  await win.waitForFunction(() => window.__ulv.state().tabs.filter((t) => t.paths[0].endsWith('split.log')).every((t) => t.info.total === 301), null, { timeout: 10000 });
+  await win.waitForFunction(() => /101 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 10000 });
+  assert.deepEqual(await counts(), [[301, 301], [101, 301]]);
+  await win.locator('.tab', { hasText: 'split.log (2)' }).locator('.x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 1, before);
+  assert.match(await status(), /301 entries/);
+
+  // Split right: a second grid with its own quick filter; selecting in one pane moves the other to the same entry.
+  await win.focus('#grid');
+  await win.keyboard.press('Control+Backslash');
+  await win.waitForSelector('#pane-split:not(.hidden) #grid2 .grid-rows .r .c', { timeout: 10000 });
+  await win.fill('#head-main .pane-quick', 'level:error');
+  await win.waitForFunction(() => document.querySelector('#head-main .pane-count')?.textContent === '101 of 301', null, { timeout: 10000 });
+  assert.equal(await win.locator('#head-split .pane-count').innerText(), '301');
+  await win.locator('#grid .grid-rows .r', { hasText: 'entry 30' }).first().click();
+  await win.waitForFunction(() => window.__ulv.state().tabs.find((t) => t.split)?.split.focus === 30, null, { timeout: 10000 });
+  await win.waitForSelector('#grid2 .grid-rows .r.sel', { timeout: 5000 });
+  const picked = await win.evaluate(() => {
+    const [main] = window.__ulv.state().tabs.filter((t) => t.split);
+    return [main.focus, main.split.focus, main.info.viewCount, main.split.info.viewCount];
+  });
+  assert.equal(picked[1], 30, `right pane focus ${picked}`);
+  await shot('26-split-view');
+  await win.click('#head-split .pane-close');
+  await win.waitForSelector('#pane-split.hidden', { state: 'attached' });
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n, before);
+});
+
 await step('merges two files into one timeline', async () => {
   await win.evaluate(([a, b]) => window.__ulv.openPaths([a, b], true), [log, other]);
   await win.waitForFunction(() => document.querySelectorAll('.tab').length === 2);

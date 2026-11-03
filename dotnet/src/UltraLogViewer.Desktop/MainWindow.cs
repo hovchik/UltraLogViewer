@@ -504,7 +504,10 @@ public sealed partial class MainWindow : Window, ILogGridHost
     public DocumentTab? ActiveTab => _active;
     internal LogGrid LogView => _grid;
 
-    public void HighlightsChanged() => _grid.RefreshPatterns();
+    public void HighlightsChanged()
+    {
+        foreach (var g in VisibleGrids) g.RefreshPatterns();
+    }
 
     // ================================================================ helpers
 
@@ -1575,7 +1578,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         ApplyDock();
         if (!_settings.ShowDetail) ToggleDetail(true, save: false);
         _settings.Save();
-        _grid.LayoutChanged();
+        foreach (var g in VisibleGrids) g.LayoutChanged();
     }
 
     private void SaveHistogramSize()

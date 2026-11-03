@@ -28,44 +28,65 @@ const saveSettings = debounce(() => void ulv().setSettings(settings as Record<st
 
 // ---------------------------------------------------------------- components
 
-const grid = new Grid($('#grid'), {
-  highlights: () => settings.highlights ?? [],
-  view: () => viewSettings(settings),
-  columnWidth: (col) => (col.width === 0 ? 0 : settings.columnWidths?.[col.key] ?? col.width),
-  hiddenColumns: () => settings.hiddenColumns ?? [],
-  columns: (tab) => effectiveColumns(tab),
-  onHeaderMenu: (e, key) => headerMenu(e, key),
-  onRowMenu: (e, row, col) => rowMenu(e, row, col),
-  setColumnWidth: (key, w) => {
-    (settings.columnWidths ??= {})[key] = w;
-    saveSettings();
-  },
-  onSelectionChange: () => {
-    void updateDetail();
-    renderStatus();
-  },
-  onTopRowChange: () => {
-    updateHistogramViewport();
-    // scrolled to the last row: the new-lines pill has done its job
-    if (active?.follow && active.newRows) {
-      active.newRows = 0;
-      renderPill();
-    }
-    renderStatus();
-  },
-  onKey: gridKey,
-  toggleBookmark: (row) => void toggleBookmark(row),
-  copyRows: (a, b) => void copyRows(a, b),
-  onTokenClick: (row, text) => searchToken(row, text),
-});
+/** Set while one pane of a split is moved to follow the other, so that move is not synced back. */
+let syncingPanes = false;
+
+/**
+ * What a grid sees of the app. The app works on the active tab, so whatever the user does in a grid (select, press a
+ * key, open a menu) first makes its pane the active one (see focusPane); rendering asks about the grid's own tab.
+ */
+function gridHost(self: () => Grid) {
+  const focus = () => !syncingPanes && (focusPane(self()), true);
+  return {
+    highlights: () => settings.highlights ?? [],
+    view: () => viewSettings(settings),
+    columnWidth: (col: ColumnDef) => (col.width === 0 ? 0 : settings.columnWidths?.[col.key] ?? col.width),
+    hiddenColumns: () => hiddenOf(paneTab(self())),
+    columns: (tab: Tab) => effectiveColumns(tab),
+    onHeaderMenu: (e: MouseEvent, key: string | null) => focus() && headerMenu(e, key),
+    onRowMenu: (e: MouseEvent, row: RowData, col: string | null) => focus() && rowMenu(e, row, col),
+    setColumnWidth: (key: string, w: number) => {
+      (settings.columnWidths ??= {})[key] = w;
+      saveSettings();
+    },
+    onSelectionChange: () => {
+      if (!focus()) return;
+      void updateDetail();
+      renderStatus();
+      syncOtherPane();
+    },
+    onTopRowChange: () => {
+      // Scrolling (or a layout pass) in the other pane does not take the focus.
+      if (self() !== grid) return;
+      updateHistogramViewport();
+      // scrolled to the last row: the new-lines pill has done its job
+      if (active?.follow && active.newRows) {
+        active.newRows = 0;
+        renderPill();
+      }
+      renderStatus();
+    },
+    onKey: (e: KeyboardEvent) => focus() && gridKey(e),
+    toggleBookmark: (row: RowData) => focus() && void toggleBookmark(row),
+    copyRows: (a: number, b: number) => focus() && void copyRows(a, b),
+    onTokenClick: (row: RowData, text: string) => focus() && searchToken(row, text),
+  };
+}
+
+const mainGrid: Grid = new Grid($('#grid'), gridHost(() => mainGrid));
+const splitGrid: Grid = new Grid($('#grid2'), gridHost(() => splitGrid));
+/** The grid of the active tab: the main one, or the split pane's when that has focus. */
+let grid = mainGrid;
 
 const sidebar = new Sidebar($('#sidebar'), {
   settings: () => settings,
   saveSettings,
   applyFilter: () => active && void applyFilter(active),
   highlightsChanged: () => {
-    grid.refreshPatterns();
-    grid.render();
+    for (const g of visibleGrids()) {
+      g.refreshPatterns();
+      g.render();
+    }
   },
   jumpToBookmark: (b) => void jumpToBookmark(b),
   removeBookmark: (b) => active && void removeBookmark(active, b.key),
@@ -106,7 +127,7 @@ const patternsView = new PatternsView($('#patterns'), {
   close: () => {
     if (!active) return;
     setPatternsShown(active, false);
-    $('#grid').focus();
+    grid.root.focus();
   },
 });
 
@@ -179,7 +200,7 @@ function activate(tab: Tab | null) {
   active = tab;
   quickInput.value = tab?.filter.query ?? '';
   formatSel.value = tab?.formatId ?? '';
-  grid.setTab(tab);
+  showPanes(tab);
   renderTabs();
   sidebar.render(tab);
   $('#empty').classList.toggle('hidden', !!tab);
@@ -202,16 +223,25 @@ function activate(tab: Tab | null) {
   renderToolbar();
 }
 
+/** Closes a tab (with its split pane); for a split pane, closes the split. */
 async function closeTab(tab: Tab) {
+  if (tab.splitOf) return closeSplit(tab.splitOf);
   const i = tabs.indexOf(tab);
   if (i < 0) return;
   tabs.splice(i, 1);
-  clearTimeout(statsTimers.get(tab));
-  statsTimers.delete(tab);
-  clearTimeout(patternTimers.get(tab));
-  patternTimers.delete(tab);
+  const wasActive = ownerOf(active) === tab;
+  for (const t of tab.split ? [tab, tab.split] : [tab]) {
+    clearTimeout(statsTimers.get(t));
+    statsTimers.delete(t);
+    clearTimeout(patternTimers.get(t));
+    patternTimers.delete(t);
+  }
+  const split = tab.split;
+  tab.split = null;
+  // The files stay open while another tab (a duplicate) still uses them.
   await engine.close(tab.id);
-  if (active === tab) activate(tabs[Math.min(i, tabs.length - 1)] ?? null);
+  if (split) await engine.close(split.id);
+  if (wasActive) activate(tabs[Math.min(i, tabs.length - 1)] ?? null);
   else renderTabs();
 }
 
@@ -222,12 +252,21 @@ function renderTabs() {
     const live = t.info.sources.some((s) => s.live);
     const tabEl = h(
       'div',
-      { class: t === active ? 'tab active' : 'tab', title: [...t.paths, ...(formatSummary(t) ? [`Format: ${formatSummary(t)!.label}`] : [])].join('\n'), onclick: () => activate(t) },
+      { class: t === ownerOf(active) ? 'tab active' : 'tab', title: [...t.paths, ...(formatSummary(t) ? [`Format: ${formatSummary(t)!.label}`] : [])].join('\n'), onclick: () => t !== ownerOf(active) && activate(t) },
       h('span', { class: live ? 'dot' : 'dot off', title: live ? 'Live: new lines appear automatically' : 'Static (compressed or converted file)' }),
-      h('span', { class: 'name' }, t.info.title),
+      h('span', { class: 'name' }, tabTitle(t)),
       h('button', { class: 'x', title: 'Close (Ctrl+W)', onclick: (e: Event) => { e.stopPropagation(); void closeTab(t); } }, '×'),
     );
     tabEl.addEventListener('auxclick', (e) => e.button === 1 && void closeTab(t));
+    tabEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      contextMenu(e.clientX, e.clientY, [
+        { label: 'Duplicate tab', shortcut: 'Ctrl+Shift+T', action: () => void duplicateTab(t) },
+        t.split ? { label: 'Close split', action: () => void closeSplit(t) } : { label: 'Split right', shortcut: 'Ctrl+\\', action: () => void splitRight(t) },
+        'sep',
+        { label: 'Close tab', shortcut: 'Ctrl+W', action: () => void closeTab(t) },
+      ]);
+    });
     el.append(tabEl);
   }
 }
@@ -247,6 +286,242 @@ function renderRecent() {
   for (const p of recent.slice(0, 8)) el.append(h('a', { title: p, onclick: () => void openPaths([p], false) }, p));
 }
 
+// --------------------------------------------------- exploration tabs and split view
+//
+// "Duplicate tab" opens another tab over the same indexed files, and "Split right" puts a second grid beside the
+// first, each with its own filter. Both are engine documents over one shared set of files (engine.duplicate): nothing
+// is indexed again and the files are tailed once. The focused pane is the active tab, so the toolbar, sidebar,
+// timeline and details pane follow whichever grid has focus.
+
+let mainShown: Tab | null = null;
+let splitShown: Tab | null = null;
+const heads = {
+  main: { el: $('#head-main'), quick: $<HTMLInputElement>('#head-main .pane-quick'), count: $('#head-main .pane-count') },
+  split: { el: $('#head-split'), quick: $<HTMLInputElement>('#head-split .pane-quick'), count: $('#head-split .pane-count') },
+};
+
+/** Every open tab, split panes included. */
+const allTabs = () => tabs.flatMap((t) => (t.split ? [t, t.split] : [t]));
+/** The tab in the tab strip: the tab itself, or the tab a split pane belongs to. */
+const ownerOf = (t: Tab | null) => t?.splitOf ?? t;
+/** The tab a grid shows. */
+const paneTab = (g: Grid) => (g === mainGrid ? mainShown : splitShown);
+/** The grid showing a tab, or null when it is not on screen. */
+const gridOf = (t: Tab) => (t === mainShown ? mainGrid : t === splitShown ? splitGrid : null);
+/** The grids on screen: display settings and highlights apply to both panes of a split. */
+const visibleGrids = () => (splitShown ? [mainGrid, splitGrid] : [mainGrid]);
+const tabTitle = (t: Tab) => t.info.title + (t.copy ? ` (${t.copy + 1})` : '');
+
+/** Puts a tab (and its split pane) in the grids; `tab` is the focused pane. */
+function showPanes(tab: Tab | null) {
+  const owner = ownerOf(tab);
+  if (mainShown !== owner) mainGrid.setTab((mainShown = owner));
+  const split = owner?.split ?? null;
+  if (splitShown !== split) {
+    if (split) splitGrid.applyView(false); // display settings may have changed while it was hidden
+    splitGrid.setTab((splitShown = split));
+  }
+  for (const id of ['#pane-split', '#pane-bar', '#head-main']) $(id).classList.toggle('hidden', !split);
+  grid = split && tab === split ? splitGrid : mainGrid;
+  // The toolbar's quick filter belongs to the active tab; in a split each pane has its own.
+  quickInput.closest<HTMLElement>('.tb-group')!.style.visibility = split ? 'hidden' : '';
+  if (!split) $('#pane-main').style.flex = '';
+  renderPaneHeads();
+}
+
+/** Makes the pane of `g` the active one (a click or key in it, or focus). */
+function focusPane(g: Grid) {
+  if (g === grid || syncingPanes || !splitShown) return;
+  const t = paneTab(g);
+  if (t) activate(t);
+}
+
+function renderPaneHeads() {
+  if (!splitShown) return;
+  for (const [head, g] of [[heads.main, mainGrid], [heads.split, splitGrid]] as const) {
+    const t = paneTab(g);
+    if (!t) continue;
+    head.el.classList.toggle('focused', g === grid);
+    const i = t.info;
+    head.count.textContent = t.filtering && t.progress ? `Filtering ${Math.round(t.progress.fraction * 100)}%` : t.contextMode || (i.viewCount === i.total && isDefaultFilter(t)) ? fmtNum(i.total) : `${fmtNum(i.viewCount)} of ${fmtNum(i.total)}`;
+    if (document.activeElement !== head.quick && head.quick.value !== (t.filter.query ?? '')) head.quick.value = t.filter.query ?? '';
+  }
+  const owner = ownerOf(active);
+  $('#head-split .pane-sync').classList.toggle('on', owner?.syncSplit !== false);
+}
+
+function commitPaneQuick(g: Grid, input: HTMLInputElement) {
+  const t = paneTab(g);
+  if (!t) return;
+  const q = input.value;
+  if (q === (t.filter.query ?? '')) return;
+  const err = validateQuery(q, !!t.filter.queryCaseSensitive);
+  if (err) return toast(`Quick filter: ${err}`, true);
+  t.filter.query = q;
+  if (t === active) quickInput.value = q;
+  void applyFilter(t);
+}
+
+for (const [head, g] of [[heads.main, mainGrid], [heads.split, splitGrid]] as const) {
+  g.root.addEventListener('focus', () => focusPane(g));
+  head.quick.addEventListener('focus', () => focusPane(g));
+  const soon = debounce(() => commitPaneQuick(g, head.quick), 350);
+  head.quick.addEventListener('input', soon);
+  head.quick.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') commitPaneQuick(g, head.quick);
+    else if (e.key !== 'Escape') return;
+    e.preventDefault();
+    g.root.focus();
+  });
+}
+$('#head-split .pane-close').onclick = () => void closeSplit(ownerOf(active));
+$('#head-split .pane-sync').onclick = () => {
+  const owner = ownerOf(active);
+  if (!owner) return;
+  owner.syncSplit = owner.syncSplit === false;
+  renderPaneHeads();
+};
+// Dragging the bar between the panes resizes them.
+$('#pane-bar').addEventListener('mousedown', (e) => {
+  e.preventDefault();
+  const panes = $('#panes').getBoundingClientRect();
+  const move = (m: MouseEvent) => {
+    const f = Math.min(0.85, Math.max(0.15, (m.clientX - panes.left) / panes.width));
+    $('#pane-main').style.flex = `${f} 1 0`;
+    $('#pane-split').style.flex = `${1 - f} 1 0`;
+  };
+  const up = () => {
+    window.removeEventListener('mousemove', move);
+    window.removeEventListener('mouseup', up);
+  };
+  window.addEventListener('mousemove', move);
+  window.addEventListener('mouseup', up);
+});
+
+function focusQuick() {
+  const box = !splitShown ? quickInput : grid === splitGrid ? heads.split.quick : heads.main.quick;
+  box.focus();
+  box.select();
+}
+
+/** A new tab object over the document `id`, which reads the same files as `t`. */
+function cloneTab(t: Tab, id: number, info: DocInfo, extra: Partial<Tab>): Tab {
+  return {
+    id,
+    paths: t.paths,
+    info,
+    filter: defaultFilter(),
+    search: { pattern: { ...t.search.pattern }, result: null, current: 0 },
+    bookmarks: new Map([...t.bookmarks].map(([k, b]) => [k, { ...b }])),
+    anchor: 0,
+    focus: 0,
+    topRow: 0,
+    follow: false,
+    formatId: t.formatId,
+    encoding: t.encoding,
+    window: t.window,
+    expanded: new Set(t.expanded),
+    unfolded: new Set(t.unfolded),
+    columns: copyColumns(t),
+    ...extra,
+  };
+}
+
+/** Opens another tab over the same files with the same filter, search and columns: instant, no reindexing. */
+async function duplicateTab(t: Tab | null): Promise<Tab | undefined> {
+  if (!t || t.info.indexing) return;
+  const owner = ownerOf(t)!;
+  const id = await engine.duplicate(t.id);
+  const same = allTabs().filter((x) => x.paths.length === t.paths.length && x.paths.every((p, i) => p === t.paths[i]));
+  const dup = cloneTab(t, id, await engine.info(id), {
+    copy: Math.max(...same.map((x) => x.copy ?? 0)) + 1,
+    filter: structuredClone(t.filter),
+    anchor: t.anchor,
+    focus: t.focus,
+    topRow: t.topRow,
+  });
+  tabs.splice(tabs.indexOf(owner) + 1, 0, dup);
+  activate(dup);
+  if (!isDefaultFilter(dup)) await applyFilter(dup); // runs the search too
+  else {
+    await resolveBookmarkRows(dup);
+    if (dup.search.pattern.text) void runSearch(dup, false, dup.search.pattern, false);
+  }
+  refreshFieldsSoon(dup);
+  return dup;
+}
+
+function toggleSplit() {
+  const owner = ownerOf(active);
+  if (!owner) return;
+  if (owner.split) void closeSplit(owner);
+  else void splitRight(owner);
+}
+
+/** Opens a second, unfiltered pane over the same files to the right of the tab, scrolled to the selected entry. */
+async function splitRight(t: Tab | null): Promise<Tab | undefined> {
+  const owner = ownerOf(t);
+  if (!owner || owner.info.indexing) return;
+  if (owner.split) return owner.split;
+  const id = await engine.duplicate(owner.id);
+  const pane = cloneTab(owner, id, await engine.info(id), { splitOf: owner });
+  owner.split = pane;
+  owner.syncSplit ??= true;
+  activate(pane);
+  await resolveBookmarkRows(pane);
+  refreshFieldsSoon(pane);
+  await syncPanes(owner, pane);
+  return pane;
+}
+
+async function closeSplit(owner: Tab | null) {
+  const pane = owner?.split;
+  if (!owner || !pane) return;
+  owner.split = null;
+  clearTimeout(statsTimers.get(pane));
+  statsTimers.delete(pane);
+  const wasActive = active === pane || active === owner;
+  if (wasActive) activate(owner);
+  else renderTabs();
+  await engine.close(pane.id);
+}
+
+/** After a selection in one pane: the other pane shows the same entry if it passes its filter, else the nearest by time. */
+function syncOtherPane() {
+  const t = active;
+  const owner = ownerOf(t);
+  if (!t || !owner?.split || owner.syncSplit === false || syncingPanes) return;
+  void syncPanes(t, t === owner ? owner.split : owner);
+}
+
+async function syncPanes(from: Tab, to: Tab) {
+  const g = gridOf(to);
+  if (!g || !from.info.viewCount || !to.info.viewCount) return;
+  const row = gridOf(from)?.getCached(from.focus) ?? (await engine.rows(from.id, from.focus, 1))[0];
+  if (!row || gridOf(to) !== g) return;
+  let target = await engine.rowForKey(to.id, row.key);
+  if (target == null && row.time != null) target = await engine.rowForTime(to.id, row.time);
+  if (target == null || gridOf(to) !== g) return;
+  const onScreen = target >= to.topRow && target < to.topRow + g.visibleRows();
+  if (target === to.focus && onScreen) return;
+  syncingPanes = true;
+  try {
+    g.select(target, false, onScreen ? 'nearest' : 'center');
+  } finally {
+    syncingPanes = false;
+  }
+}
+
+/** A pane that is on screen but not active: redraw it after its rows changed. */
+function refreshInactivePane(t: Tab) {
+  const g = gridOf(t);
+  if (t === active || !g) return;
+  if (t.follow) t.topRow = Number.MAX_SAFE_INTEGER;
+  g.renderHeader();
+  g.invalidate();
+  renderPaneHeads();
+}
+
 // --------------------------------------------------------------- engine events
 
 const refreshOverviewSoon = debounce((tab: Tab) => void refreshOverview(tab), 250);
@@ -254,7 +529,7 @@ const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false, undefi
 
 window.ulv.onEvent((raw) => {
   const ev = raw as EngineEvent;
-  const tab = tabs.find((t) => t.id === ev.docId);
+  const tab = allTabs().find((t) => t.id === ev.docId);
   if (!tab) return;
   if (ev.type === 'progress') {
     tab.progress = ev.fraction >= 1 ? undefined : { phase: ev.phase, fraction: ev.fraction };
@@ -280,6 +555,7 @@ window.ulv.onEvent((raw) => {
   if (tab.showPatterns && !ev.info.indexing && !wasIndexing && (ev.reset || Date.now() - (tab.patternsAt ?? 0) > 10_000) && !patternTimers.has(tab)) refreshPatternsSoon(tab);
   if (tab !== active) {
     renderTabs();
+    refreshInactivePane(tab);
     return;
   }
   if (appended > 0 && document.visibilityState === 'visible') grid.flash(before, ev.info.viewCount);
@@ -310,7 +586,11 @@ function showPartialView(tab: Tab, ev: Extract<EngineEvent, { type: 'view-partia
   tab.info = ev.info;
   const sameEpoch = tab.partialEpoch === ev.epoch;
   tab.partialEpoch = ev.epoch;
-  if (tab !== active) return;
+  if (tab !== active) {
+    gridOf(tab)?.invalidate(sameEpoch);
+    renderPaneHeads();
+    return;
+  }
   if (!sameEpoch && tab.search.result) {
     // The hits are rows of the old view; the search runs again when the filter is done.
     tab.search.result = null;
@@ -385,7 +665,7 @@ function syncMenu() {
 }
 
 async function applyFilter(tab: Tab) {
-  const focusKey = grid.getCached(tab.focus)?.key;
+  const focusKey = gridOf(tab)?.getCached(tab.focus)?.key;
   tab.filter.bookmarks = [...tab.bookmarks.keys()];
   // Any filter change leaves "show in context" first.
   const wasContext = !!tab.contextMode;
@@ -417,7 +697,7 @@ async function applyFilter(tab: Tab) {
   tab.anchor = tab.focus = row ?? Math.min(tab.focus, Math.max(0, info.viewCount - 1));
   await resolveBookmarkRows(tab);
   refreshFieldsSoon(tab);
-  if (tab !== active) return;
+  if (tab !== active) return refreshInactivePane(tab);
   grid.clearFlash();
   renderPill();
   syncMenu();
@@ -470,6 +750,11 @@ async function refreshPatterns(t: Tab, all = false) {
 }
 
 function setPatternsShown(t: Tab, on: boolean) {
+  // The patterns view takes the place of the main pane, so in a split it is about the left pane's entries.
+  if (on && t.splitOf) {
+    activate(t.splitOf);
+    t = t.splitOf;
+  }
   if (!!t.showPatterns === on) return;
   t.showPatterns = on;
   if (on) {
@@ -489,7 +774,7 @@ function setPatternsShown(t: Tab, on: boolean) {
 function applyPatternsLayout() {
   const on = !!active?.showPatterns;
   $('#patterns').classList.toggle('hidden', !on);
-  $('#grid').classList.toggle('hidden', on);
+  mainGrid.root.classList.toggle('hidden', on);
   if (on) {
     patternsView.render(active);
     $('#patterns').focus();
@@ -502,7 +787,7 @@ function addPatternRule(t: Tab, p: PatternStat, mode: FilterRule['mode']) {
   t.filter.rules.push({ id: uid(), text: p.template, mode, patternMatch: true, regex: false, caseSensitive: true, wholeWord: false, enabled: true });
   if (mode === 'include') setPatternsShown(t, false);
   void applyFilter(t);
-  if (mode === 'include') $('#grid').focus();
+  if (mode === 'include') grid.root.focus();
 }
 
 // --------------------------------------------------------------- live tail
@@ -510,7 +795,7 @@ function addPatternRule(t: Tab, p: PatternStat, mode: FilterRule['mode']) {
 /** The "↓ N new" pill over the grid while rows arrive and follow is off. */
 function renderPill() {
   const el = $('#newpill');
-  const t = active;
+  const t = grid === mainGrid ? active : null; // the pill sits over the main pane
   const n = t && !t.follow && !t.showPatterns ? t.newRows ?? 0 : 0;
   el.classList.toggle('hidden', n <= 0);
   if (n > 0) el.textContent = `↓ ${fmtNum(n)} new`;
@@ -522,13 +807,13 @@ $('#newpill').onclick = () => {
   if (!t) return;
   if (!t.follow) toggleFollow();
   else if (t.info.viewCount) grid.scrollTo(Number.MAX_SAFE_INTEGER);
-  $('#grid').focus();
+  grid.root.focus();
 };
 
 async function refreshOverview(tab: Tab) {
   if (tab !== active) return;
   const [ov, hist] = await Promise.all([
-    engine.overview(tab.id, Math.max(50, Math.floor($('#grid .grid-body').clientHeight))),
+    engine.overview(tab.id, Math.max(50, Math.floor(grid.root.querySelector('.grid-body')!.clientHeight))),
     settings.showHistogram !== false ? engine.histogram(tab.id, histogram.bucketsWanted) : Promise.resolve(null),
   ]).catch(() => [[], null] as const);
   if (tab !== active) return;
@@ -578,7 +863,7 @@ async function setContextMode(t: Tab, on: boolean) {
   void refreshOverview(t);
   void updateDetail();
   if (t.search.pattern.text) void runSearch(t, false);
-  $('#grid').focus();
+  grid.root.focus();
 }
 
 function renderBanner() {
@@ -681,17 +966,40 @@ async function refreshFields(t: Tab) {
 
 const formatName = (t: Tab) => t.info.sources[0]?.format ?? '';
 
+// A duplicated tab or split pane has column choices of its own (copied when it was made, not saved); other tabs use
+// the per-format ones in the settings.
+const extrasOf = (t: Tab): string[] => t.columns?.extra ?? settings.extraColumns?.[formatName(t)] ?? [];
+const orderOf = (t: Tab): string[] | undefined => (t.columns ? t.columns.order : settings.columnOrder?.[formatName(t)]);
+const hiddenOf = (t: Tab | null): string[] => t?.columns?.hidden ?? settings.hiddenColumns ?? [];
+const copyColumns = (t: Tab): NonNullable<Tab['columns']> => ({ extra: [...extrasOf(t)], order: [...(orderOf(t) ?? [])], hidden: [...hiddenOf(t)] });
+
+function setExtras(t: Tab, list: string[]) {
+  if (t.columns) t.columns.extra = list;
+  else if (list.length) (settings.extraColumns ??= {})[formatName(t)] = list;
+  else delete settings.extraColumns?.[formatName(t)];
+}
+
+function setHidden(t: Tab, list: string[]) {
+  if (t.columns) t.columns.hidden = list;
+  else settings.hiddenColumns = list;
+}
+
+function setOrder(t: Tab, keys: string[] | undefined) {
+  if (t.columns) t.columns.order = keys ?? [];
+  else if (keys) (settings.columnOrder ??= {})[formatName(t)] = keys;
+  else delete settings.columnOrder?.[formatName(t)];
+}
+
 /** Format columns plus extra field columns (before the stretching message column), in the user's order. */
 function effectiveColumns(t: Tab | null): ColumnDef[] {
   if (!t || !t.info.columns.length) return t?.info.columns ?? [];
-  const fmt = formatName(t);
   let cols = [...t.info.columns];
-  const extras = (settings.extraColumns?.[fmt] ?? []).filter((k) => !cols.some((c) => c.key === k));
+  const extras = extrasOf(t).filter((k) => !cols.some((c) => c.key === k));
   if (extras.length) {
     const at = cols.findIndex((c) => c.width === 0);
     cols.splice(at < 0 ? cols.length : at, 0, ...extras.map((k) => ({ key: k, title: k, width: 140 })));
   }
-  const order = settings.columnOrder?.[fmt];
+  const order = orderOf(t);
   if (order?.length) {
     const first = order.map((k) => cols.find((c) => c.key === k)).filter((c): c is ColumnDef => !!c);
     cols = [...first, ...cols.filter((c) => !order.includes(c.key))];
@@ -700,7 +1008,7 @@ function effectiveColumns(t: Tab | null): ColumnDef[] {
 }
 
 function isColumnShown(key: string): boolean {
-  return effectiveColumns(active).some((c) => c.key === key) && !(settings.hiddenColumns ?? []).includes(key);
+  return effectiveColumns(active).some((c) => c.key === key) && !hiddenOf(active).includes(key);
 }
 
 const columnTitle = (t: Tab, key: string) => effectiveColumns(t).find((c) => c.key === key)?.title ?? key;
@@ -717,29 +1025,27 @@ function setColumnShown(key: string, show: boolean) {
   const t = active;
   if (!t) return;
   const isBase = t.info.columns.some((c) => c.key === key);
-  const fmt = formatName(t);
-  const extras = ((settings.extraColumns ??= {})[fmt] ??= []);
+  const extras = extrasOf(t);
   if (show) {
-    settings.hiddenColumns = (settings.hiddenColumns ?? []).filter((k) => k !== key);
-    if (!isBase && !extras.includes(key)) extras.push(key);
+    setHidden(t, hiddenOf(t).filter((k) => k !== key));
+    if (!isBase && !extras.includes(key)) setExtras(t, [...extras, key]);
   } else if (isBase) {
-    settings.hiddenColumns = [...new Set([...(settings.hiddenColumns ?? []), key])];
+    setHidden(t, [...new Set([...hiddenOf(t), key])]);
   } else {
-    settings.extraColumns[fmt] = extras.filter((k) => k !== key);
+    setExtras(t, extras.filter((k) => k !== key));
   }
-  if (!settings.extraColumns[fmt].length) delete settings.extraColumns[fmt];
   columnsChanged();
 }
 
 function moveColumn(t: Tab, key: string, dir: 1 | -1) {
-  const hidden = settings.hiddenColumns ?? [];
+  const hidden = hiddenOf(t);
   const keys = effectiveColumns(t).map((c) => c.key);
   const visible = keys.filter((k) => !hidden.includes(k));
   const other = visible[visible.indexOf(key) + dir];
   if (other === undefined) return;
   const a = keys.indexOf(key), b = keys.indexOf(other);
   [keys[a], keys[b]] = [keys[b], keys[a]];
-  (settings.columnOrder ??= {})[formatName(t)] = keys;
+  setOrder(t, keys);
   columnsChanged();
 }
 
@@ -747,8 +1053,7 @@ function headerMenu(e: MouseEvent, key: string | null) {
   const t = active;
   if (!t) return;
   const cols = effectiveColumns(t);
-  const hidden = settings.hiddenColumns ?? [];
-  const fmt = formatName(t);
+  const hidden = hiddenOf(t);
   const items: MenuItem[] = key === 'time' ? [...timeMenuItems(), 'sep'] : [];
   const col = cols.find((c) => c.key === key);
   if (col) {
@@ -764,7 +1069,7 @@ function headerMenu(e: MouseEvent, key: string | null) {
   items.push(
     'sep',
     { label: 'Reset column widths', action: () => { settings.columnWidths = {}; columnsChanged(); } },
-    { label: 'Reset column order', disabled: !settings.columnOrder?.[fmt], action: () => { delete settings.columnOrder?.[fmt]; columnsChanged(); } },
+    { label: 'Reset column order', disabled: !orderOf(t)?.length, action: () => { setOrder(t, undefined); columnsChanged(); } },
   );
   contextMenu(e.clientX, e.clientY, items);
 }
@@ -805,8 +1110,10 @@ function filterByValue(t: Tab, key: string, value: string, mode: FilterRule['mod
 function addHighlight(text: string) {
   (settings.highlights ??= []).push({ id: uid(), text, regex: false, caseSensitive: false, wholeWord: false, enabled: true, color: '#e8590c', row: false });
   saveSettings();
-  grid.refreshPatterns();
-  grid.render();
+  for (const g of visibleGrids()) {
+    g.refreshPatterns();
+    g.render();
+  }
   sidebar.render(active);
 }
 
@@ -967,7 +1274,7 @@ searchInput.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     searchInput.value = '';
     if (active) void runSearch(active, false);
-    $('#grid').focus();
+    grid.root.focus();
   }
 });
 for (const [, el] of Object.entries(toggles))
@@ -1106,7 +1413,7 @@ quickInput.addEventListener('keydown', (e) => {
     }
     quickInput.value = '';
     quickSoon();
-    $('#grid').focus();
+    grid.root.focus();
   }
 });
 
@@ -1163,7 +1470,7 @@ async function jumpToBookmark(b: Bookmark) {
   const row = await engine.rowForKey(t.id, b.key);
   if (row === null) return toast('That bookmark is hidden by the current filter');
   grid.select(row, false, 'center');
-  $('#grid').focus();
+  grid.root.focus();
 }
 
 function stepBookmark(dir: 1 | -1) {
@@ -1195,7 +1502,7 @@ async function gotoLine() {
   if (!m) return toast('Enter a line number', true);
   const src = m[1] ? Number(m[1]) - 1 : 0;
   grid.select(await engine.rowForLine(t.id, src, Number(m[2])), false, 'center');
-  $('#grid').focus();
+  grid.root.focus();
 }
 
 async function copyRows(a: number, b: number) {
@@ -1229,7 +1536,6 @@ async function saveWorkspace(file?: string | null) {
   file ??= await ulv().workspaceSaveDialog(`${(active?.info.title ?? 'logs').replace(/\.(log|txt|gz)$/i, '')}.ulvw`);
   if (!file) return;
   const input = tabs.map((t) => {
-    const fmt = formatName(t);
     return {
       paths: t.paths,
       formatId: t.formatId,
@@ -1237,12 +1543,12 @@ async function saveWorkspace(file?: string | null) {
       filter: t.filter,
       search: t === active ? currentPattern() : t.search.pattern,
       bookmarks: [...t.bookmarks.values()].map((b) => ({ path: t.info.sources[b.source]?.path ?? t.paths[b.source] ?? t.paths[0], line: b.line, note: b.note })),
-      extraColumns: settings.extraColumns?.[fmt] ?? [],
-      columnOrder: settings.columnOrder?.[fmt] ?? [],
-      hiddenColumns: settings.hiddenColumns ?? [],
+      extraColumns: extrasOf(t),
+      columnOrder: orderOf(t) ?? [],
+      hiddenColumns: hiddenOf(t),
     };
   });
-  const ws = serializeWorkspace(input, active ? tabs.indexOf(active) : 0, settings.highlights ?? [], file);
+  const ws = serializeWorkspace(input, active ? tabs.indexOf(ownerOf(active)!) : 0, settings.highlights ?? [], file);
   try {
     await ulv().writeWorkspace(file, JSON.stringify(ws, null, 2));
   } catch (e) {
@@ -1270,7 +1576,7 @@ async function openWorkspace(file?: string | null) {
   const r = resolveWorkspace(ws, file, (p) => existing.has(p));
   settings.highlights = r.highlights.map((x) => ({ ...x }));
   saveSettings();
-  grid.refreshPatterns();
+  for (const g of visibleGrids()) g.refreshPatterns();
   const opened: Tab[] = [];
   for (const wt of r.tabs) {
     const tab = await openTab(wt.paths, { format: wt.format, encoding: wt.encoding });
@@ -1455,6 +1761,7 @@ function renderStatus() {
   } else if (t.scanCost) parts.push(`<span class="scan-cost muted">${esc(t.scanCost)}</span>`);
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
+  renderPaneHeads();
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);
   el.querySelector('.fmt')?.addEventListener('click', openFormatPicker);
   syncAutoFormatOption();
@@ -1520,11 +1827,11 @@ function setView<K extends ViewKey>(key: K, value: Settings[K]) {
   }
   if (key === 'foldFrames') void updateDetail();
   if (key === 'tintRows' || key === 'density' || key === 'wrap' || key === 'foldFrames') {
-    grid.applyView();
+    for (const g of visibleGrids()) g.applyView();
     if (active) grid.reveal(active.focus);
     return;
   }
-  grid.render();
+  for (const g of visibleGrids()) g.render();
 }
 
 const TIME_MODES: [TimeMode, string][] = [
@@ -1561,7 +1868,7 @@ function toggleLayout(key: LayoutKey) {
 function applyTheme() {
   const dark = settings.theme === 'dark' || (settings.theme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-  grid.render();
+  for (const g of visibleGrids()) g.render();
   if (active) void refreshOverview(active);
 }
 
@@ -1630,6 +1937,8 @@ formatSel.onchange = async () => {
 
 async function reformat(t: Tab) {
   t.info = await engine.reformat(t.id, t.formatId || undefined, settings.customFormats);
+  // Duplicates and split panes read the same files, so the engine re-parsed them too.
+  for (const o of allTabs()) if (o !== t && o.paths === t.paths) o.formatId = t.formatId;
   t.contextMode = t.info.ignoreFilter;
   renderBanner();
   refreshFieldsSoon(t);
@@ -1694,7 +2003,7 @@ function editColumns() {
   const t = active;
   if (!t) return;
   modal((box, close) => {
-    const hidden = new Set(settings.hiddenColumns ?? []);
+    const hidden = new Set(hiddenOf(t));
     const list = h('div', { class: 'form' });
     for (const c of effectiveColumns(t)) {
       const cb = h('input', { type: 'checkbox', checked: !hidden.has(c.key) });
@@ -1728,6 +2037,8 @@ function chooseEncoding() {
 
 /** Re-opens a tab's files with different options (e.g. encoding), keeping its filters and bookmarks. */
 async function reopen(t: Tab, encoding: string) {
+  t = ownerOf(t)!;
+  await closeSplit(t);
   t.encoding = encoding;
   await engine.close(t.id);
   t.id = await engine.open(t.paths, {
@@ -1744,7 +2055,7 @@ async function reopen(t: Tab, encoding: string) {
   t.expanded = new Set();
   t.unfolded = new Set();
   t.patterns = null;
-  if (active === t) activate(t);
+  if (ownerOf(active) === t) activate(t);
 }
 
 // ---------------------------------------------------------------------- help
@@ -1767,6 +2078,8 @@ function showHelp() {
     ['Ctrl+C', 'Copy selected entries'],
     ['Ctrl+E', 'Export the current view (.log, .csv, .jsonl)'],
     ['Ctrl+W, Ctrl+Tab', 'Close tab, next tab'],
+    ['Ctrl+Shift+T', 'Duplicate tab (same file, no reindexing)'],
+    ['Ctrl+\\', 'Split right / close split'],
     ['Alt+Z', 'Wrap long messages'],
     ['→ / ←', 'Expand / collapse a multi-line entry'],
     ['Ctrl+Shift+P, F1', 'Command palette'],
@@ -1857,12 +2170,17 @@ window.ulv.onMenu((cmd, ...args) => {
       return void exportView();
     case 'close-tab':
       return active && void closeTab(active);
+    case 'duplicate-tab':
+      return void duplicateTab(active);
+    case 'split-right':
+      return void splitRight(active);
+    case 'close-split':
+      return void closeSplit(ownerOf(active));
     case 'find':
       searchInput.focus();
       return searchInput.select();
     case 'quick-filter':
-      quickInput.focus();
-      return quickInput.select();
+      return focusQuick();
     case 'goto-line':
       return void gotoLine();
     case 'toggle-bookmark': {
@@ -1934,12 +2252,18 @@ document.addEventListener('keydown', (e) => {
     stepBookmark(e.shiftKey ? -1 : 1);
   } else if (e.key === 'Tab' && e.ctrlKey && tabs.length > 1) {
     e.preventDefault();
-    const i = tabs.indexOf(active!);
+    const i = tabs.indexOf(ownerOf(active)!);
     activate(tabs[(i + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length]);
+  } else if (e.code === 'KeyT' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    void duplicateTab(active);
+  } else if (e.code === 'Backslash' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    toggleSplit();
   } else if (e.key === 'Escape' && active?.showPatterns && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)) {
     e.preventDefault();
     setPatternsShown(active, false);
-    $('#grid').focus();
+    grid.root.focus();
   } else if (e.key === 'F1' || (e.code === 'KeyP' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey)) {
     e.preventDefault();
     void openCommandPalette();
@@ -1982,7 +2306,8 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 async function init() {
   settings = (await ulv().getSettings()) as Settings;
   settings.highlights ??= DEFAULT_HIGHLIGHTS.map((r) => ({ ...r }));
-  grid.applyView(false);
+  mainGrid.applyView(false);
+  splitGrid.applyView(false);
   applyTheme();
   applyLayout();
   renderFormatOptions();
@@ -1997,7 +2322,7 @@ async function init() {
     renderToolbar();
   }
   // test hook: lets automated UI tests drive the app without native dialogs
-  (window as unknown as Record<string, unknown>).__ulv = { openPaths, saveWorkspace, openWorkspace, state: () => ({ tabs, active }) };
+  (window as unknown as Record<string, unknown>).__ulv = { openPaths, saveWorkspace, openWorkspace, duplicateTab, splitRight, closeSplit, state: () => ({ tabs, active }) };
 }
 
 void init();

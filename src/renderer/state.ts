@@ -157,6 +157,16 @@ export interface Tab {
   patternsAt?: number;
   /** Rows appended to the view while not following (the "↓ N new" pill). */
   newRows?: number;
+  /** The right-hand pane of a split view: a document over the same files, with its own filter. */
+  split?: Tab | null;
+  /** For a split pane: the tab it belongs to. */
+  splitOf?: Tab;
+  /** Selecting an entry in one pane of a split scrolls the other to it, or to the nearest entry by time (default on). */
+  syncSplit?: boolean;
+  /** Number shown after the title of a duplicated tab ("app.log (2)"); 0 or absent for the first one. */
+  copy?: number;
+  /** Column choices of this tab alone (duplicates and split panes, not saved); absent: the per-format settings. */
+  columns?: { extra: string[]; order: string[]; hidden: string[] };
   /** Settings to apply once the tab's document is ready (workspace load). */
   pending?: {
     bookmarks: { path: string; line: number; note: string }[];

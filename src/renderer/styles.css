@@ -338,6 +338,17 @@ mark.cur { background: var(--hit-cur); color: #000; }
 /* detail */
 .work { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .work.dock-right { flex-direction: row; }
+/* Split view: two panes side by side, each with a compact header (its quick filter, count; sync and close on the right). */
+/* inline-size containment: two grids side by side must not widen the window to fit both headers */
+.panes { flex: 1; display: flex; min-height: 0; min-width: 0; contain: inline-size; }
+.pane { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; min-width: 120px; overflow: hidden; }
+.pane-head { display: flex; align-items: center; gap: 6px; padding: 3px 6px; background: var(--bg-2); border-bottom: 2px solid transparent; flex: none; }
+.pane-head.focused { border-bottom-color: var(--accent); }
+.pane-quick { flex: 1; min-width: 60px; height: 22px; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); font: 12px var(--mono); outline: none; }
+.pane-quick:focus { border-color: var(--accent); }
+.pane-count { font-size: 11.5px; white-space: nowrap; }
+.vsplit { width: 5px; flex: none; cursor: col-resize; border-left: 1px solid var(--border); background: var(--bg-2); }
+.vsplit:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .detail { height: 240px; border-top: 1px solid var(--border); display: flex; flex-direction: column; flex: none; min-height: 80px; position: relative; }
 .detail .resizer { position: absolute; top: -3px; left: 0; right: 0; height: 6px; cursor: row-resize; z-index: 3; }
 .work.dock-right .detail { height: auto !important; width: 420px; min-width: 200px; max-width: 80%; border-top: 0; border-left: 1px solid var(--border); min-height: 0; }

@@ -57,16 +57,41 @@
             <button id="ctx-exit" class="mini">Back to filtered view (Esc)</button>
           </div>
           <div id="work" class="work">
-            <div id="grid" class="grid" tabindex="0">
-              <div class="grid-header"></div>
-              <div class="grid-body">
-                <div class="grid-scroll"><div class="grid-spacer"></div></div>
-                <div class="grid-rows"></div>
-                <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
-                <button id="newpill" class="newpill hidden" title="Follow new lines"></button>
+            <div id="panes" class="panes">
+              <div id="pane-main" class="pane">
+                <div id="head-main" class="pane-head hidden">
+                  <input class="pane-quick" type="text" placeholder="Quick filter" spellcheck="false" autocomplete="off" />
+                  <span class="pane-count muted"></span>
+                </div>
+                <div id="grid" class="grid" tabindex="0">
+                  <div class="grid-header"></div>
+                  <div class="grid-body">
+                    <div class="grid-scroll"><div class="grid-spacer"></div></div>
+                    <div class="grid-rows"></div>
+                    <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
+                    <button id="newpill" class="newpill hidden" title="Follow new lines"></button>
+                  </div>
+                </div>
+                <div id="patterns" class="patterns hidden" tabindex="0"></div>
+              </div>
+              <div id="pane-bar" class="vsplit hidden" title="Drag to resize the panes"></div>
+              <div id="pane-split" class="pane hidden">
+                <div id="head-split" class="pane-head">
+                  <input class="pane-quick" type="text" placeholder="Quick filter" spellcheck="false" autocomplete="off" />
+                  <span class="pane-count muted"></span>
+                  <button class="mini pane-sync" title="Selecting an entry in one pane scrolls the other to it, or to the nearest entry by time">⇅ Sync</button>
+                  <button class="mini pane-close" title="Close split (Ctrl+\)">×</button>
+                </div>
+                <div id="grid2" class="grid" tabindex="0">
+                  <div class="grid-header"></div>
+                  <div class="grid-body">
+                    <div class="grid-scroll"><div class="grid-spacer"></div></div>
+                    <div class="grid-rows"></div>
+                    <canvas class="overview" title="Overview: errors, warnings, search hits and bookmarks"></canvas>
+                  </div>
+                </div>
               </div>
             </div>
-            <div id="patterns" class="patterns hidden" tabindex="0"></div>
             <div id="detail" class="detail"></div>
           </div>
           <div id="empty" class="empty">
