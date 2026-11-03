@@ -25,7 +25,7 @@ public static partial class Timestamps
     private static partial Regex EpochRe();
 
     private sealed record HourCache(long Key, long Ms);
-    private static HourCache? _hour;
+    [ThreadStatic] private static HourCache? _hour; // per thread: parallel indexing works on different hours at once
 
     private static bool IsDigit(char c) => c >= '0' && c <= '9';
     private static int D2(ReadOnlySpan<char> s, int i) => (s[i] - '0') * 10 + s[i + 1] - '0';

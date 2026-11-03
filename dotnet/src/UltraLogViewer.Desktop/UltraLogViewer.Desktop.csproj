@@ -8,7 +8,14 @@
     <ApplicationIcon>Assets/app.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <Version>0.2.0</Version>
+    <!-- Startup and first-file speed: precompile to native code when publishing for a runtime (the installer does). -->
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Hot indexing loops get optimized code right away instead of after the 100 ms quiet-period the runtime waits for
+         (opening a large JSON log measured 1.3 s with the default, 0.75 s with this). -->
+    <RuntimeHostConfigurationOption Include="System.Runtime.TieredCompilation.CallCountingDelayMs" Value="0" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
     <PackageReference Include="Avalonia.Desktop" Version="$(AvaloniaVersion)" />

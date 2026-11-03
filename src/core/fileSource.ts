@@ -9,9 +9,11 @@ import * as path from 'node:path';
 import * as zlib from 'node:zlib';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
-import { detectFormatInfo, FormatDetection, formatLabel, LogFormat, QuickInfo } from './formats';
+import { detectFormatInfo, FormatDetection, formatLabel, LogFormat } from './formats';
+import { ChunkScan, FormatSpec, scanChunk } from './scanChunk';
+import type { ScanPool } from './scanPool';
 import { GrowF64, GrowU32, GrowU8, lowerBound } from './grow';
-import { CustomFormat, Level, SourceInfo } from './types';
+import { CustomFormat, Level, LEVEL_COUNT, SourceInfo } from './types';
 
 export type Encoding = 'auto' | 'utf-8' | 'windows-1252' | 'utf-16le' | 'utf-16be';
 
@@ -20,6 +22,8 @@ export interface SourceOptions {
   customFormats?: CustomFormat[];
   format?: string;
   chunkSize?: number;
+  /** Worker threads for scanning big files in parallel; without one, chunks are scanned on the calling thread. */
+  scanPool?: ScanPool;
 }
 
 export interface RefreshResult {
@@ -53,6 +57,13 @@ export class FileSource {
   private tempFile: string | null = null;
   private lastTime = NaN;
   private chunkSize: number;
+  /** How workers rebuild this.format (set with it). */
+  private formatSpec!: FormatSpec;
+  // Level counts and time range of entries [0, statsCount), extended lazily so info() stays cheap while indexing.
+  private levelCounts: number[] = [];
+  private minTime = Infinity;
+  private maxTime = -Infinity;
+  private statsCount = 0;
   private busy: Promise<unknown> = Promise.resolve();
   closed = false;
 
@@ -115,14 +126,52 @@ export class FileSource {
     this.fd = fs.openSync(this.readPath, 'r');
     const st = fs.fstatSync(this.fd);
     this.ino = st.ino;
-    this.detection = detectFormatInfo(this.sampleLines(256 * 1024), {
-      year: st.mtime.getFullYear(),
-      customFormats: this.opts.customFormats,
-      force: this.opts.format,
-    });
-    this.format = this.detection.format;
+    this.detect(st.mtime.getFullYear(), this.opts.format);
     this.dataEnd = this.dataStart;
     await this.exclusive(() => this.indexFrom(st.size, onProgress));
+  }
+
+  private detect(year: number, force: string | undefined) {
+    const sample = this.sampleLines(256 * 1024);
+    this.detection = detectFormatInfo(sample, { year, customFormats: this.opts.customFormats, force });
+    this.format = this.detection.format;
+    this.formatSpec = { sample, year, customFormats: this.opts.customFormats, formatId: this.format.id };
+  }
+
+  /** Entries per level and the time range ([Infinity, -Infinity] without entries), updated incrementally. */
+  stats(): { levelCounts: number[]; min: number; max: number } {
+    const count = this.entryCount;
+    if (this.statsCount > count || this.levelCounts.length === 0) this.resetStats();
+    const lv = this.entryLevel.data;
+    const t = this.entryTime.data;
+    for (let i = this.statsCount; i < count; i++) {
+      this.levelCounts[lv[i]]++;
+      const x = t[i];
+      if (x < this.minTime) this.minTime = x;
+      if (x > this.maxTime) this.maxTime = x;
+    }
+    this.statsCount = count;
+    return { levelCounts: this.levelCounts.slice(), min: this.minTime, max: this.maxTime };
+  }
+
+  private resetStats() {
+    this.levelCounts = new Array(LEVEL_COUNT).fill(0);
+    this.minTime = Infinity;
+    this.maxTime = -Infinity;
+    this.statsCount = 0;
+  }
+
+  /** Takes entries [first, ...) out of the stats before they are removed from the index. */
+  private unfoldStats(first: number) {
+    for (let e = first; e < this.statsCount; e++) {
+      const x = this.entryTime.get(e);
+      if (x <= this.minTime || x >= this.maxTime) {
+        this.resetStats(); // the range may shrink: recompute it on the next call
+        return;
+      }
+      this.levelCounts[this.entryLevel.get(e)]--;
+    }
+    this.statsCount = Math.min(this.statsCount, first);
   }
 
   /** Re-detects nothing; re-indexes with a different format id. */
@@ -131,8 +180,7 @@ export class FileSource {
     if (customFormats) this.opts.customFormats = customFormats;
     await this.exclusive(async () => {
       const st = fs.fstatSync(this.fd);
-      this.detection = detectFormatInfo(this.sampleLines(256 * 1024), { year: st.mtime.getFullYear(), customFormats: this.opts.customFormats, force: formatId });
-      this.format = this.detection.format;
+      this.detect(st.mtime.getFullYear(), formatId);
       this.resetIndex();
       await this.indexFrom(st.size);
     });
@@ -162,6 +210,7 @@ export class FileSource {
       const first = Math.max(0, this.entryCount - 1);
       if (this.entryCount) {
         const line = this.entryLine.get(first);
+        this.unfoldStats(first);
         this.dataEnd = this.lineStart.get(line);
         this.lineStart.truncate(line);
         this.entryLine.truncate(first);
@@ -175,6 +224,7 @@ export class FileSource {
   }
 
   private resetIndex() {
+    this.resetStats();
     this.lineStart.truncate(0);
     this.entryLine.truncate(0);
     this.entryLevel.truncate(0);
@@ -198,53 +248,98 @@ export class FileSource {
     return lines;
   }
 
+  /**
+   * Indexes [dataEnd, size). With a scan pool, chunks are read in order, scanned on the pool's threads and committed
+   * in file order, so rows still appear from the top while the rest of the file is being indexed.
+   */
   private async indexFrom(size: number, onProgress?: (f: number) => void) {
     const fmt = this.format;
-    const scan = fmt.scan?.bind(fmt);
-    let buf = Buffer.allocUnsafe(this.chunkSize);
+    const pool = this.opts.scanPool?.usable && size - this.dataEnd > 2 * this.chunkSize ? this.opts.scanPool : null;
+    const encoding = this.decoder.encoding;
+    const maxInFlight = pool ? pool.size * 2 : 1;
+    const inFlight: { scan: Promise<ChunkScan | null>; pos: number; end: number }[] = [];
+    let chunkSize = this.chunkSize;
     let pos = this.dataEnd;
     const startPos = pos;
+    const commitNext = async () => {
+      const item = inFlight.shift()!;
+      // A failed worker: scan that chunk again here.
+      const r = (await item.scan) ?? scanChunk(fmt, this.decoder, this.readBytes(item.pos, item.end - item.pos), item.pos);
+      if (this.closed) return;
+      if (this.lineStart.length === 0 && r.lines > 0 && item.end < size) {
+        // Size the index once from the first chunk instead of doubling it a dozen times.
+        const lines = Math.ceil(((size - startPos) / (item.end - startPos)) * r.lines * 1.05);
+        this.lineStart.reserve(lines);
+        const entries = Math.ceil((lines * Math.max(1, r.entries)) / r.lines);
+        this.entryLine.reserve(entries);
+        this.entryLevel.reserve(entries);
+        this.entryTime.reserve(entries);
+      }
+      this.commit(r, item.end);
+      if (onProgress && size > startPos) onProgress((item.end - startPos) / (size - startPos));
+    };
     while (pos < size && !this.closed) {
-      const want = Math.min(buf.length, size - pos);
+      const want = Math.min(chunkSize, size - pos);
+      // Each chunk gets its own buffer: it is handed to a worker thread.
+      const buf = pool ? Buffer.allocUnsafeSlow(want) : (this.scratch.length >= want ? this.scratch : (this.scratch = Buffer.allocUnsafe(chunkSize)));
       const n = fs.readSync(this.fd, buf, 0, want, pos);
       if (n <= 0) break;
       const eof = pos + n >= size;
       let end = buf.lastIndexOf(10, n - 1) + 1; // bytes up to and including the last '\n'
-      if (end === 0 && !eof && buf.length < MAX_LINE_BYTES) {
-        // A line longer than the buffer: grow it and read again.
-        buf = Buffer.allocUnsafe(Math.min(MAX_LINE_BYTES, buf.length * 2));
+      if (end === 0 && !eof && chunkSize < MAX_LINE_BYTES) {
+        // A line longer than the chunk: read again with a bigger one.
+        chunkSize = Math.min(MAX_LINE_BYTES, chunkSize * 2);
         continue;
       }
       if (end === 0) end = n; // the unterminated tail, or a pathological line split at MAX_LINE_BYTES
       else if (eof && end < n) end = n; // include the unterminated last line
-      const text = this.decoder.decode(buf.subarray(0, end));
-      const lines = text.split('\n');
-      if (text.endsWith('\n')) lines.pop();
-      let off = 0;
-      for (let i = 0; i < lines.length; i++) {
-        let line = lines[i];
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        const lineIdx = this.lineStart.length;
-        this.lineStart.push(pos + off);
-        let q: QuickInfo | null;
-        if (!fmt.multiline) q = fmt.quick(line);
-        else if (scan) q = scan(line);
-        else q = fmt.isEntryStart(line) ? fmt.quick(line) : null;
-        if (!q && this.entryLine.length === 0) q = fmt.quick(line);
-        if (q) {
-          this.entryLine.push(lineIdx);
-          this.entryLevel.push(q.level);
-          if (q.time !== null) this.lastTime = q.time;
-          this.entryTime.push(q.time ?? this.lastTime);
-        }
-        const nl = buf.indexOf(10, off);
-        off = nl < 0 || nl >= end ? end : nl + 1;
-      }
+      const chunk = buf.subarray(0, end);
+      const scan = pool
+        ? pool.scan(this.formatSpec, encoding, chunk, pos).catch(() => null)
+        : Promise.resolve(scanChunk(fmt, this.decoder, chunk, pos));
+      inFlight.push({ scan, pos, end: pos + end });
       pos += end;
-      this.dataEnd = pos;
-      if (onProgress && size > startPos) onProgress((pos - startPos) / (size - startPos));
-      await yieldNow();
+      while (inFlight.length >= maxInFlight) await commitNext();
+      if (!pool) await yieldNow();
     }
+    while (inFlight.length) await commitNext();
+  }
+
+  private scratch = Buffer.alloc(0);
+
+  private readBytes(pos: number, len: number): Buffer {
+    const buf = Buffer.allocUnsafe(len);
+    let got = 0;
+    while (got < len) {
+      const n = fs.readSync(this.fd, buf, got, len - got, pos + got);
+      if (n <= 0) break;
+      got += n;
+    }
+    return buf.subarray(0, got);
+  }
+
+  /** Appends a scanned chunk to the index; an entry without a timestamp inherits the previous entry's time. */
+  private commit(r: ChunkScan, end: number) {
+    const lineBase = this.lineStart.length;
+    // The file's first line starts an entry even when it does not look like one.
+    if (this.entryLine.length === 0 && r.lines > 0 && (r.entries === 0 || r.entryLines[0] !== 0) && r.first) {
+      this.entryLine.push(lineBase);
+      this.entryLevel.push(r.first.level);
+      if (r.first.time !== null) this.lastTime = r.first.time;
+      this.entryTime.push(r.first.time ?? this.lastTime);
+    }
+    const lines = r.entryLines.subarray(0, r.entries);
+    const times = r.entryTimes.subarray(0, r.entries);
+    for (let e = 0; e < lines.length; e++) {
+      lines[e] += lineBase;
+      if (r.entryHasTime[e]) this.lastTime = times[e];
+      else times[e] = this.lastTime;
+    }
+    this.lineStart.pushAll(r.starts.subarray(0, r.lines));
+    this.entryLine.pushAll(lines);
+    this.entryLevel.pushAll(r.entryLevels.subarray(0, r.entries));
+    this.entryTime.pushAll(times);
+    this.dataEnd = end;
   }
 
   /** Line range [first, last] (0-based, inclusive) of an entry. */

@@ -12,6 +12,7 @@ for (const f of ['index.html', 'styles.css']) fs.copyFileSync(`src/renderer/${f}
 const builds = [
   { ...common, platform: 'node', format: 'cjs', external: ['electron'], entryPoints: ['src/main/main.ts'], outfile: 'dist/main/main.js' },
   { ...common, platform: 'node', format: 'cjs', external: ['electron'], entryPoints: ['src/main/engineWorker.ts'], outfile: 'dist/main/engineWorker.js' },
+  { ...common, platform: 'node', format: 'cjs', external: ['electron'], entryPoints: ['src/main/scanWorker.ts'], outfile: 'dist/main/scanWorker.js' },
   { ...common, platform: 'node', format: 'cjs', external: ['electron'], entryPoints: ['src/preload/preload.ts'], outfile: 'dist/preload/preload.js' },
   { ...common, platform: 'browser', format: 'iife', entryPoints: ['src/renderer/app.ts'], outfile: 'dist/renderer/app.js' },
 ];

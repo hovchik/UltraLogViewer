@@ -17,6 +17,24 @@ class Grow<T extends Float64Array | Uint32Array | Uint8Array> {
     }
     this.data[this.length++] = v;
   }
+  /** Makes room for at least `capacity` values. */
+  reserve(capacity: number) {
+    if (capacity <= this.data.length) return;
+    const next = new this.ctor(capacity);
+    next.set(this.data.subarray(0, this.length) as never);
+    this.data = next;
+  }
+  /** Appends many values at once. */
+  pushAll(values: ArrayLike<number>) {
+    const need = this.length + values.length;
+    if (need > this.data.length) {
+      const next = new this.ctor(Math.max(need, this.data.length * 2));
+      next.set(this.data.subarray(0, this.length) as never);
+      this.data = next;
+    }
+    this.data.set(values as never, this.length);
+    this.length = need;
+  }
   get(i: number) {
     return this.data[i];
   }

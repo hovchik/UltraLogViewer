@@ -32,6 +32,29 @@ public sealed class Grow<T> where T : struct
         Volatile.Write(ref _count, _count + 1);
     }
 
+    /// <summary>Makes room for at least <paramref name="capacity"/> values.</summary>
+    public void EnsureCapacity(int capacity)
+    {
+        if (capacity <= _data.Length) return;
+        var next = new T[capacity];
+        Array.Copy(_data, next, _count);
+        _data = next;
+    }
+
+    /// <summary>Appends many values; the new count is published once, after they are all written.</summary>
+    public void AddRange(ReadOnlySpan<T> values)
+    {
+        var need = _count + values.Length;
+        if (need > _data.Length)
+        {
+            var next = new T[Math.Max(need, _data.Length * 2)];
+            Array.Copy(_data, next, _count);
+            _data = next;
+        }
+        values.CopyTo(_data.AsSpan(_count));
+        Volatile.Write(ref _count, need);
+    }
+
     public void Truncate(int n)
     {
         if (n < _count) Volatile.Write(ref _count, n);

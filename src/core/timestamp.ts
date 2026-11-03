@@ -21,10 +21,12 @@ const EPOCH = /(\d{10}|\d{13})(?:\.(\d{1,9}))?(?!\d)/y;
 const isD = (c: number) => c >= 48 && c <= 57;
 const d2 = (s: string, i: number) => (s.charCodeAt(i) - 48) * 10 + s.charCodeAt(i + 1) - 48;
 
+const ISO_DIGITS = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+
 /** Hand-rolled parser for the most common shape, "YYYY-MM-DD[T ]HH:MM:SS[.fff][tz]" (~5x faster than the regex). */
 function fastIso(s: string, at: number): TimestampMatch | null {
   if (s.length < at + 19) return null;
-  for (const i of [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]) if (!isD(s.charCodeAt(at + i))) return null;
+  for (const i of ISO_DIGITS) if (!isD(s.charCodeAt(at + i))) return null;
   const sep = s.charCodeAt(at + 4);
   if ((sep !== 45 && sep !== 47 && sep !== 46) || s.charCodeAt(at + 7) !== sep) return null;
   const tc = s.charCodeAt(at + 10);
