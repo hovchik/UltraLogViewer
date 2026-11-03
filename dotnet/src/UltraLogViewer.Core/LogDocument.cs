@@ -706,25 +706,25 @@ public sealed class LogDocument : IDisposable
 
     // ----------------------------------------------------------------- overview
 
-    public int[] LevelCounts()
+    public int[] LevelCounts() => Totals().LevelCounts;
+
+    public (long Min, long Max)? TimeRange() => Totals().Range;
+
+    /// <summary>Level counts and time range over all sources (each source keeps them up to date incrementally).</summary>
+    private (int[] LevelCounts, (long Min, long Max)? Range) Totals()
     {
         var counts = new int[LevelNames.Count];
-        foreach (var s in _sources)
-            foreach (var l in s.Levels) counts[l]++;
-        return counts;
-    }
-
-    public (long Min, long Max)? TimeRange()
-    {
         long lo = long.MaxValue, hi = long.MinValue;
-        foreach (var s in _sources)
-            foreach (var t in s.Times)
-            {
-                if (t == Timestamps.None) continue;
-                if (t < lo) lo = t;
-                if (t > hi) hi = t;
-            }
-        return lo <= hi ? (lo, hi) : null;
+        FileSource[] sources;
+        lock (_sources) sources = [.. _sources];
+        foreach (var s in sources)
+        {
+            var (c, min, max) = s.Stats();
+            for (var i = 0; i < counts.Length; i++) counts[i] += c[i];
+            lo = Math.Min(lo, min);
+            hi = Math.Max(hi, max);
+        }
+        return (counts, lo <= hi ? (lo, hi) : null);
     }
 
     /// <summary>Per-bucket flags over the view rows for the overview ruler: bit 1 = warning, bit 2 = error/fatal.</summary>
@@ -787,10 +787,10 @@ public sealed class LogDocument : IDisposable
 
     public DocInfo Info()
     {
-        var range = TimeRange();
+        var (levelCounts, range) = Totals();
         var cols = _sources.Count > 0 ? _sources[0].Format.Columns.ToList() : [];
         if (Merged && cols.Count > 0) cols.Insert(0, new ColumnDef("__source", "Source", 110));
-        return new DocInfo(BaseCount, ViewCount, LevelCounts(), Indexing, Progress, range?.Min, range?.Max, Merged,
+        return new DocInfo(BaseCount, ViewCount, levelCounts, Indexing, Progress, range?.Min, range?.Max, Merged,
             _sources.Select(s => s.Info()).ToList(), cols);
     }
 

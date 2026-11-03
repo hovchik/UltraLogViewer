@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -36,6 +37,19 @@ public abstract class LogFormat
     /// Returns null when the format needs a string (the caller then uses <see cref="Scan"/>).
     /// </summary>
     public virtual bool? ScanSpan(ReadOnlySpan<char> line, out QuickInfo info)
+    {
+        info = default;
+        return null;
+    }
+
+    /// <summary>True when <see cref="ScanUtf8"/> is implemented, so indexing can skip decoding the file to UTF-16.</summary>
+    public virtual bool HasUtf8Scan => false;
+
+    /// <summary>
+    /// <see cref="Scan"/> on the raw UTF-8 bytes of a line. Returns null when the line needs the string path
+    /// (the caller then decodes it and uses <see cref="Scan"/>).
+    /// </summary>
+    public virtual bool? ScanUtf8(ReadOnlySpan<byte> line, out QuickInfo info)
     {
         info = default;
         return null;
@@ -271,6 +285,109 @@ public sealed class JsonFormat : LogFormat
         if (TryJson(line) is not JsonElement o) return new QuickInfo(Levels.Detect(line), Timestamps.None);
         return new QuickInfo(LevelOf(Pick(o, LevelKeys)), TimeOf(Pick(o, TimeKeys)));
     }
+
+    public override bool HasUtf8Scan => true;
+
+    /// <summary>
+    /// Same answer as <see cref="Quick"/> without building a DOM: one forward pass of a <see cref="Utf8JsonReader"/>
+    /// over the line's bytes that keeps the best-ranked time and level property, ranked the way <see cref="PickNamed"/>
+    /// picks them (exact key in list order, then a case-insensitive match in document order, then dotted paths).
+    /// Lines that are not a valid JSON object go back to the string path.
+    /// </summary>
+    public override bool? ScanUtf8(ReadOnlySpan<byte> line, out QuickInfo info)
+    {
+        info = default;
+        var i = 0;
+        while (i < line.Length && line[i] is (byte)' ' or (byte)'\t') i++;
+        if (i == line.Length || line[i] != '{') return null;
+        var timeRank = int.MaxValue;
+        var levelRank = int.MaxValue;
+        var time = Timestamps.None;
+        var level = Level.None;
+        try
+        {
+            var r = new Utf8JsonReader(line);
+            if (!r.Read() || r.TokenType != JsonTokenType.StartObject) return null;
+            Span<char> name = stackalloc char[64];
+            var order = 0;
+            while (r.Read() && r.TokenType == JsonTokenType.PropertyName)
+            {
+                order++;
+                var len = r.HasValueSequence || r.ValueSpan.Length > 64 ? -1 : r.CopyString(name);
+                if (!r.Read()) return null;
+                if (len > 0)
+                {
+                    var n = name[..len];
+                    var tr = Rank(n, TimeKeys, order);
+                    if (tr < timeRank)
+                    {
+                        timeRank = tr;
+                        time = TimeValue(ref r);
+                    }
+                    var lr = Rank(n, LevelKeys, order);
+                    if (lr < levelRank)
+                    {
+                        levelRank = lr;
+                        level = LevelValue(ref r);
+                    }
+                    if (r.TokenType == JsonTokenType.StartObject && n is "log")
+                    {
+                        // "log": { "level": ... } matches the dotted key log.level
+                        var depth = r.CurrentDepth;
+                        while (r.Read() && !(r.TokenType == JsonTokenType.EndObject && r.CurrentDepth == depth))
+                        {
+                            if (r.TokenType != JsonTokenType.PropertyName || r.CurrentDepth != depth + 1) continue;
+                            var isLevel = r.ValueTextEquals("level"u8);
+                            if (!r.Read()) return null;
+                            var rank = 1000 + Array.IndexOf(LevelKeys, "log.level");
+                            if (isLevel && rank < levelRank)
+                            {
+                                levelRank = rank;
+                                level = LevelValue(ref r);
+                            }
+                            r.Skip();
+                        }
+                        continue;
+                    }
+                }
+                r.Skip();
+            }
+            if (r.TokenType != JsonTokenType.EndObject || r.CurrentDepth != 0) return null;
+            if (r.Read()) return null; // trailing content: not a single JSON value
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        info = new QuickInfo(level, time);
+        return true;
+    }
+
+    /// <summary>Rank of a property name for a key list: lower is preferred, int.MaxValue = no match.</summary>
+    private static int Rank(ReadOnlySpan<char> name, string[] keys, int order)
+    {
+        for (var k = 0; k < keys.Length; k++)
+            if (name.SequenceEqual(keys[k])) return k;
+        Span<char> lower = stackalloc char[name.Length];
+        name.ToLowerInvariant(lower);
+        foreach (var k in keys)
+            if (lower.SequenceEqual(k)) return 100 + order;
+        return int.MaxValue;
+    }
+
+    private static long TimeValue(ref Utf8JsonReader r) => r.TokenType switch
+    {
+        JsonTokenType.Number => r.TryGetDouble(out var d) ? Timestamps.FromNumber(d) : Timestamps.None,
+        JsonTokenType.String => Timestamps.Parse(r.GetString()),
+        _ => Timestamps.None,
+    };
+
+    private static Level LevelValue(ref Utf8JsonReader r) => r.TokenType switch
+    {
+        JsonTokenType.Number => r.TryGetInt64(out var n) ? Levels.FromNumber(n) : Levels.Parse(Encoding.UTF8.GetString(r.ValueSpan)),
+        JsonTokenType.String => Levels.Parse(r.GetString()),
+        _ => Level.None,
+    };
 
     public override Dictionary<string, string> Parse(string entry)
     {
