@@ -37,6 +37,10 @@ public sealed class DocumentTab : IDisposable
     public bool Follow { get; set; }
     public string FormatId { get; set; } = "";
     public string Encoding { get; set; } = "auto";
+    /// <summary>The time window this tab was opened with (null: the whole file).</summary>
+    public OpenWindow? Window { get; set; }
+    /// <summary>Only part of a file is shown (a time window): line numbers are relative and bookmarks are not saved.</summary>
+    public bool IsPartial => Info.Sources.Any(s => s.Partial);
     public double? BusyProgress { get; set; }
     public string BusyLabel { get; set; } = "";
     public bool Ready { get; set; }

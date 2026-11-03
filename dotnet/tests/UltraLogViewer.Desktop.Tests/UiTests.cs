@@ -604,4 +604,71 @@ public sealed class UiTests : IDisposable
         Assert.Equal("no structure here", Pretty.Entry("no structure here"));
         Assert.Equal("broken {json", Pretty.Entry("broken {json"));
     }
+
+    [AvaloniaFact]
+    public async Task Opens_a_time_window_with_a_partial_banner_and_loads_the_whole_file()
+    {
+        var (w, _) = NewWindow();
+        var path = Sample("window.log", 4000); // one entry every 2 s from 10:00
+        var t0 = new DateTimeOffset(new DateTime(2024, 3, 1, 10, 0, 0, DateTimeKind.Local)).ToUnixTimeMilliseconds();
+        await w.OpenPaths([path], false, new OpenWindow(t0 + 600_000, t0 + 1_200_000));
+        var tab = w.ActiveTab!;
+        await Until(() => tab.Ready);
+        Assert.Equal(301, tab.Info.Total);
+        Assert.True(tab.IsPartial);
+        Assert.Equal("Showing 2024-03-01 10:10–10:20 · partial file", w.PartialBannerForTest);
+        Assert.Contains("partial", Sidebar.SourcesText(tab));
+        // A filter survives loading the whole file.
+        tab.Filter.Levels[(int)Level.Info] = false;
+        await w.ApplyFilterAsync(tab);
+        await w.LoadWholeFile();
+        tab = w.ActiveTab!;
+        await Until(() => tab.Ready);
+        Assert.Equal(4000, tab.Info.Total);
+        Assert.False(tab.IsPartial);
+        Assert.Equal("", w.PartialBannerForTest);
+        Assert.False(tab.Filter.Levels[(int)Level.Info]);
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Open last"));
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Open time range"));
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Clear index cache"));
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Reopens_big_files_from_the_index_cache_and_opens_zips_merged()
+    {
+        var (w, settings) = NewWindow();
+        var path = Sample("big.log", 20_000); // over the 1 MB cache threshold
+        var tab = await Open(w, path);
+        Assert.Equal("", tab.Info.Sources[0].CacheState);
+        await tab.Doc.Sources[0].CacheSave!;
+        w.CloseTab(tab);
+        tab = await Open(w, path);
+        Assert.Equal("hit", tab.Info.Sources[0].CacheState);
+        Assert.Contains("cached index", Sidebar.SourcesText(tab));
+        Assert.Equal(20_000, tab.Info.Total);
+        Assert.True(Directory.Exists(settings.IndexCacheDir));
+
+        var zip = Path.Combine(_dir, "bundle.zip");
+        using (var z = System.IO.Compression.ZipFile.Open(zip, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(z, Sample("a.log", 50), "a.log");
+            System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(z, Sample("b.log", 50, startSecond: 1), "nested/b.log");
+        }
+        tab = await Open(w, zip);
+        Assert.True(tab.Info.Merged);
+        Assert.Equal(100, tab.Info.Total);
+        Assert.Equal(["a.log", "b.log"], tab.Info.Sources.Select(s => s.DisplayName));
+        Assert.Equal("zip", tab.Info.Sources[1].Compression);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Sources_list_shows_per_file_progress()
+    {
+        var s = new SourceInfo(0, "/x/a.log", "a.log", 2048, 10, 9, "Timestamped text", "utf-8", false, true, Indexing: true, Progress: 0.42);
+        Assert.StartsWith("a.log\nIndexing 42", Sidebar.SourceText(s));
+        Assert.DoesNotContain("Indexing", Sidebar.SourceText(s with { Indexing = false, Progress = 1 }));
+        Assert.Contains("bzip2", Sidebar.SourceText(s with { Compression = "bzip2", Compressed = true, Live = false }));
+    }
 }
