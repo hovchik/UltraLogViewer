@@ -705,5 +705,129 @@
    "other=thing",
    "level=3"
   ]
+ },
+ {
+  "name": "syslog with PRI (network capture)",
+  "id": "syslog",
+  "lines": [
+   "<38>Oct  3 04:05:06 myhost sshd[123]: Accepted password for bob",
+   "<35>Oct  3 04:05:07 myhost sshd[124]: Failed password for root",
+   "<191>Oct  3 04:05:08 myhost kernel: debug noise"
+  ],
+  "entries": 3,
+  "levels": [
+   "INFO",
+   "ERROR",
+   "DEBUG"
+  ],
+  "times": [
+   "2024-10-03T04:05:06",
+   "2024-10-03T04:05:07",
+   "2024-10-03T04:05:08"
+  ],
+  "fields": [
+   {
+    "entry": 1,
+    "host": "myhost",
+    "app": "sshd",
+    "pid": "124",
+    "facility": "auth",
+    "severity": "err",
+    "message": "Failed password for root"
+   },
+   {
+    "entry": 2,
+    "facility": "local7",
+    "severity": "debug",
+    "app": "kernel"
+   }
+  ]
+ },
+ {
+  "name": "RFC 5424 as the syslog receiver writes it",
+  "id": "syslog5424",
+  "lines": [
+   "<34>1 2024-05-01T10:00:00.000+00:00 mymachine su 230 - - 'su root' failed for lonvick",
+   "<165>1 2024-05-01T10:00:01.003Z web evntslog - ID47 [exampleSDID@32473 iut=\"3\" eventSource=\"App\\\"lication\"][meta@1 seq=\"9\"] An application event",
+   "<13>1 2024-05-01T10:00:02.000Z 10.0.0.9 - - - - no header at all"
+  ],
+  "entries": 3,
+  "levels": [
+   "FATAL",
+   "INFO",
+   "INFO"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.000Z",
+   "2024-05-01T10:00:01.003Z",
+   "2024-05-01T10:00:02.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "facility": "auth",
+    "severity": "crit",
+    "app": "su",
+    "pid": "230",
+    "message": "'su root' failed for lonvick"
+   },
+   {
+    "entry": 1,
+    "msgid": "ID47",
+    "exampleSDID@32473.iut": "3",
+    "exampleSDID@32473.eventSource": "App\"lication",
+    "meta@1.seq": "9",
+    "message": "An application event",
+    "facility": "local4",
+    "severity": "notice"
+   },
+   {
+    "entry": 2,
+    "host": "10.0.0.9",
+    "app": "",
+    "facility": "user",
+    "message": "no header at all"
+   }
+  ]
+ },
+ {
+  "name": "Windows event log export",
+  "id": "winevent",
+  "lines": [
+   "{\"time\":\"2024-05-01T10:00:00.1234567Z\",\"level\":\"Error\",\"provider\":\"Application Error\",\"eventId\":\"1000\",\"channel\":\"Application\",\"computer\":\"WS-042\",\"recordId\":\"48211\",\"message\":\"Faulting application name: shop.exe\",\"data\":{\"Data1\":\"shop.exe\"}}",
+   "{\"time\":\"2024-05-01T10:01:00.0000000Z\",\"level\":\"Warning\",\"provider\":\"Microsoft-Windows-Security-Auditing\",\"eventId\":\"4625\",\"channel\":\"Security\",\"computer\":\"DC-01\",\"recordId\":\"230117\",\"keywords\":\"Audit Failure\",\"message\":\"An account failed to log on.\",\"data\":{\"TargetUserName\":\"administrator\"}}",
+   "{\"time\":\"2024-05-01T10:02:00.2500000Z\",\"level\":\"Information\",\"provider\":\"Microsoft-Windows-Eventlog\",\"eventId\":\"104\",\"channel\":\"System\",\"computer\":\"WS-042\",\"recordId\":\"91703\",\"message\":\"\",\"data\":{\"SubjectUserName\":\"jdoe\"}}"
+  ],
+  "entries": 3,
+  "levels": [
+   "ERROR",
+   "WARN",
+   "INFO"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.123Z",
+   "2024-05-01T10:01:00.000Z",
+   "2024-05-01T10:02:00.250Z"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "provider": "Application Error",
+    "eventId": "1000",
+    "computer": "WS-042",
+    "channel": "Application",
+    "data.Data1": "shop.exe"
+   },
+   {
+    "entry": 1,
+    "keywords": "Audit Failure",
+    "data.TargetUserName": "administrator",
+    "message": "An account failed to log on."
+   },
+   {
+    "entry": 2,
+    "message": "SubjectUserName=jdoe"
+   }
+  ]
  }
 ]

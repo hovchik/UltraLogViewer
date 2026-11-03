@@ -37,6 +37,15 @@ const api = {
   aiSend: (id: number, prompt: { system: string; user: string }): Promise<{ ok: boolean; text?: string; error?: string; cancelled?: boolean }> =>
     ipcRenderer.invoke('ai:send', id, prompt),
   aiAbort: (id: number) => ipcRenderer.invoke('ai:abort', id),
+  /** Network receivers and Windows event log exports (main process): each writes a capture file the renderer opens as a tab. */
+  receiverStart: (o: { protocol: string; bind: string; port: number; maxMessage: number; capMb: number }): Promise<{ id?: number; path?: string; endpoint?: string; port?: number; error?: string }> =>
+    ipcRenderer.invoke('receiver:start', o),
+  eventLogStart: (channel: string, from: number | null, until: number | null, follow: boolean, capMb: number): Promise<{ id?: number; path?: string; error?: string }> =>
+    ipcRenderer.invoke('eventlog:start', channel, from, until, follow, capMb),
+  eventLogFirst: (id: number): Promise<string | null> => ipcRenderer.invoke('eventlog:first', id),
+  captureStatus: (ids: number[]): Promise<Record<number, { status: string; running: boolean }>> => ipcRenderer.invoke('capture:status', ids),
+  captureStop: (id: number, forget = false): Promise<void> => ipcRenderer.invoke('capture:stop', id, forget),
+  receiversDir: (): Promise<string> => ipcRenderer.invoke('receivers:dir'),
   platform: process.platform,
 };
 

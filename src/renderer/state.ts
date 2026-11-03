@@ -39,6 +39,8 @@ export interface FilterPreset {
 }
 
 export interface Settings {
+  /** The last choices in the Listen… dialog. */
+  receiver?: import('./receivers').ReceiverSettings;
   theme?: 'light' | 'dark' | 'system';
   highlights?: HighlightRule[];
   presets?: FilterPreset[];
@@ -197,6 +199,10 @@ export interface Tab {
   copy?: number;
   /** Column choices of this tab alone (duplicates and split panes, not saved); absent: the per-format settings. */
   columns?: { extra: string[]; order: string[]; hidden: string[] };
+  /** The receiver or event log writing this tab's capture file (main process id); stopped when the tab closes. */
+  capture?: { id: number; status: string; running: boolean };
+  /** Detect the format again once the (empty when opened) capture has lines. */
+  detectOnData?: boolean;
   /** Settings to apply once the tab's document is ready (workspace load). */
   pending?: {
     bookmarks: { path: string; line: number; note: string }[];

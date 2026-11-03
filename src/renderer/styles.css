@@ -497,3 +497,7 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .remote-list .item.dir { font-weight: 600; }
 .remote-list .item:hover { background: var(--accent-bg); }
 .remote-list .item.on { background: var(--accent); color: #fff; }
+
+/* receivers: the live line at the top of the Sources list */
+.sec .capture { display: flex; gap: 8px; align-items: flex-start; padding: 3px 0 8px; font-size: 12px; line-height: 1.45; }
+.sec .capture .capture-status { flex: 1; white-space: pre-line; overflow-wrap: anywhere; }
