@@ -38,7 +38,7 @@ export interface FilterSpec {
   /** Indexed by Level; false hides that level. */
   levels: boolean[];
   rules: FilterRule[];
-  /** Quick-filter query (see parseQuery), AND-ed with everything else. */
+  /** Quick-filter query (see parseQueryExpr), AND-ed with everything else. */
   query?: string;
   queryCaseSensitive?: boolean;
   timeFrom?: number | null;
@@ -86,6 +86,17 @@ export interface SourceInfo {
   encoding: string;
   compressed: boolean;
   live: boolean;
+  /** 'gzip', 'bzip2', 'zip' or '' for a plain file. */
+  compression?: string;
+  /** This file is still being indexed (each file of a merge reports its own progress, 0..1). */
+  indexing?: boolean;
+  progress?: number;
+  /** Only a time window was opened (windowFrom..windowTo, either may be open). */
+  partial?: boolean;
+  windowFrom?: number | null;
+  windowTo?: number | null;
+  /** 'hit' or 'grown' when the index came from the index cache. */
+  cacheState?: string;
 }
 
 export interface DocInfo {

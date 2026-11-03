@@ -131,7 +131,7 @@ public class QueryTests
     [Fact]
     public void HandlesAndOrNotPhrasesRegexAndFields()
     {
-        Assert.Equal(2, Query.Parse("a OR b -c").Count);
+        Assert.Equal("(and (or \"a\" \"b\") (not \"c\"))", Query.Describe(Query.ParseExpr("a OR b -c")));
         var q = Query.CompileQuery("timeout OR refused -retry logger:Db");
         Func<string, string> F(string logger) => k => k == "logger" ? logger : "";
         Assert.True(q("query timeout", F("com.acme.Db")));
@@ -242,20 +242,17 @@ public class FileSourceTests
     [Fact]
     public void QuotedFieldValuesAndAutocompleteTokens()
     {
-        var t = Query.Parse("logger:\"com.acme Db\" -thread:\"worker 1\" http.status:5");
-        Assert.Equal(3, t.Count);
-        Assert.Equal(("logger", "com.acme Db", false), (t[0].Any[0].Field, t[0].Any[0].Pattern.Text, t[0].Negate));
-        Assert.Equal(("thread", "worker 1", true), (t[1].Any[0].Field, t[1].Any[0].Pattern.Text, t[1].Negate));
-        Assert.Equal("http.status", t[2].Any[0].Field);
-        Assert.Equal("re", Query.Parse("-/re/")[0].Any[0].Pattern.Text);
-        Assert.Single(Query.Parse("error logger:")); // a field name being typed is ignored
+        Assert.Equal("(and logger:\"com.acme Db\" (not thread:\"worker 1\") http.status:\"5\")",
+            Query.Describe(Query.ParseExpr("logger:\"com.acme Db\" -thread:\"worker 1\" http.status:5")));
+        Assert.Equal("(not /re/)", Query.Describe(Query.ParseExpr("-/re/")));
+        Assert.Equal("\"error\"", Query.Describe(Query.ParseExpr("error logger:"))); // a field name being typed is ignored
 
         Assert.Equal((6, 9), Query.TokenAt("error logger:Db", 15));
         Assert.Equal((6, 10), Query.TokenAt("error level:\"a b", 16));
         Assert.Equal((5, 0), Query.TokenAt("abc  ", 5));
-        Assert.Equal(("-", "logger", "Db"), Query.SplitToken("-logger:Db"));
-        Assert.Equal(("", null, "plain"), Query.SplitToken("plain"));
-        Assert.Equal(("", "level", "a b"), Query.SplitToken("level:\"a b"));
+        Assert.Equal(("-", "logger", ":", "Db"), Query.SplitToken("-logger:Db"));
+        Assert.Equal(("", null, "", "plain"), Query.SplitToken("plain"));
+        Assert.Equal(("", "level", ":", "a b"), Query.SplitToken("level:\"a b"));
         Assert.Equal("logger:com.acme", Query.FieldToken("logger", "com.acme"));
         Assert.Equal("logger:\"a b\"", Query.FieldToken("logger", "a b"));
     }

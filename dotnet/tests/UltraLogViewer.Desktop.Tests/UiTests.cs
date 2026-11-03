@@ -143,6 +143,7 @@ public sealed class UiTests : IDisposable
         tab.Filter.Query = "level:error";
         await w.ApplyFilterAsync(tab);
         Assert.Equal(260 / 13, tab.Info.ViewCount);
+        Assert.Matches(@"^Filtered 260 entries in \d+[.,]\d\d s$", w.ScanCostStatusForTest);
 
         tab.Filter.Query = "";
         Array.Fill(tab.Filter.Levels, false);
@@ -151,6 +152,50 @@ public sealed class UiTests : IDisposable
         Assert.True(tab.Info.ViewCount > 0);
         var rows = tab.Doc.GetRows(0, tab.Info.ViewCount);
         Assert.All(rows, r => Assert.Equal(Level.Warn, r.Level));
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Typed_queries_report_errors_and_time_shortcuts_count_back_from_the_last_entry()
+    {
+        var (w, _) = NewWindow();
+        var tab = await Open(w, Sample("app.log", 600)); // one entry every 2 s, 20 minutes in all
+        var warns = tab.Doc.GetRows(0, 600).Count(r => r.Level == Level.Warn);
+        tab.Filter.Query = "level>=warn and not level:error";
+        await w.ApplyFilterAsync(tab);
+        Assert.Equal(warns, tab.Info.ViewCount);
+        tab.Filter.Query = "since:2024-03-01T10:19:00 (logger:Api or logger:Cache)";
+        await w.ApplyFilterAsync(tab);
+        Assert.Equal(27, tab.Info.ViewCount); // entries 570..599 without the three PaymentService errors
+
+        // A bad query is reported where quick-filter errors show, and the view keeps the last good filter.
+        var before = tab.Info.ViewCount;
+        tab.Filter.Query = "level>=loud";
+        await w.ApplyFilterAsync(tab);
+        Assert.Contains("\"loud\" is not a level", w.ToastForTest);
+        Assert.StartsWith("Quick filter: ", w.ToastForTest);
+        Assert.Equal(before, tab.Info.ViewCount);
+        tab.Filter.Query = "";
+        await w.ApplyFilterAsync(tab);
+
+        // Operators after a complete field name, and since: values.
+        Assert.Contains("level>=", w.Suggestions("level", 5).Select(s => s.Label));
+        Assert.Equal(["since:-15m", "since:-1h", "since:-24h", "since:today"], w.Suggestions("since:", 6).Select(s => s.Label));
+        Assert.Equal(["level>=error", "level>=warn"], w.Suggestions("level>=", 7).Select(s => s.Label).Where(l => l is "level>=error" or "level>=warn").Order());
+
+        // Time shortcuts: not live, so they count back from the last entry, not from the clock.
+        Button Shortcut(string label) => w.GetVisualDescendants().OfType<Button>().First(b => b.Content as string == label);
+        Assert.Contains("last entry", ToolTip.GetTip(Shortcut("-15m")) as string);
+        Shortcut("-15m").RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        await Until(() => tab.Info.ViewCount < 600 && tab.BusyProgress is null);
+        Assert.Equal(tab.Info.TimeMax - 15 * 60_000, tab.Filter.TimeFrom);
+        Assert.Null(tab.Filter.TimeTo);
+        Assert.Equal(451, tab.Info.ViewCount); // entries 149..599
+        Screenshot(w, "time-shortcuts.png");
+        Shortcut("Now").RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        await Until(() => tab.Filter.TimeTo is not null && tab.BusyProgress is null);
+        Assert.Equal(tab.Info.TimeMax, tab.Filter.TimeTo);
+        Assert.Equal(451, tab.Info.ViewCount);
         w.Close();
     }
 
@@ -207,6 +252,7 @@ public sealed class UiTests : IDisposable
         await Until(() => tab.SearchResult is not null && tab.Focus > 0);
         Assert.Equal(4000 / 13, tab.SearchResult!.Total);
         Assert.Equal(12, tab.Focus);
+        Assert.Matches(@"^Searched 4[,.\u00a0\u202f]?000 entries in \d+[.,]\d\d s$", w.ScanCostStatusForTest);
 
         tab.Bookmarks["0:25"] = new Bookmark { Key = "0:25", Line = 27, Preview = "bookmarked", Row = 25 };
         w.LogView.Select(30, center: false);
@@ -220,6 +266,8 @@ public sealed class UiTests : IDisposable
         w.KeyPressQwerty(PhysicalKey.Enter, RawInputModifiers.None);
         await Until(() => tab.Info.ViewCount < 4000 && tab.BusyProgress is null);
         Assert.Equal(4000 / 13 + 528, tab.Info.ViewCount);
+        // The search that runs again over the new view keeps the filter's cost on show.
+        await Until(() => w.ScanCostStatusForTest.StartsWith("Filtered 4"));
         await Until(() => w.LogView.GetCached(5) is not null);
         Screenshot(w, "dark-filtered.png");
         Avalonia.Application.Current!.RequestedThemeVariant = ThemeVariant.Light;
@@ -603,5 +651,100 @@ public sealed class UiTests : IDisposable
         Assert.StartsWith("2024-05-01 08:00:00 [main] INFO Payload\n{\n  \"items\": [", log);
         Assert.Equal("no structure here", Pretty.Entry("no structure here"));
         Assert.Equal("broken {json", Pretty.Entry("broken {json"));
+    }
+
+    [AvaloniaFact]
+    public async Task Opens_a_time_window_with_a_partial_banner_and_loads_the_whole_file()
+    {
+        var (w, _) = NewWindow();
+        var path = Sample("window.log", 4000); // one entry every 2 s from 10:00
+        var t0 = new DateTimeOffset(new DateTime(2024, 3, 1, 10, 0, 0, DateTimeKind.Local)).ToUnixTimeMilliseconds();
+        await w.OpenPaths([path], false, new OpenWindow(t0 + 600_000, t0 + 1_200_000));
+        var tab = w.ActiveTab!;
+        await Until(() => tab.Ready);
+        Assert.Equal(301, tab.Info.Total);
+        Assert.True(tab.IsPartial);
+        Assert.Equal("Showing 2024-03-01 10:10–10:20 · partial file", w.PartialBannerForTest);
+        Assert.Contains("partial", Sidebar.SourcesText(tab));
+        // A filter survives loading the whole file.
+        tab.Filter.Levels[(int)Level.Info] = false;
+        await w.ApplyFilterAsync(tab);
+        await w.LoadWholeFile();
+        tab = w.ActiveTab!;
+        await Until(() => tab.Ready);
+        Assert.Equal(4000, tab.Info.Total);
+        Assert.False(tab.IsPartial);
+        Assert.Equal("", w.PartialBannerForTest);
+        Assert.False(tab.Filter.Levels[(int)Level.Info]);
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Open last"));
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Open time range"));
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Clear index cache"));
+        w.Close();
+    }
+
+    private static void SetQuery(MainWindow w, DocumentTab tab, string query)
+    {
+        w.SetQuickFilterText(query);
+        tab.Filter.Query = query;
+    }
+
+    [AvaloniaFact]
+    public async Task A_superseded_filter_leaves_the_newer_one_its_progress()
+    {
+        var (w, _) = NewWindow();
+        var tab = await Open(w, Sample("slow.log", 200_000));
+        // Through the quick filter box too, so its debounce does not later "commit" an empty box over the query.
+        SetQuery(w, tab, "/Handled request \\d+3 for/");
+        var first = w.ApplyFilterAsync(tab);
+        await Until(() => tab.BusyLabel == "Filtering");
+        SetQuery(w, tab, "/Handled request \\d+7 for/");
+        var second = w.ApplyFilterAsync(tab);
+        await first; // returns at once: the second one superseded it
+        Assert.False(second.IsCompleted);
+        // Still filtering: the status shows the progress, and the tick shows the rows found so far.
+        Assert.Equal("Filtering", tab.BusyLabel);
+        await second;
+        Assert.Equal("", tab.BusyLabel);
+        Assert.Null(tab.BusyProgress);
+        Assert.True(tab.Info.ViewCount > 0);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Reopens_big_files_from_the_index_cache_and_opens_zips_merged()
+    {
+        var (w, settings) = NewWindow();
+        var path = Sample("big.log", 20_000); // over the 1 MB cache threshold
+        var tab = await Open(w, path);
+        Assert.Equal("", tab.Info.Sources[0].CacheState);
+        await tab.Doc.Sources[0].CacheSave!;
+        w.CloseTab(tab);
+        tab = await Open(w, path);
+        Assert.Equal("hit", tab.Info.Sources[0].CacheState);
+        Assert.Contains("cached index", Sidebar.SourcesText(tab));
+        Assert.Equal(20_000, tab.Info.Total);
+        Assert.True(Directory.Exists(settings.IndexCacheDir));
+
+        var zip = Path.Combine(_dir, "bundle.zip");
+        using (var z = System.IO.Compression.ZipFile.Open(zip, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(z, Sample("a.log", 50), "a.log");
+            System.IO.Compression.ZipFileExtensions.CreateEntryFromFile(z, Sample("b.log", 50, startSecond: 1), "nested/b.log");
+        }
+        tab = await Open(w, zip);
+        Assert.True(tab.Info.Merged);
+        Assert.Equal(100, tab.Info.Total);
+        Assert.Equal(["a.log", "b.log"], tab.Info.Sources.Select(s => s.DisplayName));
+        Assert.Equal("zip", tab.Info.Sources[1].Compression);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public void Sources_list_shows_per_file_progress()
+    {
+        var s = new SourceInfo(0, "/x/a.log", "a.log", 2048, 10, 9, "Timestamped text", "utf-8", false, true, Indexing: true, Progress: 0.42);
+        Assert.StartsWith("a.log\nIndexing 42", Sidebar.SourceText(s));
+        Assert.DoesNotContain("Indexing", Sidebar.SourceText(s with { Indexing = false, Progress = 1 }));
+        Assert.Contains("bzip2", Sidebar.SourceText(s with { Compression = "bzip2", Compressed = true, Live = false }));
     }
 }

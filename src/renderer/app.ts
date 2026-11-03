@@ -1,5 +1,5 @@
 import { FORMAT_LABELS } from '../core/formats';
-import { fieldToken, splitToken, tokenAt, validatePattern } from '../core/query';
+import { fieldToken, OPERATORS, operatorHint, splitToken, tokenAt, validatePattern, validateQuery } from '../core/query';
 import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
@@ -10,6 +10,7 @@ import { openPalette } from './palette';
 import { PatternsView } from './patternsView';
 import { Sidebar } from './sidebar';
 import type { TimeMode } from '../core/timestamp';
+import { describeWindow, OpenWindow, parseDuration, parsePoint, windowEmpty } from '../core/timeWindow';
 import { Bookmark, DEFAULT_HIGHLIGHTS, defaultFilter, HighlightRule, Settings, Tab, uid, viewSettings } from './state';
 import { baseName, dirName, parseWorkspace, resolvePath, resolveWorkspace, serializeWorkspace } from './workspace';
 import { $, ask, contextMenu, debounce, esc, fmtBytes, fmtNum, h, MenuItem, modal, toast } from './util';
@@ -134,8 +135,15 @@ function placeholderInfo(id: number, title: string): DocInfo {
 }
 
 /** Opens one tab over the given files (several = merged timeline) without activating it. */
-async function openTab(g: string[], opts: { format?: string; encoding?: string } = {}): Promise<Tab> {
-  const id = await engine.open(g, { customFormats: settings.customFormats, format: opts.format || undefined, encoding: (opts.encoding || undefined) as 'auto' | undefined });
+async function openTab(g: string[], opts: { format?: string; encoding?: string; window?: OpenWindow | null } = {}): Promise<Tab> {
+  const window = windowEmpty(opts.window) ? null : opts.window!;
+  const id = await engine.open(g, {
+    customFormats: settings.customFormats,
+    format: opts.format || undefined,
+    encoding: (opts.encoding || undefined) as 'auto' | undefined,
+    cache: settings.indexCache !== false,
+    window,
+  });
   const title = g.length === 1 ? g[0].split(/[\\/]/).pop()! : `${g[0].split(/[\\/]/).pop()} + ${g.length - 1}`;
   const tab: Tab = {
     id,
@@ -150,6 +158,7 @@ async function openTab(g: string[], opts: { format?: string; encoding?: string }
     follow: false,
     formatId: opts.format ?? '',
     encoding: opts.encoding && opts.encoding !== 'auto' ? opts.encoding : undefined,
+    window,
     expanded: new Set(),
     unfolded: new Set(),
   };
@@ -157,10 +166,11 @@ async function openTab(g: string[], opts: { format?: string; encoding?: string }
   return tab;
 }
 
-async function openPaths(paths: string[], merge: boolean) {
+/** `window`: open only this time window of the files. */
+async function openPaths(paths: string[], merge: boolean, window: OpenWindow | null = null) {
   if (!paths.length) return;
   const groups = merge ? [paths] : paths.map((p) => [p]);
-  for (const g of groups) activate(await openTab(g));
+  for (const g of groups) activate(await openTab(g, { window }));
   void ulv().addRecent(paths);
   settings.recent = [...paths, ...(settings.recent ?? []).filter((p) => !paths.includes(p))].slice(0, 15);
 }
@@ -177,6 +187,7 @@ function activate(tab: Tab | null) {
   renderPill();
   syncMenu();
   renderBanner();
+  renderPartialBanner();
   ac.close();
   if (tab) {
     void refreshOverview(tab);
@@ -239,7 +250,7 @@ function renderRecent() {
 // --------------------------------------------------------------- engine events
 
 const refreshOverviewSoon = debounce((tab: Tab) => void refreshOverview(tab), 250);
-const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false), 800);
+const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false, undefined, false), 800);
 
 window.ulv.onEvent((raw) => {
   const ev = raw as EngineEvent;
@@ -248,6 +259,10 @@ window.ulv.onEvent((raw) => {
   if (ev.type === 'progress') {
     tab.progress = ev.fraction >= 1 ? undefined : { phase: ev.phase, fraction: ev.fraction };
     if (tab === active) renderStatus();
+    return;
+  }
+  if (ev.type === 'view-partial') {
+    showPartialView(tab, ev);
     return;
   }
   if (ev.type === 'doc-error') {
@@ -283,20 +298,49 @@ window.ulv.onEvent((raw) => {
   if (!$('#sidebar').contains(document.activeElement)) sidebar.render(tab);
   renderStatus();
   renderTabs();
+  renderPartialBanner();
 });
+
+/**
+ * Rows a running filter has found so far. Within one epoch the view only gains rows at its end, so the grid keeps its
+ * cache; a new epoch (the first partial view replacing the old one) redraws it. Events of an older run are dropped.
+ */
+function showPartialView(tab: Tab, ev: Extract<EngineEvent, { type: 'view-partial' }>) {
+  if (!tab.filtering || ev.seq !== tab.filterSeq) return;
+  tab.info = ev.info;
+  const sameEpoch = tab.partialEpoch === ev.epoch;
+  tab.partialEpoch = ev.epoch;
+  if (tab !== active) return;
+  if (!sameEpoch && tab.search.result) {
+    // The hits are rows of the old view; the search runs again when the filter is done.
+    tab.search.result = null;
+    grid.refreshPatterns();
+    renderSearchCount();
+  }
+  grid.invalidate(sameEpoch);
+  renderStatus();
+}
+
+/** "Filtered 8,695,680 entries in 0.82 s": makes the cost of a scan visible after it finishes. */
+const scanCost = (verb: string, entries: number, ms: number) => `${verb} ${fmtNum(entries)} ${entries === 1 ? 'entry' : 'entries'} in ${(ms / 1000).toFixed(2)} s`;
 
 async function onDocReady(tab: Tab) {
   tab.progress = undefined;
   if (tab.pending) await applyPending(tab);
-  if (tab.paths.length === 1) {
-    const saved = settings.bookmarks?.[tab.paths[0]] ?? [];
-    for (const s of saved) {
-      const key = await engine.keyForLine(tab.id, 0, s.line);
-      if (!key) continue;
-      const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key)) ?? 0, 1);
-      tab.bookmarks.set(key, { key, line: s.line, source: 0, note: s.note, preview: firstLine(rows[0]?.fields.message || rows[0]?.text || '') });
+  // Line numbers of a partial view are not the file's: its bookmarks are neither restored nor saved.
+  // Saved per source path, so the members of a zip and the files of a merge each keep their own (as in the .NET app).
+  if (!isPartial(tab)) {
+    let restored = 0;
+    for (const [source, src] of tab.info.sources.entries()) {
+      for (const s of settings.bookmarks?.[src.path] ?? []) {
+        const key = await engine.keyForLine(tab.id, source, s.line);
+        if (!key) continue;
+        const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key)) ?? 0, 1);
+        tab.bookmarks.set(key, { key, line: s.line, source, note: s.note, preview: firstLine(rows[0]?.fields.message || rows[0]?.text || '') });
+        restored++;
+      }
     }
-    if (saved.length) await resolveBookmarkRows(tab);
+    if (restored) await resolveBookmarkRows(tab);
   }
   if (!isDefaultFilter(tab)) await applyFilter(tab);
   if (tab.search.pattern.text) void runSearch(tab, false, tab.search.pattern);
@@ -350,19 +394,26 @@ async function applyFilter(tab: Tab) {
   // Any filter change leaves "show in context" first.
   const wasContext = !!tab.contextMode;
   let info: DocInfo | null;
+  const seq = (tab.filterSeq = (tab.filterSeq ?? 0) + 1);
+  const started = performance.now();
   try {
     if (wasContext) {
       tab.contextMode = false;
       if (tab === active) renderBanner();
       await engine.setIgnoreFilter(tab.id, false);
     }
-    info = await engine.setFilter(tab.id, tab.filter);
+    tab.filtering = true;
+    tab.partialEpoch = undefined;
+    info = await engine.setFilter(tab.id, tab.filter, seq);
   } catch (e) {
     toast((e as Error).message, true);
     return;
+  } finally {
+    if (tab.filterSeq === seq) tab.filtering = false;
   }
   if (!info) return; // superseded by a newer filter
   tab.info = info;
+  tab.scanCost = isDefaultFilter(tab) ? undefined : scanCost('Filtered', info.total, performance.now() - started);
   tab.progress = undefined;
   tab.newRows = 0;
   if (tab.showPatterns) refreshPatternsSoon(tab);
@@ -380,7 +431,7 @@ async function applyFilter(tab: Tab) {
   renderStatus();
   void refreshOverview(tab);
   void updateDetail();
-  if (tab.search.pattern.text) void runSearch(tab, false);
+  if (tab.search.pattern.text) void runSearch(tab, false, undefined, false); // keep showing what the filter cost
 }
 
 // ------------------------------------------------------------------ patterns
@@ -543,6 +594,59 @@ function renderBanner() {
 }
 
 $('#ctx-exit').onclick = () => active && void setContextMode(active, false);
+
+// ------------------------------------------------------------ partial view
+
+const isPartial = (t: Tab) => t.info.sources.some((s) => s.partial);
+
+/** Text of the partial-view banner, e.g. "Showing 2024-05-01 10:00–11:00 · partial file". */
+function partialText(t: Tab): string {
+  const src = t.info.sources.filter((s) => s.partial);
+  if (!src.length) return '';
+  const i = t.info;
+  const range = i.timeMin != null && i.timeMax != null ? describeWindow(i.timeMin, i.timeMax) : `no entries in ${describeWindow(src[0].windowFrom, src[0].windowTo)}`;
+  return `Showing ${range} · ${i.sources.length > 1 ? 'partial files' : 'partial file'}${src.every((s) => s.live) ? ' · following new lines' : ''}`;
+}
+
+function renderPartialBanner() {
+  const t = active;
+  const on = !!t && !t.info.indexing && isPartial(t);
+  const el = $('#partial-banner');
+  el.classList.toggle('hidden', !on);
+  if (on) $('.msg', el).textContent = partialText(t!);
+}
+
+$('#partial-whole').onclick = () => {
+  const t = active;
+  if (!t) return;
+  t.window = null;
+  void reopen(t, t.encoding ?? 'auto');
+};
+
+/** "Open last…" (a duration back from the newest entry) or "Open time range…" (from / until). */
+async function openWindowDialog(range: boolean) {
+  const paths = await ulv().openDialog(true);
+  if (!paths.length) return;
+  let window: OpenWindow | null;
+  if (!range) {
+    const d = await ask('Open last', { value: '1h', hint: 'Show the newest entries of this long (e.g. 15m, 1h, 2d).' });
+    if (d === null) return;
+    const last = parseDuration(d);
+    if (last === null) return toast('Enter a duration such as 15m, 1h or 2d', true);
+    window = { last };
+  } else {
+    const now = Date.now();
+    const from = await ask('Open time range', { value: '-1h', hint: 'From: 2024-05-01 10:00, 10:30 or -2h (empty = the start).' });
+    if (from === null) return;
+    const until = await ask('Open time range', { value: '', placeholder: '2024-05-01 11:00', hint: 'Until (empty = the end, and keep following new lines).' });
+    if (until === null) return;
+    const since = from.trim() ? parsePoint(from, now) : null;
+    const to = until.trim() ? parsePoint(until, now) : null;
+    if ((from.trim() && since === null) || (until.trim() && to === null)) return toast('Enter a time such as 2024-05-01 10:00, 10:30 or -2h', true);
+    window = { since, until: to };
+  }
+  await openPaths(paths, paths.length > 1, windowEmpty(window) ? null : window);
+}
 
 // -------------------------------------------------------------- field stats
 
@@ -782,7 +886,7 @@ function currentPattern(): TextPattern {
 }
 
 /** Searches a tab: the search box for the active tab, else the tab's own last pattern. */
-async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab === active ? currentPattern() : tab.search.pattern) {
+async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab === active ? currentPattern() : tab.search.pattern, showCost = true) {
   tab.search.pattern = pattern;
   const err = pattern.text ? validatePattern(pattern) : null;
   if (tab === active) searchInput.parentElement!.classList.toggle('error', !!err);
@@ -793,9 +897,11 @@ async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab ===
     renderSearchCount();
     return;
   }
+  const started = performance.now();
   const result = await engine.search(tab.id, pattern);
   if (result.cancelled || tab.search.pattern !== pattern) return;
   tab.search.result = result;
+  if (showCost) tab.scanCost = scanCost('Searched', tab.info.total, performance.now() - started);
   tab.progress = undefined;
   const idx = result.rows.findIndex((r) => r >= tab.focus);
   tab.search.current = idx < 0 ? 0 : idx;
@@ -886,6 +992,9 @@ $('#s-filter').onclick = () => {
 /** Applies the quick-filter box (no-op when unchanged). */
 function commitQuick() {
   if (!active || (active.filter.query ?? '') === quickInput.value) return;
+  // A bad query is reported and the view keeps the last good filter.
+  const err = validateQuery(quickInput.value, !!active.filter.queryCaseSensitive);
+  if (err) return toast(`Quick filter: ${err}`, true);
   active.filter.query = quickInput.value;
   void applyFilter(active);
 }
@@ -910,49 +1019,63 @@ function quickSuggestions(): Suggestion[] {
   if (!text.trim()) return (settings.queryHistory ?? []).map((q) => ({ label: q, accept: () => pick(q) }));
   if (!t) return [];
   const [start, len] = tokenAt(text, quickInput.selectionStart ?? text.length);
-  const [prefix, field, value] = splitToken(text.slice(start, start + len));
+  const token = text.slice(start, start + len);
+  const [prefix, field, op, value] = splitToken(token);
   const replace = (with_: string) => {
     quickInput.value = text.slice(0, start) + with_ + text.slice(start + len);
     const caret = start + with_.length;
     quickInput.setSelectionRange(caret, caret);
   };
+  /** A suggestion that completes the token: `commit` applies the query, otherwise the list moves on. */
+  const item = (label: string, hint: string | undefined, with_: string, commit: boolean): Suggestion => ({
+    label,
+    hint,
+    accept: () => {
+      replace(with_);
+      if (!commit) return ac.update();
+      ac.close();
+      commitQuick();
+      saveHistory(quickInput.value);
+    },
+  });
   const stats = t.fieldStats?.fields ?? [];
-  if (field !== null) {
+  const isTime = op === ':' && (field?.toLowerCase() === 'since' || field?.toLowerCase() === 'until');
+  if (field !== null && !isTime) {
     const lk = field.toLowerCase();
     const values: [string, number][] =
       lk === 'level'
-        ? LEVEL_NAMES.map((n, i): [string, number] => [n, t.info.levelCounts[i] ?? 0]).filter(([, c], i) => i > 0 && c > 0)
+        ? LEVEL_NAMES.map((n, i): [string, number] => [n.toLowerCase(), t.info.levelCounts[i] ?? 0]).filter(([, c], i) => i > 0 && c > 0)
         : stats.find((f) => f.key.toLowerCase() === lk)?.top ?? [];
     const needle = value.toLowerCase();
     return values
       .filter(([v]) => v.toLowerCase().includes(needle))
       .slice(0, 10)
-      .map(([v, c]) => ({
-        label: v,
-        hint: fmtNum(c),
-        accept: () => {
-          replace(prefix + fieldToken(field, v) + ' ');
-          ac.close();
-          commitQuick();
-          saveHistory(quickInput.value);
-        },
-      }));
+      .map(([v, c]) => item(prefix + fieldToken(field, v, op), fmtNum(c), prefix + fieldToken(field, v, op) + ' ', true));
+  }
+  // since:/until: offer relative times.
+  if (field !== null) return ['-15m', '-1h', '-24h', 'today'].filter((r) => r.startsWith(value.toLowerCase())).map((r) => item(`${prefix}${field}:${r}`, 'time', `${prefix}${field}:${r} `, true));
+  const keys = [...new Map(['level', ...stats.map((f) => f.key)].map((k) => [k.toLowerCase(), k])).values()];
+  if (/^exists\(/i.test(value)) {
+    const part = value.slice(7).replace(/\)+$/, '').toLowerCase();
+    return keys
+      .filter((k) => k.toLowerCase().startsWith(part))
+      .slice(0, 10)
+      .map((k) => item(`${prefix}exists(${k})`, 'has field', `${prefix}exists(${k}) `, true));
   }
   if (!value) return [];
   const needle = value.toLowerCase();
-  const names = [...new Set([...stats.map((f) => f.key), 'level'])].filter((k) => k.toLowerCase().startsWith(needle));
-  return names.map((k) => ({
-    label: `${k}:`,
-    accept: () => {
-      replace(prefix + k + ':');
-      ac.update(); // straight on to the values
-    },
-  }));
+  const exact = keys.find((k) => k.toLowerCase() === needle);
+  // A complete field name: offer the operators.
+  if (exact) return [...OPERATORS.map((o) => item(prefix + exact + o, operatorHint(o), prefix + exact + o, false)), item(`${prefix}exists(${exact})`, 'has field', `${prefix}exists(${exact}) `, true)];
+  const out = keys.filter((k) => k.toLowerCase().startsWith(needle)).slice(0, 10).map((k) => item(`${prefix}${k}:`, 'field', `${prefix}${k}:`, false));
+  for (const kw of ['since:', 'until:', 'exists('])
+    if (kw.startsWith(needle) && out.length < 10) out.push(item(prefix + kw, kw === 'exists(' ? 'has field' : 'time', prefix + kw, false));
+  return out;
 }
 
 const ac = new Autocomplete($('#quick-ac'), quickSuggestions);
 
-// A bare `field:` still being typed filters nothing (see parseQuery), so committing as you type is safe.
+// A bare `field:` still being typed filters nothing (see parseQueryExpr), so committing as you type is safe.
 const quickSoon = debounce(() => commitQuick(), 300);
 quickInput.addEventListener('input', () => {
   quickSoon();
@@ -999,11 +1122,13 @@ const firstLine = (s: string) => {
 };
 
 function persistBookmarks(tab: Tab) {
-  if (tab.paths.length !== 1) return;
-  settings.bookmarks ??= {};
-  const list = [...tab.bookmarks.values()].map((b) => ({ line: b.line, note: b.note }));
-  if (list.length) settings.bookmarks[tab.paths[0]] = list;
-  else delete settings.bookmarks[tab.paths[0]];
+  if (isPartial(tab)) return;
+  const bookmarks = (settings.bookmarks ??= {});
+  for (const [source, src] of tab.info.sources.entries()) {
+    const list = [...tab.bookmarks.values()].filter((b) => b.source === source).sort((a, b) => a.line - b.line).map((b) => ({ line: b.line, note: b.note }));
+    if (list.length) bookmarks[src.path] = list;
+    else delete bookmarks[src.path];
+  }
   saveSettings();
 }
 
@@ -1188,7 +1313,10 @@ async function applyPending(tab: Tab) {
     else saveSettings();
   }
   for (const b of p.bookmarks) {
-    const source = Math.max(0, tab.paths.indexOf(b.path));
+    // Saved paths are source paths (a zip member is `archive.zip::member`); a single-file tab takes older entries too.
+    let source = tab.info.sources.findIndex((src) => src.path === b.path);
+    if (source < 0) source = tab.info.sources.length === 1 ? 0 : tab.paths.indexOf(b.path);
+    if (source < 0) continue;
     const key = await engine.keyForLine(tab.id, source, b.line);
     if (!key) continue;
     const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key, true)) ?? 0, 1);
@@ -1333,7 +1461,7 @@ function renderStatus() {
   if (busy) {
     const label = { index: 'Indexing', filter: 'Filtering', search: 'Searching', export: 'Exporting' }[busy.phase] ?? busy.phase;
     parts.push(`<span>${label} ${Math.round(busy.fraction * 100)}%</span><span class="prog"><i style="width:${(busy.fraction * 100).toFixed(1)}%"></i></span>`);
-  }
+  } else if (t.scanCost) parts.push(`<span class="scan-cost muted">${esc(t.scanCost)}</span>`);
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);
@@ -1451,7 +1579,8 @@ function applyTheme() {
 function renderFormatOptions() {
   formatSel.innerHTML = '';
   formatSel.append(h('option', { value: '' }, 'Format: auto'));
-  for (const id of ['timestamped', 'json', 'syslog', 'syslog5424', 'access', 'logcat', 'plain']) formatSel.append(h('option', { value: id }, FORMAT_LABELS[id]));
+  for (const id of ['timestamped', 'json', 'syslog', 'syslog5424', 'access', 'logcat', 'logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel', 'plain'])
+    formatSel.append(h('option', { value: id }, FORMAT_LABELS[id]));
   for (const c of settings.customFormats ?? []) formatSel.append(h('option', { value: `custom:${c.name}` }, `Custom: ${c.name}`));
   formatSel.append(h('option', { value: '__new' }, '+ Custom format…'));
   formatSel.value = active?.formatId ?? '';
@@ -1614,6 +1743,8 @@ async function reopen(t: Tab, encoding: string) {
     encoding: encoding as 'auto',
     format: t.formatId || undefined,
     customFormats: settings.customFormats,
+    cache: settings.indexCache !== false,
+    window: t.window ?? null,
   });
   t.info = placeholderInfo(t.id, t.info.title);
   t.search.result = null;
@@ -1632,7 +1763,7 @@ function showHelp() {
     ['Ctrl+O / Ctrl+Shift+O', 'Open files / open and merge into one timeline'],
     ['Ctrl+F, /', 'Find'],
     ['Enter, F3, n / Shift+Enter, Shift+F3, N', 'Next / previous match'],
-    ['Ctrl+L', 'Quick filter (words, a OR b, -word, level:error, logger:Db, "phrase", /regex/)'],
+    ['Ctrl+L', 'Quick filter (syntax below)'],
     ['e / E', 'Next / previous error'],
     ['w / W', 'Next / previous warning'],
     ['Ctrl+B, b, double-click', 'Toggle bookmark'],
@@ -1654,14 +1785,39 @@ function showHelp() {
     ['Ctrl+Alt+S', 'Save workspace'],
     ['Timeline: click / drag', 'Jump to time / filter to a time range'],
   ];
+  // The quick-filter syntax, shown under the shortcuts.
+  const syntax: [string, string][] = [
+    ['error timeout', 'Entries containing both words'],
+    ['a OR b, a | b', 'Either; OR binds tighter than AND, so a b OR c means a and (b or c)'],
+    ['-word, NOT word', 'Without the word'],
+    ['(a or b) and not c', 'and / or / not in any case, with parentheses'],
+    ['"exact phrase", /regex/', 'A phrase or a regular expression'],
+    ['logger:Db, level:error', 'A parsed field contains the value (field:"two words", field:/re/)'],
+    ['status>=500, status!=200', 'Compare a field: > >= < <= == != (numbers numerically, other values as text)'],
+    ['duration>2s', 'Durations with ms, s, m or h; a bare number is read in the unit you typed'],
+    ['level>=warn', 'Levels compare by severity'],
+    ['user in (alice,bob)', 'The field equals one of the values'],
+    ['exists(traceId), env?=prod', 'The field is present / equals the value or is missing'],
+    ['since:-3h, until:-10m', 'Relative to now; also since:2024-05-01T10:00, since:today'],
+  ];
   modal((box, close) => {
-    const table = h('table', { class: 'keys' });
-    for (const [k, d] of keys) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td><kbd>${esc(k)}</kbd></td><td>${esc(d)}</td>`;
-      table.append(tr);
-    }
-    box.append(h('h2', {}, 'Keyboard shortcuts'), table, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: close }, 'Close')));
+    const table = (rows: [string, string][]) => {
+      const t = h('table', { class: 'keys' });
+      for (const [k, d] of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><kbd>${esc(k)}</kbd></td><td>${esc(d)}</td>`;
+        t.append(tr);
+      }
+      return t;
+    };
+    box.classList.add('help');
+    box.append(
+      h('h2', {}, 'Keyboard shortcuts'),
+      table(keys),
+      h('h2', { class: 'sub' }, 'Quick filter'),
+      table(syntax),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: close }, 'Close')),
+    );
   });
 }
 
@@ -1694,6 +1850,18 @@ window.ulv.onMenu((cmd, ...args) => {
       return void openDialog(true);
     case 'open-path':
       return void openPaths([String(args[0])], false);
+    case 'open-window':
+      return void openPaths((args[0] as string[]) ?? [], false, (args[1] as OpenWindow) ?? null);
+    case 'open-last':
+      return void openWindowDialog(false);
+    case 'open-range':
+      return void openWindowDialog(true);
+    case 'toggle-index-cache':
+      settings.indexCache = settings.indexCache === false;
+      saveSettings();
+      return toast(settings.indexCache ? 'Indexes of big files are saved, so they reopen instantly' : 'Index cache turned off');
+    case 'clear-index-cache':
+      return void engine.clearIndexCache().then((n) => toast(`Index cache cleared (${fmtBytes(n)})`));
     case 'export':
       return void exportView();
     case 'close-tab':
@@ -1828,8 +1996,15 @@ async function init() {
   applyLayout();
   renderFormatOptions();
   activate(null);
+  const startup = await ulv().startupOptions();
+  if (startup.errors.length) toast(startup.errors.join('\n'), true);
   const files = await ulv().startupFiles();
-  if (files.length) await openPaths(files, false);
+  if (files.length) await openPaths(files, false, startup.window);
+  // Piped input is the last startup file: follow it like a tail.
+  if (startup.stdin && active && files.length) {
+    active.follow = true;
+    renderToolbar();
+  }
   // test hook: lets automated UI tests drive the app without native dialogs
   (window as unknown as Record<string, unknown>).__ulv = { openPaths, saveWorkspace, openWorkspace, state: () => ({ tabs, active }) };
 }

@@ -3,7 +3,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { displayName, expandArchives } from '../core/archives';
 import { LogDocument } from '../core/document';
+import { clearCache } from '../core/indexCache';
+import { OpenWindow } from '../core/timeWindow';
 import { ScanPool } from '../core/scanPool';
 import { Encoding } from '../core/fileSource';
 import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
@@ -12,14 +15,22 @@ export interface OpenOptions {
   encoding?: Encoding;
   format?: string;
   customFormats?: CustomFormat[];
+  /** Use the index cache (when the engine has a cache folder). */
+  cache?: boolean;
+  cacheMaxBytes?: number;
+  /** Open only this time window of the files. */
+  window?: OpenWindow | null;
 }
 
 export type EngineEvent =
   | { type: 'doc-updated'; docId: number; info: DocInfo; reset: boolean }
   | { type: 'doc-error'; docId: number; message: string }
-  | { type: 'progress'; docId: number; phase: string; fraction: number };
+  | { type: 'progress'; docId: number; phase: string; fraction: number }
+  /** Rows a running filter has found so far (`seq` as passed to setFilter); see LogDocument.viewEpoch. */
+  | { type: 'view-partial'; docId: number; info: DocInfo; epoch: number; seq: number };
 
 const POLL_MS = 500;
+const PROGRESS_MS = 50;
 
 export class Engine {
   private docs = new Map<number, LogDocument>();
@@ -29,11 +40,25 @@ export class Engine {
   private patternsGen = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  private progressAt = new Map<string, number>();
   /** Scans big files on all cores; absent when the worker script is not built next to this file (unit tests). */
   private scanPool = fs.existsSync(path.join(__dirname, 'scanWorker.js')) ? new ScanPool(path.join(__dirname, 'scanWorker.js')) : undefined;
 
-  constructor(private emit: (e: EngineEvent) => void) {
+  /** `cacheDir`: where the index cache lives (the app's user-data folder); none turns the cache off. */
+  constructor(private emit: (e: EngineEvent) => void, private cacheDir?: string) {
     this.timer = setInterval(() => void this.poll(), POLL_MS);
+  }
+
+  /**
+   * Progress events, at most every 50 ms per document and phase (and always the last one): a scan on all cores
+   * reports a thousand batches a second, and redrawing the status bar for each would take CPU from the scan.
+   */
+  private progress(docId: number, phase: string, fraction: number) {
+    const key = `${docId}:${phase}`;
+    const now = Date.now();
+    if (fraction < 1 && now - (this.progressAt.get(key) ?? 0) < PROGRESS_MS) return;
+    this.progressAt.set(key, now);
+    this.emit({ type: 'progress', docId, phase, fraction });
   }
 
   private doc(id: number): LogDocument {
@@ -48,31 +73,40 @@ export class Engine {
     const title = paths.length === 1 ? path.basename(paths[0]) : `${path.basename(paths[0])} + ${paths.length - 1} more`;
     const doc = new LogDocument(id, title);
     this.docs.set(id, doc);
+    const { cache, cacheMaxBytes, ...rest } = opts;
+    const sourceOpts = { ...rest, scanPool: this.scanPool, cacheDir: cache && this.cacheDir ? this.cacheDir : undefined, cacheMaxBytes };
     void (async () => {
       let last = 0;
-      for (const p of paths) {
-        try {
-          await doc.addSource(p, { ...opts, scanPool: this.scanPool }, (phase, fraction) => {
-            this.emit({ type: 'progress', docId: id, phase, fraction });
-            const now = Date.now();
-            if (now - last > 250 && phase === 'index') {
-              last = now;
-              this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: false });
-            }
-          });
-        } catch (e) {
-          this.emit({ type: 'doc-error', docId: id, message: `${path.basename(p)}: ${(e as Error).message}` });
-        }
-        if (!this.docs.has(id)) return;
+      try {
+        // A zip opens as its text members, merged; all files of a merge are indexed in parallel.
+        const failed = await doc.addSources(expandArchives(paths), () => sourceOpts, (phase, fraction) => {
+          this.progress(id, phase, fraction);
+          const now = Date.now();
+          if (now - last > 250 && phase === 'index') {
+            last = now;
+            this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: false });
+          }
+        });
+        // A document closed while loading: its files "failed" because they were closed.
+        if (this.docs.has(id)) for (const f of failed.slice(0, 3)) this.emit({ type: 'doc-error', docId: id, message: `${displayName(f.path)}: ${f.error.message}` });
+      } catch (e) {
+        this.emit({ type: 'doc-error', docId: id, message: `${path.basename(paths[0])}: ${(e as Error).message}` });
       }
+      if (!this.docs.has(id)) return;
       this.emit({ type: 'doc-updated', docId: id, info: doc.info(), reset: true });
     })();
     return id;
   }
 
+  /** Deletes the saved indexes; returns the bytes freed. */
+  clearIndexCache(): number {
+    return this.cacheDir ? clearCache(this.cacheDir) : 0;
+  }
+
   close(docId: number) {
     this.docs.get(docId)?.close();
     this.docs.delete(docId);
+    for (const k of this.progressAt.keys()) if (k.startsWith(`${docId}:`)) this.progressAt.delete(k);
   }
 
   info(docId: number): DocInfo {
@@ -83,9 +117,18 @@ export class Engine {
     return this.doc(docId).getRows(start, count);
   }
 
-  async setFilter(docId: number, spec: FilterSpec | null): Promise<DocInfo | null> {
+  /** Applies a filter; while it runs, the rows found so far are pushed as `view-partial` events tagged with `seq`. */
+  async setFilter(docId: number, spec: FilterSpec | null, seq = 0): Promise<DocInfo | null> {
     const d = this.doc(docId);
-    const ok = await d.applyFilter(spec, false, (phase, fraction) => this.emit({ type: 'progress', docId, phase, fraction }));
+    let epoch = d.viewEpoch;
+    let count = d.viewCount();
+    const ok = await d.applyFilter(spec, false, (phase, fraction) => {
+      this.progress(docId, phase, fraction);
+      if (d.viewEpoch === epoch && d.viewCount() === count) return;
+      epoch = d.viewEpoch;
+      count = d.viewCount();
+      this.emit({ type: 'view-partial', docId, info: d.info(), epoch, seq });
+    });
     return ok ? d.info() : null;
   }
 
@@ -94,7 +137,7 @@ export class Engine {
     this.searchGen.set(docId, gen);
     return this.doc(docId).search(
       pattern,
-      (phase, fraction) => this.emit({ type: 'progress', docId, phase, fraction }),
+      (phase, fraction) => this.progress(docId, phase, fraction),
       () => this.searchGen.get(docId) !== gen,
     );
   }
@@ -139,7 +182,7 @@ export class Engine {
     return this.doc(docId).overview(buckets);
   }
   async exportView(docId: number, file: string, format: 'text' | 'csv' | 'jsonl') {
-    return this.doc(docId).export(file, format, (phase, fraction) => this.emit({ type: 'progress', docId, phase, fraction }));
+    return this.doc(docId).export(file, format, (phase, fraction) => this.progress(docId, phase, fraction));
   }
   async reformat(docId: number, formatId: string | undefined, customFormats?: CustomFormat[]) {
     const d = this.doc(docId);

@@ -1,0 +1,709 @@
+[
+ {
+  "name": "PostgreSQL, default %m [%p] prefix and Debian's %q%u@%d",
+  "id": "postgres",
+  "lines": [
+   "2024-05-01 10:00:00.123 UTC [12345] LOG:  database system is ready to accept connections",
+   "2024-05-01 10:00:05.456 UTC [12350] app@shop ERROR:  duplicate key value violates unique constraint \"orders_pkey\"",
+   "2024-05-01 10:00:05.456 UTC [12350] app@shop DETAIL:  Key (id)=(42) already exists.",
+   "2024-05-01 10:00:05.456 UTC [12350] app@shop STATEMENT:  INSERT INTO orders (id, total)",
+   "\tVALUES (42, 9.99);",
+   "2024-05-01 10:00:07.000 UTC [12351] app@shop LOG:  duration: 1532.118 ms  statement: SELECT * FROM orders",
+   "2024-05-01 10:00:09.000 UTC [12352] WARNING:  there is no transaction in progress",
+   "2024-05-01 10:01:00.000 UTC [12360] FATAL:  password authentication failed for user \"bob\"",
+   "2024-05-01 10:01:01.000 UTC [12361] DEBUG2:  autovacuum: processing database \"shop\""
+  ],
+  "entries": 6,
+  "levels": [
+   "INFO",
+   "ERROR",
+   "INFO",
+   "WARN",
+   "FATAL",
+   "DEBUG"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.123Z",
+   "2024-05-01T10:00:05.456Z",
+   "2024-05-01T10:00:07.000Z",
+   "2024-05-01T10:00:09.000Z",
+   "2024-05-01T10:01:00.000Z",
+   "2024-05-01T10:01:01.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 1,
+    "pid": "12350",
+    "user": "app",
+    "db": "shop",
+    "severity": "ERROR",
+    "message": "duplicate key value violates unique constraint \"orders_pkey\"\n2024-05-01 10:00:05.456 UTC [12350] app@shop DETAIL:  Key (id)=(42) already exists.\n2024-05-01 10:00:05.456 UTC [12350] app@shop STATEMENT:  INSERT INTO orders (id, total)\n\tVALUES (42, 9.99);"
+   },
+   {
+    "entry": 2,
+    "duration": "1532.118 ms"
+   },
+   {
+    "entry": 0,
+    "pid": "12345",
+    "user": "",
+    "time": "2024-05-01 10:00:00.123 UTC"
+   }
+  ]
+ },
+ {
+  "name": "PostgreSQL, pgBadger prefix",
+  "id": "postgres",
+  "lines": [
+   "2024-05-01 10:00:00 UTC [12345]: [3-1] user=app,db=shop,app=psql,client=10.0.0.5 LOG:  connection authorized: user=app database=shop",
+   "2024-05-01 10:00:02 UTC [12345]: [4-1] user=app,db=shop,app=psql,client=10.0.0.5 ERROR:  relation \"ordrs\" does not exist at character 15",
+   "2024-05-01 10:00:02 UTC [12345]: [5-1] user=app,db=shop,app=psql,client=10.0.0.5 STATEMENT:  SELECT * FROM ordrs;"
+  ],
+  "entries": 2,
+  "levels": [
+   "INFO",
+   "ERROR"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.000Z",
+   "2024-05-01T10:00:02.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "user": "app",
+    "db": "shop",
+    "app": "psql",
+    "client": "10.0.0.5"
+   }
+  ]
+ },
+ {
+  "name": "MySQL 8 error log",
+  "id": "mysql-error",
+  "lines": [
+   "2024-05-01T10:00:00.123456Z 0 [System] [MY-010116] [Server] /usr/sbin/mysqld (mysqld 8.0.36) starting as process 1",
+   "2024-05-01T10:00:00.234567Z 1 [System] [MY-013576] [InnoDB] InnoDB initialization has started.",
+   "2024-05-01T10:00:01.345678Z 0 [Warning] [MY-010068] [Server] CA certificate ca.pem is self signed.",
+   "2024-05-01T10:00:02.456789Z 0 [ERROR] [MY-010262] [Server] Can't start server: Bind on TCP/IP port: Address already in use",
+   "2024-05-01T10:00:02.567890Z 0 [ERROR] [MY-010257] [Server] Do you already have another mysqld server running on port: 3306 ?"
+  ],
+  "entries": 5,
+  "levels": [
+   "INFO",
+   "INFO",
+   "WARN",
+   "ERROR",
+   "ERROR"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.123Z",
+   "2024-05-01T10:00:00.234Z",
+   "2024-05-01T10:00:01.345Z",
+   "2024-05-01T10:00:02.456Z",
+   "2024-05-01T10:00:02.567Z"
+  ],
+  "fields": [
+   {
+    "entry": 2,
+    "thread": "0",
+    "code": "MY-010068",
+    "subsystem": "Server",
+    "message": "CA certificate ca.pem is self signed."
+   }
+  ]
+ },
+ {
+  "name": "MySQL 5.7 error log",
+  "id": "mysql-error",
+  "lines": [
+   "2024-05-01T10:00:00.123456Z 0 [Note] InnoDB: Buffer pool(s) load completed at 240501 10:00:00",
+   "2024-05-01T10:00:00.200000Z 0 [Warning] Changed limits: max_open_files: 1024 (requested 5000)",
+   "2024-05-01T10:00:01.000000Z 2 [Note] Aborted connection 2 to db: 'shop' user: 'app' host: '10.0.0.5' (Got timeout reading communication packets)"
+  ],
+  "entries": 3,
+  "levels": [
+   "INFO",
+   "WARN",
+   "INFO"
+  ],
+  "fields": [
+   {
+    "entry": 1,
+    "code": "",
+    "message": "Changed limits: max_open_files: 1024 (requested 5000)"
+   }
+  ]
+ },
+ {
+  "name": "MySQL general log",
+  "id": "mysql-general",
+  "lines": [
+   "/usr/sbin/mysqld, Version: 8.0.36 (MySQL Community Server - GPL). started with:",
+   "Tcp port: 3306  Unix socket: /var/run/mysqld/mysqld.sock",
+   "Time                 Id Command    Argument",
+   "2024-05-01T10:00:00.123456Z\t    8 Connect\troot@localhost on shop using Socket",
+   "2024-05-01T10:00:00.223456Z\t    8 Query\tSELECT @@version_comment LIMIT 1",
+   "2024-05-01T10:00:01.000000Z\t    8 Query\tSELECT *",
+   "FROM orders",
+   "WHERE id = 42",
+   "2024-05-01T10:00:02.000000Z\t    9 Connect\tAccess denied for user 'bob'@'localhost' (using password: YES)",
+   "2024-05-01T10:00:03.000000Z\t    8 Quit\t"
+  ],
+  "entries": 8,
+  "levels": [
+   "",
+   "",
+   "",
+   "INFO",
+   "INFO",
+   "INFO",
+   "WARN",
+   "INFO"
+  ],
+  "fields": [
+   {
+    "entry": 5,
+    "id": "8",
+    "command": "Query",
+    "message": "SELECT *\nFROM orders\nWHERE id = 42"
+   },
+   {
+    "entry": 7,
+    "command": "Quit",
+    "message": ""
+   }
+  ]
+ },
+ {
+  "name": "MySQL slow query log",
+  "id": "mysql-slow",
+  "lines": [
+   "/usr/sbin/mysqld, Version: 8.0.36 (MySQL Community Server - GPL). started with:",
+   "Tcp port: 3306  Unix socket: /var/run/mysqld/mysqld.sock",
+   "Time                 Id Command    Argument",
+   "# Time: 2024-05-01T10:00:05.123456Z",
+   "# User@Host: app[app] @ localhost []  Id:     8",
+   "# Query_time: 2.500123  Lock_time: 0.000010 Rows_sent: 1  Rows_examined: 100000",
+   "use shop;",
+   "SET timestamp=1714557605;",
+   "SELECT * FROM orders WHERE status = 'new';",
+   "# Time: 2024-05-01T10:00:09.000001Z",
+   "# User@Host: report[report] @ db-client.internal [10.0.0.7]  Id:    11",
+   "# Query_time: 0.731000  Lock_time: 0.000100 Rows_sent: 12  Rows_examined: 5400",
+   "SET timestamp=1714557609;",
+   "SELECT customer_id, SUM(total)",
+   "FROM orders",
+   "GROUP BY customer_id;"
+  ],
+  "entries": 5,
+  "levels": [
+   "",
+   "",
+   "",
+   "INFO",
+   "INFO"
+  ],
+  "times": [
+   null,
+   null,
+   null,
+   "2024-05-01T10:00:05.123Z",
+   "2024-05-01T10:00:09.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 3,
+    "query_time": "2.500123",
+    "lock_time": "0.000010",
+    "rows_sent": "1",
+    "rows_examined": "100000",
+    "user": "app",
+    "host": "localhost",
+    "id": "8",
+    "db": "shop",
+    "message": "SELECT * FROM orders WHERE status = 'new';"
+   },
+   {
+    "entry": 4,
+    "user": "report",
+    "host": "db-client.internal",
+    "query_time": "0.731000",
+    "db": "",
+    "message": "SELECT customer_id, SUM(total)\nFROM orders\nGROUP BY customer_id;"
+   }
+  ]
+ },
+ {
+  "name": "MariaDB slow query log",
+  "id": "mysql-slow",
+  "lines": [
+   "# Time: 240501 10:00:05",
+   "# User@Host: app[app] @ localhost []",
+   "# Thread_id: 8  Schema: shop  QC_hit: No",
+   "# Query_time: 1.250000  Lock_time: 0.000050  Rows_sent: 3  Rows_examined: 9000",
+   "SET timestamp=1714557605;",
+   "SELECT * FROM orders ORDER BY created DESC LIMIT 3;"
+  ],
+  "entries": 1,
+  "levels": [
+   "INFO"
+  ],
+  "times": [
+   "2024-05-01T10:00:05"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "db": "shop",
+    "thread_id": "8",
+    "query_time": "1.250000",
+    "message": "SELECT * FROM orders ORDER BY created DESC LIMIT 3;"
+   }
+  ]
+ },
+ {
+  "name": "MongoDB 4.4+ JSON",
+  "id": "mongodb",
+  "lines": [
+   "{\"t\":{\"$date\":\"2024-05-01T10:00:00.123+00:00\"},\"s\":\"I\",  \"c\":\"NETWORK\",  \"id\":22943,   \"ctx\":\"listener\",\"msg\":\"Connection accepted\",\"attr\":{\"remote\":\"127.0.0.1:53712\",\"connectionId\":12,\"connectionCount\":3}}",
+   "{\"t\":{\"$date\":\"2024-05-01T10:00:01.500+00:00\"},\"s\":\"W\",  \"c\":\"COMMAND\",  \"id\":51803,   \"ctx\":\"conn12\",\"msg\":\"Slow query\",\"attr\":{\"type\":\"command\",\"ns\":\"shop.orders\",\"durationMillis\":1532}}",
+   "{\"t\":{\"$date\":\"2024-05-01T10:00:02.000+00:00\"},\"s\":\"E\",  \"c\":\"STORAGE\",  \"id\":22435,   \"ctx\":\"WTCheckpointThread\",\"msg\":\"WiredTiger error\",\"attr\":{\"error\":28,\"message\":\"No space left on device\"}}",
+   "{\"t\":{\"$date\":\"2024-05-01T10:00:03.000+00:00\"},\"s\":\"D2\", \"c\":\"QUERY\",    \"id\":20967,   \"ctx\":\"conn12\",\"msg\":\"Beginning planning\"}",
+   "{\"t\":{\"$date\":\"2024-05-01T10:00:03.500+00:00\"},\"s\":\"D1\", \"c\":\"REPL\",     \"id\":21401,   \"ctx\":\"conn12\",\"msg\":\"Taking snapshot\"}",
+   "{\"t\":{\"$date\":\"2024-05-01T10:00:04.000+00:00\"},\"s\":\"F\",  \"c\":\"CONTROL\",  \"id\":23089,   \"ctx\":\"main\",\"msg\":\"Fatal assertion\",\"attr\":{\"msgid\":40507,\"file\":\"src/mongo/db/repl/oplog.cpp\",\"line\":123}}"
+  ],
+  "entries": 6,
+  "levels": [
+   "INFO",
+   "WARN",
+   "ERROR",
+   "TRACE",
+   "DEBUG",
+   "FATAL"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.123Z",
+   "2024-05-01T10:00:01.500Z",
+   "2024-05-01T10:00:02.000Z",
+   "2024-05-01T10:00:03.000Z",
+   "2024-05-01T10:00:03.500Z",
+   "2024-05-01T10:00:04.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 1,
+    "time": "2024-05-01T10:00:01.500+00:00",
+    "component": "COMMAND",
+    "ctx": "conn12",
+    "id": "51803",
+    "message": "Slow query",
+    "attr.ns": "shop.orders",
+    "attr.durationMillis": "1532"
+   }
+  ]
+ },
+ {
+  "name": "Rust tracing fmt",
+  "id": "rust",
+  "lines": [
+   "2024-05-01T10:00:00.123456Z  INFO my_app::server: listening on 0.0.0.0:8080",
+   "2024-05-01T10:00:01.000001Z DEBUG request{method=GET uri=/orders/42}: my_app::handlers: loading order order_id=42",
+   "2024-05-01T10:00:01.250000Z  WARN request{method=GET uri=/orders/42}:db{pool=\"main\"}: sqlx::query: slow statement elapsed=1.25s rows=1",
+   "2024-05-01T10:00:02.000000Z ERROR my_app::worker: job failed error=\"connection reset by peer\" attempt=3",
+   "thread 'tokio-runtime-worker' panicked at src/worker.rs:88:14:",
+   "called `Result::unwrap()` on an `Err` value",
+   "2024-05-01T10:00:03.000000Z TRACE hyper::proto::h1::conn: flushed 120 bytes",
+   "2024-05-01T10:00:04.000000Z  INFO main: ready"
+  ],
+  "entries": 6,
+  "levels": [
+   "INFO",
+   "DEBUG",
+   "WARN",
+   "ERROR",
+   "TRACE",
+   "INFO"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.123Z",
+   "2024-05-01T10:00:01.000Z",
+   "2024-05-01T10:00:01.250Z",
+   "2024-05-01T10:00:02.000Z",
+   "2024-05-01T10:00:03.000Z",
+   "2024-05-01T10:00:04.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "target": "my_app::server",
+    "spans": "",
+    "message": "listening on 0.0.0.0:8080"
+   },
+   {
+    "entry": 2,
+    "target": "sqlx::query",
+    "spans": "request{method=GET uri=/orders/42}:db{pool=\"main\"}",
+    "message": "slow statement elapsed=1.25s rows=1",
+    "method": "GET",
+    "uri": "/orders/42",
+    "pool": "main",
+    "elapsed": "1.25s",
+    "rows": "1"
+   },
+   {
+    "entry": 3,
+    "error": "connection reset by peer",
+    "attempt": "3"
+   },
+   {
+    "entry": 5,
+    "target": "main",
+    "message": "ready"
+   }
+  ]
+ },
+ {
+  "name": "macOS unified log (log show)",
+  "id": "macos",
+  "lines": [
+   "Filtering the log data using \"process == \"WindowServer\"\"",
+   "Timestamp                       Thread     Type        Activity             PID    TTL  ",
+   "2024-05-01 10:00:00.123456+0200 0x1a2b3c   Default     0x0                  155    0    WindowServer: (SkyLight) [com.apple.SkyLight:default] Display 1 configured",
+   "2024-05-01 10:00:01.234567+0200 0x1a2b3d   Error       0x0                  155    0    WindowServer: (CoreDisplay) [com.apple.CoreDisplay:Display] Failed to get display mode",
+   "2024-05-01 10:00:02.000000+0200 0x1a2b3e   Fault       0x5f1                420    0    Google Chrome Helper: (libxpc.dylib) [com.apple.xpc:connection] connection invalidated",
+   "2024-05-01 10:00:03.000000+0200 0x1a2b3f   Info        0x0                  0      0    kernel: (AppleACPIPlatform) ACPI: sleep states S3 S4 S5",
+   "2024-05-01 10:00:04.000000+0200 0x1a2b40   Debug       0x0                  88     0    locationd: [com.apple.locationd:Core] updating location"
+  ],
+  "entries": 7,
+  "levels": [
+   "",
+   "",
+   "INFO",
+   "ERROR",
+   "FATAL",
+   "INFO",
+   "DEBUG"
+  ],
+  "times": [
+   null,
+   null,
+   "2024-05-01T08:00:00.123Z",
+   "2024-05-01T08:00:01.234Z",
+   "2024-05-01T08:00:02.000Z",
+   "2024-05-01T08:00:03.000Z",
+   "2024-05-01T08:00:04.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 4,
+    "process": "Google Chrome Helper",
+    "pid": "420",
+    "library": "libxpc.dylib",
+    "subsystem": "com.apple.xpc",
+    "category": "connection",
+    "message": "connection invalidated",
+    "thread": "0x1a2b3e",
+    "activity": "0x5f1"
+   },
+   {
+    "entry": 5,
+    "process": "kernel",
+    "subsystem": "",
+    "message": "ACPI: sleep states S3 S4 S5"
+   },
+   {
+    "entry": 6,
+    "process": "locationd",
+    "subsystem": "com.apple.locationd",
+    "category": "Core",
+    "message": "updating location"
+   }
+  ]
+ },
+ {
+  "name": "Laravel",
+  "id": "laravel",
+  "lines": [
+   "[2024-05-01 10:00:00] local.INFO: User logged in {\"user_id\":42} []",
+   "[2024-05-01 10:00:05] production.ERROR: SQLSTATE[23000]: Integrity constraint violation {\"userId\":42,\"exception\":\"[object] (Illuminate\\\\Database\\\\QueryException(code: 23000): SQLSTATE[23000] at /var/www/vendor/laravel/framework/src/Illuminate/Database/Connection.php:760)",
+   "[stacktrace]",
+   "#0 /var/www/vendor/laravel/framework/src/Illuminate/Database/Connection.php(720): Illuminate\\\\Database\\\\Connection->runQueryCallback()",
+   "#1 {main}",
+   "\"} []",
+   "[2024-05-01 10:00:06] production.WARNING: Cache miss for key orders:42",
+   "[2024-05-01 10:00:07] production.CRITICAL: Queue worker died",
+   "[2024-05-01 10:00:08] production.NOTICE: Scheduled task finished"
+  ],
+  "entries": 5,
+  "levels": [
+   "INFO",
+   "ERROR",
+   "WARN",
+   "FATAL",
+   "INFO"
+  ],
+  "times": [
+   "2024-05-01T10:00:00",
+   "2024-05-01T10:00:05",
+   "2024-05-01T10:00:06",
+   "2024-05-01T10:00:07",
+   "2024-05-01T10:00:08"
+  ],
+  "fields": [
+   {
+    "entry": 1,
+    "channel": "production",
+    "exception": "Illuminate\\Database\\QueryException",
+    "code": "23000"
+   },
+   {
+    "entry": 2,
+    "channel": "production",
+    "message": "Cache miss for key orders:42"
+   }
+  ]
+ },
+ {
+  "name": "logfmt (Go kit style)",
+  "id": "logfmt",
+  "lines": [
+   "ts=2024-05-01T10:00:00.123Z level=info caller=main.go:42 msg=\"server started\" addr=:8080",
+   "ts=2024-05-01T10:00:01.000Z level=warn logger=db msg=\"slow query\" duration=1.5s query=\"SELECT * FROM orders WHERE note = \\\"x\\\"\"",
+   "ts=2024-05-01T10:00:02.000Z level=error msg=\"request failed\" status=503 path=/api/orders err=\"upstream timeout\""
+  ],
+  "entries": 3,
+  "levels": [
+   "INFO",
+   "WARN",
+   "ERROR"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.123Z",
+   "2024-05-01T10:00:01.000Z",
+   "2024-05-01T10:00:02.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "message": "server started",
+    "caller": "main.go:42",
+    "addr": ":8080",
+    "logger": ""
+   },
+   {
+    "entry": 1,
+    "logger": "db",
+    "duration": "1.5s",
+    "query": "SELECT * FROM orders WHERE note = \"x\""
+   },
+   {
+    "entry": 2,
+    "status": "503",
+    "err": "upstream timeout"
+   }
+  ]
+ },
+ {
+  "name": "logfmt (logrus and Grafana)",
+  "id": "logfmt",
+  "lines": [
+   "time=\"2024-05-01T10:00:00Z\" level=info msg=\"Started API\" component=api",
+   "t=2024-05-01T10:00:01+0000 lvl=eror msg=\"Failed to send alert\" logger=alerting error=\"dial tcp: timeout\""
+  ],
+  "entries": 2,
+  "levels": [
+   "INFO",
+   "ERROR"
+  ],
+  "times": [
+   "2024-05-01T10:00:00.000Z",
+   "2024-05-01T10:00:01.000Z"
+  ],
+  "fields": [
+   {
+    "entry": 0,
+    "logger": "api",
+    "message": "Started API"
+   },
+   {
+    "entry": 1,
+    "logger": "alerting",
+    "error": "dial tcp: timeout"
+   }
+  ]
+ },
+ {
+  "name": "log4j",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01 10:00:00,001 [main] INFO  com.acme.App - Starting app",
+   "2024-05-01 10:00:03,004 [worker-2] ERROR com.acme.Db - Query failed",
+   "java.sql.SQLException: timeout",
+   "\tat com.acme.Db.query(Db.java:42)"
+  ]
+ },
+ {
+  "name": "NLog pipes",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01 10:00:00.1234|WARN|Acme.Service|Low disk"
+  ]
+ },
+ {
+  "name": "Spring Boot",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01T10:00:00.123Z ERROR 1234 --- [worker-1] c.a.Service : boom",
+   "2024-05-01T10:00:01.123Z  INFO 1234 --- [main] c.a.App : started"
+  ]
+ },
+ {
+  "name": "Python logging",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01 10:00:00,123 - myapp.db - WARNING - slow query",
+   "2024-05-01 10:00:01,123 - myapp - INFO - done"
+  ]
+ },
+ {
+  "name": "Serilog text",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01 10:00:00.123 +02:00 [INF] Starting up",
+   "2024-05-01 10:00:01.456 +02:00 [ERR] Unhandled exception"
+  ]
+ },
+ {
+  "name": "ISO timestamp with level and logger",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01T10:00:00Z INFO main: started",
+   "2024-05-01T10:00:01Z WARN main: low disk"
+  ]
+ },
+ {
+  "name": "generated ts-1g.log",
+  "id": "timestamped",
+  "lines": [
+   "2024-05-01 08:00:00,069 [scheduler-1] INFO  com.acme.auth.TokenService - Payload {\"orderId\":1,\"items\":[{\"sku\":\"A-1\",\"qty\":2}],\"total\":0.1}",
+   "2024-05-01 08:00:00,151 [main] INFO  com.acme.db.ConnectionPool - GET /api/orders/2 completed in 2 ms"
+  ]
+ },
+ {
+  "name": "messy text",
+  "id": "timestamped",
+  "lines": [
+   "garbage header line",
+   "second junk",
+   "2024-05-01 10:00:00,000 [t0] UBER com.x - msg 0",
+   "2024-05-01 10:00:01,001 [t1] WARN com.x - msg 1",
+   "2024-05-01 10:00:02,002 [t2] WARN com.x - msg 2"
+  ]
+ },
+ {
+  "name": "JSON lines",
+  "id": "json",
+  "lines": [
+   "{\"@timestamp\":\"2024-05-01T10:00:00Z\",\"level\":\"error\",\"message\":\"x\",\"logger\":\"a\"}"
+  ]
+ },
+ {
+  "name": "generated json-500m.log",
+  "id": "json",
+  "lines": [
+   "{\"@timestamp\": \"2024-05-01T08:00:00.017Z\", \"level\": \"TRACE\", \"logger\": \"com.acme.svc1\", \"message\": \"GET /api/orders/1 completed in 1 ms\", \"http\": {\"status\": 201, \"path\": \"/api/x/1\"}, \"traceId\": \"00000000000000000000000000000001\"}"
+  ]
+ },
+ {
+  "name": "pino",
+  "id": "json",
+  "lines": [
+   "{\"level\":30,\"time\":1714550400123,\"pid\":1,\"hostname\":\"h\",\"msg\":\"pino\"}"
+  ]
+ },
+ {
+  "name": "Serilog compact JSON",
+  "id": "json",
+  "lines": [
+   "{\"@t\":\"2024-03-01T10:00:00Z\",\"@l\":\"Error\",\"@m\":\"GET /api/0 took 0ms\",\"RequestPath\":\"/api/0\",\"StatusCode\":500}"
+  ]
+ },
+ {
+  "name": "JSON with a t field",
+  "id": "json",
+  "lines": [
+   "{\"t\":\"2024-05-01T10:00:00Z\",\"s\":\"x\",\"msg\":\"not mongo\"}"
+  ]
+ },
+ {
+  "name": "access log",
+  "id": "access",
+  "lines": [
+   "127.0.0.1 - frank [10/Oct/2023:13:55:36 -0700] \"GET /a.gif HTTP/1.0\" 500 2326 \"-\" \"curl\""
+  ]
+ },
+ {
+  "name": "syslog",
+  "id": "syslog",
+  "lines": [
+   "Oct  3 04:05:06 myhost sshd[123]: Accepted password"
+  ]
+ },
+ {
+  "name": "syslog with key=value message",
+  "id": "syslog",
+  "lines": [
+   "Oct  3 04:05:06 myhost app[1]: level=info msg=\"started\" ts=1",
+   "Oct  3 04:05:07 myhost app[1]: level=warn msg=\"slow\""
+  ]
+ },
+ {
+  "name": "RFC 5424",
+  "id": "syslog5424",
+  "lines": [
+   "<165>1 2003-10-11T22:14:15.003Z mymachine evntslog - ID47 [exampleSDID@32473 iut=\"3\"] An application event"
+  ]
+ },
+ {
+  "name": "logcat",
+  "id": "logcat",
+  "lines": [
+   "10-14 12:00:00.123  1234  5678 E ActivityManager: crash"
+  ]
+ },
+ {
+  "name": "W3C",
+  "id": "w3c",
+  "lines": [
+   "#Software: IIS",
+   "#Fields: date time cs-method cs-uri-stem sc-status",
+   "2024-05-01 10:00:00 GET /x 404"
+  ]
+ },
+ {
+  "name": "plain",
+  "id": "plain",
+  "lines": [
+   "hello",
+   "world"
+  ]
+ },
+ {
+  "name": "generated plain-500m.log (key=value inside text)",
+  "id": "plain",
+  "lines": [
+   "worker-1 processed batch 1 ok items=1 took=1ms some extra payload text here to pad the line out",
+   "worker-3 processed batch 3 error: failed items=3 took=3ms some extra payload text here to pad the line out"
+  ]
+ },
+ {
+  "name": "config file",
+  "id": "plain",
+  "lines": [
+   "name=value",
+   "other=thing",
+   "level=3"
+  ]
+ }
+]

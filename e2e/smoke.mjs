@@ -105,8 +105,39 @@ await step('searches with highlights and navigation', async () => {
   await win.fill('#search', 'ConnectionPool');
   await win.waitForFunction(() => /\d+ \/ [\d,]+/.test(document.querySelector('#search-count')?.textContent ?? ''));
   assert.ok((await win.locator('.grid-rows mark').count()) > 0);
+  await win.waitForFunction(() => /^Searched [\d,]+ entries in \d+\.\d\d s$/.test(document.querySelector('#status .scan-cost')?.textContent ?? ''));
   await win.press('#search', 'Enter');
   await shot('02-search');
+});
+
+await step('typed queries filter, bad ones are reported, time shortcuts set From', async () => {
+  await win.fill('#quick', 'level>=error and not level:fatal');
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  const levels = await win.locator('.grid-rows .r .lvtag').allInnerTexts();
+  assert.ok(levels.length > 0 && levels.every((l) => l === 'ERROR'), `levels: ${levels.slice(0, 5)}`);
+  const shown = (await status()).match(/[\d,]+ shown/)?.[0];
+  await win.fill('#quick', 'level>=loud');
+  await win.waitForSelector('#toast.err:not(.hidden)');
+  assert.match(await win.locator('#toast').innerText(), /^Quick filter: level>=loud: "loud" is not a level/);
+  assert.equal((await status()).match(/[\d,]+ shown/)?.[0], shown); // the last good filter stays
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // Not following, so -15m counts back from the last entry (08:39:15.250 in the generated file), not from the clock.
+  const following = (await win.locator('#btn-follow.on').count()) > 0;
+  if (following) await win.click('#btn-follow');
+  const quarter = win.locator('#sidebar .shortcuts .mini', { hasText: '-15m' });
+  assert.match(await quarter.getAttribute('title'), /last entry in the file/);
+  await quarter.click();
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.equal(await win.locator('#sidebar input[type="datetime-local"]').first().inputValue(), '2024-05-01T08:24:15');
+  assert.notEqual((await status()).match(/([\d,]+) shown/)?.[1], '0');
+  await shot('11-time-shortcut');
+  await win.locator('#sidebar .sec', { hasText: 'Time range' }).locator('h3 .mini', { hasText: 'Clear' }).click();
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // Leave follow and the selection as they were: the focused row survives the filter change.
+  if ((await win.locator('#btn-follow.on').count() > 0) !== following) await win.click('#btn-follow');
+  await win.focus('#grid');
+  await win.keyboard.press('Home');
 });
 
 await step('quick filter narrows the view', async () => {
@@ -114,6 +145,8 @@ await step('quick filter narrows the view', async () => {
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   const levels = await win.locator('.grid-rows .r .lvtag').allInnerTexts();
   assert.ok(levels.length > 0 && levels.every((l) => l === 'ERROR' || l === 'FATAL'), `levels: ${levels.slice(0, 5)}`);
+  // The search that runs again over the new view keeps the filter's cost on show.
+  await win.waitForFunction(() => /^Filtered [\d,]+ entries in \d+\.\d\d s$/.test(document.querySelector('#status .scan-cost')?.textContent ?? ''));
   await shot('03-filter');
 });
 
@@ -390,6 +423,26 @@ await step('names the detected format and opens plain text without timestamps', 
   assert.match(await win.locator('#status .fmt').getAttribute('title'), /chosen by you; 0 of 6 sampled lines start an entry/);
   await win.selectOption('#format', '');
   await win.waitForFunction(() => /Plain text\s*auto/.test(document.querySelector('#status .fmt')?.textContent ?? ''), null, { timeout: 20000 });
+});
+
+await step('opens only a time window, says so, and loads the whole file', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['File › Open last…', 'File › Open time range…', 'File › Use index cache', 'File › Clear index cache']) assert.ok(labels.includes(l), `menu item ${l}`);
+  const windowLog = path.join(tmp, 'window.log');
+  execFileSync(process.execPath, ['scripts/gen-sample.mjs', windowLog, '3']);
+  await win.evaluate((p) => window.__ulv.openPaths([p], false, { last: 600_000 }), windowLog);
+  await win.waitForFunction(() => document.querySelectorAll('.tab').length === 4);
+  await win.waitForSelector('#partial-banner:not(.hidden)', { timeout: 30000 });
+  assert.match(await win.locator('#partial-banner .msg').innerText(), /^Showing \d{4}-\d{2}-\d{2} \d{2}:\d{2}–\d{2}:\d{2} · partial file · following new lines$/);
+  assert.match(await win.locator('#sidebar .sources').innerText(), /window\.log[\s\S]*partial/);
+  const partial = Number((await status()).match(/([\d,]+) entries/)[1].replace(/,/g, ''));
+  await shot('25-partial');
+  await win.click('#partial-whole');
+  await win.waitForSelector('#partial-banner.hidden', { state: 'attached', timeout: 30000 });
+  await win.waitForFunction((n) => {
+    const m = document.querySelector('#status')?.textContent?.match(/([\d,]+) entries/);
+    return !!m && Number(m[1].replace(/,/g, '')) > n && !/Indexing/.test(document.querySelector('#status')?.textContent ?? '');
+  }, partial, { timeout: 30000 });
 });
 
 await step('dark theme renders', async () => {

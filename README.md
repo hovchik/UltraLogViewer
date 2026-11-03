@@ -20,7 +20,9 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 **Understands log structure**
 - Auto-detected formats: timestamped text (log4j, logback, log4net, NLog, Serilog, Spring Boot,
   Python, Monolog…), JSON lines (Serilog, pino, bunyan, ECS, Logstash), syslog RFC 3164 and
-  RFC 5424, Apache/Nginx access logs, W3C/IIS, Android logcat, plain text.
+  RFC 5424, Apache/Nginx access logs, W3C/IIS, Android logcat, logfmt, PostgreSQL, MySQL (error,
+  general and slow query logs), MongoDB 4.4+ JSON, Rust `tracing`, macOS unified log (`log show`),
+  Laravel, plain text.
 - The status bar names each file's detected format (hover for how well the file matched it; click
   to pick another). Plain text files without timestamps open one entry per line, with levels
   guessed from words like `ERROR`/`error:` and the timeline hidden.
@@ -33,7 +35,13 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 - Search: plain text, whole word, match case or regex, with hit count, next/previous (`Enter`,
   `F3`, `n`), highlights in the rows and marks on the overview ruler.
 - Quick filter language: `timeout OR refused -retry logger:Db level:error http.status:500 thread:"worker 1" "exact phrase" /regex/`,
-  with suggestions as you type (field names, their most common values with counts, and recent queries).
+  with suggestions as you type (field names, operators, their most common values with counts, and recent queries).
+- Typed field queries: `status>=500`, `status!=200`, `duration>2s` (ms, s, m, h; "250ms" and "1.5s" compare by
+  length), `level>=warn`, `user in (alice,bob)`, `exists(traceId)`, `env?=prod` (also entries without the field),
+  `and`/`or`/`not` with parentheses, and time windows `since:-3h`, `until:-10m`, `since:2024-05-01T10:00`.
+  Mistakes are explained ("duration>2x: unknown unit…"). `F1` lists the syntax.
+- Time filter shortcuts `Now`, `-15m`, `-1h`, `-24h`: they count back from the file's last entry, or from the clock
+  while following a live file.
 - Right-click any cell to show only that value, exclude it, highlight it, or add one of the entry's fields as a column.
 - Fields panel: the top 10 values of every parsed field with counts and bars (sampled on very large views);
   click a value to show only it, right-click to exclude it, `+ column` to show the field in the grid.

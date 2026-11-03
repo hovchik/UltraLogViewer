@@ -73,6 +73,13 @@ public sealed class AppSettings
     public bool FoldFrames { get; set; } = true;
     public List<string> FrameworkPackages { get; set; } = [.. StackFolding.DefaultPackages];
     public List<string> RecentWorkspaces { get; set; } = [];
+    /// <summary>Save the index of big files so reopening them is instant (see <see cref="IndexCacheDir"/>).</summary>
+    public bool IndexCache { get; set; } = true;
+    /// <summary>Upper bound of the index cache folder; the least recently used indexes go first.</summary>
+    public long IndexCacheMaxMb { get; set; } = 2048;
+
+    /// <summary>The index cache folder, next to the settings file.</summary>
+    [JsonIgnore] public string IndexCacheDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "index-cache");
 
     [JsonIgnore] public bool Comfortable => Density == "comfortable";
 

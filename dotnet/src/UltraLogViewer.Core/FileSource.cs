@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.IO.Compression;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -14,6 +13,19 @@ public sealed class SourceOptions
     public IReadOnlyList<CustomFormat> CustomFormats { get; set; } = [];
     public string? Format { get; set; }
     public int ChunkSize { get; init; } = 4 * 1024 * 1024;
+    /// <summary>Folder for saved indexes; null turns the index cache off.</summary>
+    public string? CacheDir { get; init; }
+    /// <summary>Total size the index cache may use; the least recently used indexes are deleted beyond it.</summary>
+    public long CacheMaxBytes { get; init; } = 2L * 1024 * 1024 * 1024;
+    /// <summary>Smaller files index faster than a cache file loads: they are not cached.</summary>
+    public long CacheMinBytes { get; init; } = 1024 * 1024;
+    /// <summary>Open only the entries in this time window.</summary>
+    public OpenWindow? Window { get; init; }
+    /// <summary>
+    /// Free space a decompression leaves on the temp drive: a compressed file that would take more (a decompression
+    /// bomb, or simply too big) fails to open instead of filling the disk.
+    /// </summary>
+    public long MinFreeDiskBytes { get; init; } = 1024L * 1024 * 1024;
 }
 
 /// <summary>
@@ -42,6 +54,14 @@ public sealed class FileSource : IDisposable
     private Encoding _decoder = new UTF8Encoding(false, false);
     /// <summary>First bytes of the file, used to detect that it was replaced (rotated) under the same name.</summary>
     private byte[] _head = [];
+    /// <summary>Where indexing starts: the data start, or the first entry of an opened time window.</summary>
+    private long _rangeStart;
+    /// <summary>End of an opened time window that ends before the end of the file (null: index to the end and tail).</summary>
+    private long? _rangeEnd;
+    /// <summary>Bytes of the temp file written so far while a compressed file is decompressed in the background.</summary>
+    private long _written;
+    /// <summary>Chunks being scanned across all files, so indexing several files at once does not multiply the buffers.</summary>
+    private static int _globalInFlight;
 
     public FileSource(int id, string path, SourceOptions? opts = null)
     {
@@ -51,13 +71,28 @@ public sealed class FileSource : IDisposable
         _opts = opts ?? new SourceOptions();
     }
 
-    public int Id { get; }
+    /// <summary>Position in the document's source list (renumbered when a file of a merge fails to open).</summary>
+    public int Id { get; internal set; }
     public string Path { get; }
     public LogFormat Format => Detection.Format;
     public FormatDetection Detection { get; private set; } = new(new PlainFormat(), true, 0, 0);
     public string EncodingName { get; private set; } = "utf-8";
     public bool Compressed { get; private set; }
-    public bool Live => _tempFile is null;
+    /// <summary>"gzip", "bzip2", "zip" or "" for a plain file.</summary>
+    public string Compression { get; private set; } = "";
+    public bool Live => _tempFile is null && _rangeEnd is null;
+    public bool Indexing { get; private set; }
+    /// <summary>Indexing progress of this file, 0..1.</summary>
+    public double Progress { get; private set; }
+    /// <summary>Only a time window of the file was indexed.</summary>
+    public bool Partial { get; private set; }
+    /// <summary>The requested window (epoch ms), when one was opened.</summary>
+    public long? WindowFrom { get; private set; }
+    public long? WindowTo { get; private set; }
+    /// <summary>"hit" (the saved index was used as is), "grown" (saved index plus the new bytes) or "".</summary>
+    public string CacheState { get; private set; } = "";
+    /// <summary>The background save of the index cache started after opening, if any (tests wait for it).</summary>
+    public Task? CacheSave { get; private set; }
     public bool Closed { get; private set; }
     /// <summary>Byte offset just after the last indexed line.</summary>
     public long DataEnd { get; private set; }
@@ -120,18 +155,48 @@ public sealed class FileSource : IDisposable
         _statsCount = first;
     }
 
-    public SourceInfo Info() => new(Id, Path, System.IO.Path.GetFileName(Path), DataEnd, LineCount, EntryCount, Format.Name, EncodingName, Compressed, Live,
-        Format.Id, FormatDetector.Label(Format), Detection.Auto, Detection.Matched, Detection.Sampled);
+    public SourceInfo Info() => new(Id, Path, Archives.DisplayName(Path), DataEnd, LineCount, EntryCount, Format.Name, EncodingName, Compressed, Live,
+        Format.Id, FormatDetector.Label(Format), Detection.Auto, Detection.Matched, Detection.Sampled,
+        Compression, Indexing, Indexing ? Progress : 1, Partial, WindowFrom, WindowTo, CacheState);
 
-    /// <summary>Prepares the file (decompress / transcode if needed), detects the format and indexes it.</summary>
+    /// <summary>
+    /// Prepares the file (decompress / transcode if needed), detects the format and indexes it: from the index
+    /// cache when it is still valid, only the requested time window when one is set, and a compressed file while
+    /// it is still being decompressed, so its first rows show up right away.
+    /// </summary>
     public async Task OpenAsync(IProgress<double>? progress = null, CancellationToken ct = default)
     {
-        var head = ReadHead(Path, 4);
-        if (head.Length >= 2 && head[0] == 0x1f && head[1] == 0x8b)
+        Indexing = true;
+        try
+        {
+            await OpenCoreAsync(new SyncProgress(f =>
+            {
+                Progress = f;
+                progress?.Report(f);
+            }), ct);
+        }
+        finally
+        {
+            Progress = 1;
+            Indexing = false;
+        }
+    }
+
+    private async Task OpenCoreAsync(IProgress<double> progress, CancellationToken ct)
+    {
+        Task? decompress = null;
+        var stream = Archives.OpenDecompressed(Path, out var kind, out var total, out var position);
+        if (stream is not null)
         {
             Compressed = true;
-            _tempFile = await GunzipToTempAsync(Path, progress, ct);
-            _readPath = _tempFile;
+            Compression = kind;
+            var temp = _tempFile = TempPath(Archives.DisplayName(Path), ".log");
+            _readPath = temp;
+            File.WriteAllBytes(temp, []);
+            decompress = Task.Run(() => DecompressTo(stream, temp, total, position, progress, ct), ct);
+            // Encoding and format detection look at the first 256 KB.
+            while (!decompress.IsCompleted && Volatile.Read(ref _written) <= 256 * 1024) await Task.WhenAny(decompress, Task.Delay(15, ct));
+            if (decompress.IsFaulted || decompress.IsCanceled) await decompress;
         }
         var detected = DetectEncoding(_readPath);
         // A forced encoding still skips its own byte-order mark.
@@ -139,6 +204,8 @@ public sealed class FileSource : IDisposable
         EncodingName = enc;
         if (enc is "utf-16le" or "utf-16be")
         {
+            if (decompress is not null) await decompress; // transcoding needs the whole file
+            decompress = null;
             var tmp = await TranscodeToUtf8Async(_readPath, enc, bom, ct);
             if (_tempFile is not null) File.Delete(_tempFile);
             _tempFile = tmp;
@@ -151,15 +218,300 @@ public sealed class FileSource : IDisposable
             _dataStart = bom;
             _decoder = enc == "windows-1252" ? System.Text.Encoding.GetEncoding(1252) : new UTF8Encoding(false, false);
         }
+        var window = _opts.Window is { IsEmpty: false } w ? w : null;
+        if (decompress is not null && window is not null)
+        {
+            await decompress; // a window is found by seeking around, which needs the whole file
+            decompress = null;
+        }
         _handle = File.OpenHandle(_readPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var size = RandomAccess.GetLength(_handle);
         Detection = FormatDetector.DetectWithInfo(SampleLines(256 * 1024), File.GetLastWriteTime(_readPath).Year, _opts.CustomFormats, _opts.Format);
+        _rangeStart = _dataStart;
         DataEnd = _dataStart;
         await _gate.WaitAsync(ct);
         try
         {
-            await Task.Run(() => IndexFrom(size, progress, ct), ct);
-            _head = ReadHead(Path, 256);
+            if (decompress is not null) await StreamIndexAsync(decompress, ct);
+            else
+            {
+                var end = size;
+                if (window is not null)
+                {
+                    (_rangeStart, end) = await Task.Run(() => ResolveWindow(size, window), ct);
+                    DataEnd = _rangeStart;
+                    _rangeEnd = window.Until is null ? null : end;
+                    Partial = _rangeStart > _dataStart || end < size;
+                }
+                else if (CacheEligible) await Task.Run(() => TryLoadCache(size), ct);
+                if (CacheState != "hit") await Task.Run(() => IndexFrom(end, progress, ct), ct);
+            }
+            if (Live) _head = ReadHead(Path, 256);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        if (CacheEligible && CacheState != "hit" && DataEnd - _dataStart >= _opts.CacheMinBytes) CacheSave = Task.Run(SaveCacheAsync);
+    }
+
+    /// <summary>Copies the decompressed data into the temp file the index reads from.</summary>
+    private void DecompressTo(Stream input, string temp, long total, Func<long> position, IProgress<double> progress, CancellationToken ct)
+    {
+        using (input)
+        using (var output = new FileStream(temp, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete, 1))
+        {
+            var buf = new byte[1 << 20];
+            int n;
+            long nextSpaceCheck = 0;
+            while ((n = input.ReadAtLeast(buf, buf.Length, throwOnEndOfStream: false)) > 0 && !Closed)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_written >= nextSpaceCheck)
+                {
+                    nextSpaceCheck = _written + (64 << 20);
+                    if (FreeSpace(temp) is long free && free - n < _opts.MinFreeDiskBytes)
+                        throw new IOException($"Not enough free disk space to decompress {Archives.DisplayName(Path)} ({_written / (1024 * 1024)} MB unpacked so far).");
+                }
+                output.Write(buf, 0, n);
+                Volatile.Write(ref _written, _written + n);
+                if (total > 0) progress.Report(Math.Min(0.99, (double)position() / total));
+            }
+        }
+    }
+
+    /// <summary>Free bytes on the drive of <paramref name="file"/>, or null when that cannot be told.</summary>
+    private static long? FreeSpace(string file)
+    {
+        try
+        {
+            return new DriveInfo(System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(file))!).AvailableFreeSpace;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Indexes the temp file as it grows, until the decompression has finished.</summary>
+    private async Task StreamIndexAsync(Task decompress, CancellationToken ct)
+    {
+        while (true)
+        {
+            var done = decompress.IsCompleted;
+            var written = Volatile.Read(ref _written);
+            if (written > DataEnd) await Task.Run(() => IndexFrom(written, null, ct, final: done), ct);
+            if (done)
+            {
+                await decompress; // surfaces a decompression error
+                return;
+            }
+            await Task.WhenAny(decompress, Task.Delay(30, ct));
+        }
+    }
+
+    // ------------------------------------------------------------ time window
+
+    /// <summary>Byte range [start, end) of the entries inside the window, found by binary search on timestamps.</summary>
+    private (long Start, long End) ResolveWindow(long size, OpenWindow w)
+    {
+        var since = w.Since;
+        if (since is null && w.Last is long last && NewestTime(size) is long newest) since = newest - last;
+        WindowFrom = since;
+        WindowTo = w.Until;
+        var start = since is long s ? FirstEntryWhere(_dataStart, size, t => t >= s) : _dataStart;
+        var end = w.Until is long u ? FirstEntryWhere(start, size, t => t > u) : size;
+        return (start, Math.Max(start, end));
+    }
+
+    /// <summary>
+    /// Start of the first entry with a timestamp for which <paramref name="pred"/> holds (it must be monotonic over the
+    /// file), or <paramref name="size"/>. Probes narrow the range down to 1 MB, which is then scanned line by line.
+    /// Results are always entry starts, so multi-line entries are never cut.
+    /// </summary>
+    private long FirstEntryWhere(long lo, long size, Func<long, bool> pred)
+    {
+        var hi = size;
+        while (hi - lo > 1 << 20)
+        {
+            var mid = lo + (hi - lo) / 2;
+            (long Pos, long Time)? e = null;
+            ScanEntries(mid, hi, (pos, t) =>
+            {
+                e = (pos, t);
+                return false;
+            });
+            if (e is not { } found || pred(found.Time)) hi = mid;
+            else lo = found.Pos + 1;
+        }
+        var result = size;
+        ScanEntries(lo, size, (pos, t) =>
+        {
+            if (!pred(t)) return true;
+            result = pos;
+            return false;
+        });
+        return result;
+    }
+
+    /// <summary>Time of the last entry with a timestamp, looking back up to 16 MB from the end.</summary>
+    private long? NewestTime(long size)
+    {
+        for (long span = 1 << 20; ; span *= 4)
+        {
+            long? newest = null;
+            ScanEntries(Math.Max(_dataStart, size - span), size, (_, t) =>
+            {
+                newest = t;
+                return true;
+            });
+            if (newest is not null || size - span <= _dataStart || span >= 16 << 20) return newest;
+        }
+    }
+
+    /// <summary>
+    /// Calls <paramref name="visit"/> with the start and time of each timestamped entry that starts in [from, limit),
+    /// beginning at the first full line at or after <paramref name="from"/>; stops when it returns false.
+    /// </summary>
+    private void ScanEntries(long from, long limit, Func<long, long, bool> visit)
+    {
+        var fmt = Format;
+        var pos = from;
+        if (pos > _dataStart)
+        {
+            // Not at a line start: skip the rest of the line.
+            Span<byte> prev = stackalloc byte[1];
+            if (RandomAccess.Read(_handle!, prev, pos - 1) == 1 && prev[0] != '\n')
+            {
+                var nl = FindByte(pos, (byte)'\n');
+                if (nl < 0) return;
+                pos = nl + 1;
+            }
+        }
+        var size = RandomAccess.GetLength(_handle!);
+        var block = 64 * 1024;
+        var buf = new byte[block];
+        while (pos < limit && pos < size)
+        {
+            if (buf.Length < block) buf = new byte[block];
+            var n = ReadFully(buf.AsSpan(0, (int)Math.Min(block, size - pos)), pos);
+            if (n <= 0) return;
+            var eof = pos + n >= size;
+            var span = buf.AsSpan(0, n);
+            var off = 0;
+            while (off < n)
+            {
+                var nl = span[off..].IndexOf((byte)'\n');
+                if (nl < 0 && !eof) break;
+                var lineEnd = nl < 0 ? n : off + nl;
+                var lineStart = pos + off;
+                if (lineStart >= limit) return;
+                var line = span[off..(lineEnd > off && span[lineEnd - 1] == '\r' ? lineEnd - 1 : lineEnd)];
+                if (fmt.Scan(_decoder.GetString(line), out var q) && q.Time != Timestamps.None && !visit(lineStart, q.Time)) return;
+                off = nl < 0 ? n : lineEnd + 1;
+            }
+            if (off == 0)
+            {
+                if (block >= MaxLineBytes) return; // a pathological line: give up rather than read it whole
+                block *= 2; // a line longer than the block
+                continue;
+            }
+            pos += off;
+        }
+    }
+
+    private long FindByte(long from, byte b)
+    {
+        var buf = new byte[64 * 1024];
+        for (var pos = from; ;)
+        {
+            var n = RandomAccess.Read(_handle!, buf, pos);
+            if (n <= 0) return -1;
+            var i = buf.AsSpan(0, n).IndexOf(b);
+            if (i >= 0) return pos + i;
+            pos += n;
+        }
+    }
+
+    // ------------------------------------------------------------ index cache
+
+    private bool CacheEligible => _opts.CacheDir is not null && _tempFile is null && _opts.Window is not { IsEmpty: false } && Archives.SplitMember(Path) is null;
+
+    private IndexCacheKey KeyFor(long size)
+    {
+        var n = (int)Math.Min(IndexCache.HashBytes, size);
+        return new IndexCacheKey
+        {
+            Path = Path,
+            Size = size,
+            MtimeTicks = File.GetLastWriteTimeUtc(Path).Ticks,
+            HeadLen = n,
+            HeadHash = IndexCache.HashRange(_handle!, 0, n),
+            TailLen = n,
+            TailHash = IndexCache.HashRange(_handle!, size - n, n),
+            FormatOption = _opts.Format ?? "",
+            EncodingOption = _opts.Encoding,
+            CustomKey = IndexCache.CustomFormatsKey(_opts.CustomFormats),
+        };
+    }
+
+    /// <summary>Loads a saved index that is still valid for the file, as is or as the start of a grown file.</summary>
+    private void TryLoadCache(long size)
+    {
+        var file = IndexCache.FileFor(_opts.CacheDir!, Path);
+        var e = IndexCache.Read(file);
+        if (e is null) return;
+        var k = e.Key;
+        if (k.Path != Path || k.FormatOption != (_opts.Format ?? "") || k.EncodingOption != _opts.Encoding || k.CustomKey != IndexCache.CustomFormatsKey(_opts.CustomFormats)) return;
+        if (e.FormatId != Format.Id || e.EncodingName != EncodingName || e.DataStart != _dataStart || k.Size > size || e.DataEnd != k.Size) return;
+        var headLen = (int)Math.Min(IndexCache.HashBytes, k.Size);
+        if (k.HeadLen != headLen || !IndexCache.HashRange(_handle!, 0, headLen).AsSpan().SequenceEqual(k.HeadHash)) return;
+        if (k.Size == size && k.MtimeTicks != File.GetLastWriteTimeUtc(Path).Ticks) return;
+        if (k.TailLen > k.Size || !IndexCache.HashRange(_handle!, k.Size - k.TailLen, k.TailLen).AsSpan().SequenceEqual(k.TailHash)) return;
+        lock (_sync)
+        {
+            _lineStart.Adopt(e.LineStarts);
+            _entryLevel.Adopt(e.Levels);
+            _entryTime.Adopt(e.Times);
+            _entryLine.Adopt(e.EntryLines); // EntryCount comes from _entryLine, so it is published last
+            DataEnd = e.DataEnd;
+            _lastTime = e.Times.Length > 0 ? e.Times[^1] : Timestamps.None;
+        }
+        IndexCache.Touch(file);
+        if (k.Size == size)
+        {
+            CacheState = "hit";
+            return;
+        }
+        CacheState = "grown";
+        RollbackLastEntry();
+    }
+
+    private async Task SaveCacheAsync()
+    {
+        await _gate.WaitAsync();
+        try
+        {
+            if (Closed || _handle is null) return;
+            var dir = _opts.CacheDir!;
+            var size = DataEnd;
+            var header = new IndexCacheEntry
+            {
+                Key = KeyFor(size),
+                FormatId = Format.Id,
+                EncodingName = EncodingName,
+                DataStart = (int)_dataStart,
+                DetectAuto = Detection.Auto,
+                DetectMatched = Detection.Matched,
+                DetectSampled = Detection.Sampled,
+                DataEnd = size,
+            };
+            IndexCache.Write(IndexCache.FileFor(dir, Path), header, _lineStart.Span, _entryLine.Span, _entryLevel.Span, _entryTime.Span);
+            IndexCache.Evict(dir, _opts.CacheMaxBytes);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ObjectDisposedException)
+        {
+            // the cache is an optimisation: a failed save only means a full index next time
         }
         finally
         {
@@ -178,7 +530,7 @@ public sealed class FileSource : IDisposable
             var size = RandomAccess.GetLength(_handle!);
             Detection = FormatDetector.DetectWithInfo(SampleLines(256 * 1024), File.GetLastWriteTime(_readPath).Year, _opts.CustomFormats, formatId);
             ResetIndex();
-            await Task.Run(() => IndexFrom(size, null, default));
+            await Task.Run(() => IndexFrom(_rangeEnd ?? size, null, default));
         }
         finally
         {
@@ -212,6 +564,9 @@ public sealed class FileSource : IDisposable
                 {
                     _handle.Dispose();
                     _handle = File.OpenHandle(_readPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    // A new file: an opened time window does not apply to it.
+                    _rangeStart = _dataStart;
+                    Partial = false;
                     ResetIndex();
                 }
                 await Task.Run(() => IndexFrom(RandomAccess.GetLength(_handle), null, default));
@@ -219,22 +574,7 @@ public sealed class FileSource : IDisposable
                 return new(true, true, 0);
             }
             if (size == DataEnd) return new(false, false, EntryCount);
-            // Roll back the last entry: it may have been an unterminated line or may gain continuation lines.
-            var first = Math.Max(0, EntryCount - 1);
-            lock (_sync)
-            {
-                if (EntryCount > 0)
-                {
-                    var line = _entryLine[first];
-                    UnfoldStats(first);
-                    DataEnd = _lineStart[line];
-                    _lineStart.Truncate(line);
-                    _entryLine.Truncate(first);
-                    _entryLevel.Truncate(first);
-                    _entryTime.Truncate(first);
-                    _lastTime = first > 0 ? _entryTime[first - 1] : Timestamps.None;
-                }
-            }
+            var first = RollbackLastEntry();
             await Task.Run(() => IndexFrom(size, null, default));
             if (_head.Length < 256) _head = ReadHead(Path, 256);
             return new(true, false, first);
@@ -243,6 +583,30 @@ public sealed class FileSource : IDisposable
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Takes the last entry out of the index before more data is indexed: it may have been an unterminated line or may
+    /// gain continuation lines. Returns the first entry that may change.
+    /// </summary>
+    private int RollbackLastEntry()
+    {
+        var first = Math.Max(0, EntryCount - 1);
+        lock (_sync)
+        {
+            if (EntryCount > 0)
+            {
+                var line = _entryLine[first];
+                UnfoldStats(first);
+                DataEnd = _lineStart[line];
+                _lineStart.Truncate(line);
+                _entryLine.Truncate(first);
+                _entryLevel.Truncate(first);
+                _entryTime.Truncate(first);
+                _lastTime = first > 0 ? _entryTime[first - 1] : Timestamps.None;
+            }
+        }
+        return first;
     }
 
     private void ResetIndex()
@@ -254,7 +618,7 @@ public sealed class FileSource : IDisposable
             _entryLine.Truncate(0);
             _entryLevel.Truncate(0);
             _entryTime.Truncate(0);
-            DataEnd = _dataStart;
+            DataEnd = _rangeStart;
             _lastTime = Timestamps.None;
         }
     }
@@ -313,7 +677,8 @@ public sealed class FileSource : IDisposable
     /// (the per-line format scan is the expensive part) and committed in file order, so rows still appear
     /// progressively from the top while the rest of the file is being indexed.
     /// </summary>
-    private void IndexFrom(long size, IProgress<double>? progress, CancellationToken ct)
+    /// <param name="final">False while the file is still being written (decompressed): an unterminated last line is left for later.</param>
+    private void IndexFrom(long size, IProgress<double>? progress, CancellationToken ct, bool final = true)
     {
         var fmt = Format;
         var utf8 = _decoder is UTF8Encoding;
@@ -338,6 +703,11 @@ public sealed class FileSource : IDisposable
                 }
                 var eof = pos + n >= size;
                 var end = buf.AsSpan(0, n).LastIndexOf((byte)'\n') + 1; // bytes up to and including the last '\n'
+                if (end == 0 && eof && !final)
+                {
+                    ArrayPool<byte>.Shared.Return(buf); // the line is still being written
+                    break;
+                }
                 if (end == 0 && !eof && chunkSize < MaxLineBytes)
                 {
                     // A line longer than the chunk: read again with a bigger one.
@@ -346,12 +716,14 @@ public sealed class FileSource : IDisposable
                     continue;
                 }
                 if (end == 0) end = n; // the unterminated tail, or a pathological line split at MaxLineBytes
-                else if (eof && end < n) end = n; // include the unterminated last line
+                else if (eof && final && end < n) end = n; // include the unterminated last line
                 var chunkPos = pos;
                 var chunkLen = end;
+                Interlocked.Increment(ref _globalInFlight);
                 inFlight.Enqueue((Task.Run(() => ScanChunk(fmt, decoder, utf8, buf, chunkLen, chunkPos), ct), buf, pos + end));
                 pos += end;
-                while (inFlight.Count >= maxInFlight || inFlight.Count > 0 && inFlight.Peek().Task.IsCompleted)
+                // Files indexed at the same time share the in-flight budget; one with nothing in flight always proceeds.
+                while (inFlight.Count >= maxInFlight || inFlight.Count > 0 && (inFlight.Peek().Task.IsCompleted || Volatile.Read(ref _globalInFlight) >= maxInFlight))
                     Commit(inFlight.Dequeue(), startPos, size, progress);
             }
             while (inFlight.Count > 0) Commit(inFlight.Dequeue(), startPos, size, progress);
@@ -363,6 +735,7 @@ public sealed class FileSource : IDisposable
             {
                 try { task.Wait(CancellationToken.None); } catch (AggregateException) { }
                 ArrayPool<byte>.Shared.Return(buf);
+                Interlocked.Decrement(ref _globalInFlight);
             }
         }
     }
@@ -389,6 +762,7 @@ public sealed class FileSource : IDisposable
         finally
         {
             ArrayPool<byte>.Shared.Return(item.Buf);
+            Interlocked.Decrement(ref _globalInFlight);
         }
         try
         {
@@ -536,36 +910,83 @@ public sealed class FileSource : IDisposable
             for (var e = from; e < to; e++)
                 counts[e - from] = (e + 1 < entryCount ? _entryLine[e + 1] : LineCount) - _entryLine[e];
         }
-        var buf = new byte[end - start];
-        var got = 0;
-        while (got < buf.Length)
+        // Decoded straight from the (pooled) bytes, line by line: no big intermediate string or line array, which kept
+        // the garbage collector busier than the actual matching when every core reads at once.
+        var len = (int)(end - start);
+        var buf = ArrayPool<byte>.Shared.Rent(Math.Max(1, len));
+        try
         {
-            var n = RandomAccess.Read(_handle!, buf.AsSpan(got), start + got);
-            if (n <= 0) break;
-            got += n;
+            var bytes = buf.AsSpan(0, ReadFully(buf.AsSpan(0, len), start));
+            var output = new string[counts.Length];
+            var pos = 0;
+            var more = true; // like string.Split: one more (possibly empty) line follows the last '\n'
+            for (var i = 0; i < counts.Length; i++)
+            {
+                if (!more)
+                {
+                    output[i] = ""; // the file shrank under us
+                    continue;
+                }
+                var from0 = pos;
+                var taken = 0;
+                for (; taken < counts[i] && more; taken++)
+                {
+                    var nl = bytes[pos..].IndexOf((byte)'\n');
+                    if (nl < 0)
+                    {
+                        pos = bytes.Length;
+                        more = false;
+                    }
+                    else pos += nl + 1;
+                }
+                var range = bytes[from0..(more ? pos - 1 : pos)];
+                // Each line loses its trailing '\r's (a byte that only ever means '\r' in UTF-8 and Windows-1252).
+                if (taken == 1) output[i] = _decoder.GetString(range.TrimEnd((byte)'\r'));
+                else if (range.IndexOf((byte)'\r') < 0) output[i] = _decoder.GetString(range);
+                else output[i] = JoinLines(range);
+            }
+            return output;
         }
-        var lines = _decoder.GetString(buf, 0, got).Split('\n');
-        var output = new string[counts.Length];
-        var li = 0;
-        for (var i = 0; i < counts.Length; i++)
+        catch (ObjectDisposedException) when (Closed)
         {
-            var c = counts[i];
-            if (c == 1) output[i] = li < lines.Length ? lines[li].TrimEnd('\r') : "";
-            else output[i] = string.Join('\n', lines.Skip(li).Take(c).Select(l => l.TrimEnd('\r')));
-            li += c;
+            return []; // closed while a batch was being read on another thread
         }
-        return output;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buf);
+        }
     }
 
-    /// <summary>Calls <paramref name="fn"/> with batches of entry texts in [from, to); return false to stop.</summary>
-    public void ForEachEntryBatch(int from, int to, Func<int, string[], bool> fn, CancellationToken ct = default, int batch = 4096)
+    /// <summary>Decodes a multi-line entry that has '\r's in it: every line is trimmed of them, then joined with '\n'.</summary>
+    private string JoinLines(ReadOnlySpan<byte> range)
     {
-        for (var e = from; e < to && !Closed; e += batch)
+        var sb = new StringBuilder(range.Length);
+        while (true)
         {
-            ct.ThrowIfCancellationRequested();
-            var texts = ReadEntries(e, Math.Min(to, e + batch));
-            if (!fn(e, texts)) return;
+            var nl = range.IndexOf((byte)'\n');
+            sb.Append(_decoder.GetString((nl < 0 ? range : range[..nl]).TrimEnd((byte)'\r')));
+            if (nl < 0) return sb.ToString();
+            sb.Append('\n');
+            range = range[(nl + 1)..];
         }
+    }
+
+    /// <summary>
+    /// Reads entries [from, to) in batches on all cores: each batch's texts go to <paramref name="work"/> on the thread
+    /// pool, several at a time, and the results to <paramref name="commit"/> on the calling thread in entry order, so
+    /// whatever commit builds comes out exactly as a sequential pass would build it. Commit gets the first entry, the
+    /// entry count and the result; it returns false to stop. <paramref name="work"/> must be thread safe.
+    /// </summary>
+    public void ForEachEntryBatch<T>(int from, int to, Func<int, string[], T> work, Func<int, int, T, bool> commit, CancellationToken ct = default, int batch = 4096,
+        bool parallel = true)
+    {
+        if (from >= to) return;
+        InOrder.Run((int)(((long)to - from + batch - 1) / batch), i =>
+        {
+            var first = from + i * batch;
+            var texts = Closed ? [] : ReadEntries(first, Math.Min(to, first + batch));
+            return (First: first, Count: texts.Length, Result: work(first, texts));
+        }, (_, r) => !Closed && commit(r.First, r.Count, r.Result), ct, parallel);
     }
 
     public void Dispose()
@@ -642,22 +1063,6 @@ public sealed class FileSource : IDisposable
 
     private static string TempPath(string src, string ext) =>
         System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"ultralogviewer-{Environment.ProcessId}-{Guid.NewGuid():N}-{System.IO.Path.GetFileName(src)}{ext}");
-
-    private static async Task<string> GunzipToTempAsync(string file, IProgress<double>? progress, CancellationToken ct)
-    {
-        var output = TempPath(file, ".log");
-        await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        await using var gz = new GZipStream(input, CompressionMode.Decompress);
-        await using var outStream = File.Create(output);
-        var buf = new byte[1 << 20];
-        int n;
-        while ((n = await gz.ReadAsync(buf, ct)) > 0)
-        {
-            await outStream.WriteAsync(buf.AsMemory(0, n), ct);
-            progress?.Report(Math.Min(0.99, (double)input.Position / Math.Max(1, input.Length)) * 0.5);
-        }
-        return output;
-    }
 
     private static async Task<string> TranscodeToUtf8Async(string file, string enc, int bom, CancellationToken ct)
     {

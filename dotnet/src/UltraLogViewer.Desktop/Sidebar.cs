@@ -439,8 +439,22 @@ public sealed class Sidebar : ScrollViewer
             dp.Children.Add(box);
             return dp;
         }
+        // Now / -15m / -1h / -24h: count back from the last entry, or from the clock while following a live file.
+        var shortcuts = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        foreach (var (label, span) in Query.TimeShortcuts)
+        {
+            shortcuts.Children.Add(Mini(label, () =>
+            {
+                var at = Query.ShortcutReference(tab.Info.TimeMax, tab.Follow, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                if (span == 0) f.TimeTo = at;
+                else (f.TimeFrom, f.TimeTo) = (at - span, null);
+                from.Text = f.TimeFrom is long a2 ? Timestamps.Format(a2) : "";
+                to.Text = f.TimeTo is long b2 ? Timestamps.Format(b2) : "";
+                _host.ApplyFilter();
+            }, $"{(span == 0 ? "Set To to now" : $"Show the last {label[1..]}")}. {Query.ShortcutTip}"));
+        }
         _timeSpan = Hint(TimeSpanText(tab));
-        _timeInputs = new StackPanel { Spacing = 4, Children = { Row("From", from), Row("To", to), Hint("Tip: drag across the timeline to select a range.") } };
+        _timeInputs = new StackPanel { Spacing = 4, Children = { shortcuts, Row("From", from), Row("To", to), Hint("Tip: drag across the timeline to select a range.") } };
         SyncTimeInputs(tab);
         return Section(Header("Time range", Mini("Clear", () =>
         {
@@ -629,8 +643,16 @@ public sealed class Sidebar : ScrollViewer
 
     // ---------------------------------------------------------------- sources
 
-    private static string SourcesText(DocumentTab tab) => string.Join("\n\n", tab.Info.Sources.Select(s =>
-        $"{s.DisplayName}\n{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{(s.Compressed ? " · gzip" : "")}{(s.Live ? "" : " · static")}"));
+    internal static string SourcesText(DocumentTab tab) => string.Join("\n\n", tab.Info.Sources.Select(SourceText));
+
+    /// <summary>One file of the Sources list; while a merge is indexed, each file shows its own progress.</summary>
+    internal static string SourceText(SourceInfo s)
+    {
+        var state = s.Indexing ? $"Indexing {s.Progress:P0} · " : "";
+        var extra = (s.Compression.Length > 0 ? " · " + s.Compression : s.Compressed ? " · gzip" : "") + (s.Live ? "" : " · static")
+            + (s.Partial ? " · partial" : "") + (s.CacheState.Length > 0 ? " · cached index" : "");
+        return $"{s.DisplayName}\n{state}{FormatSize(s.Size)} · {s.Lines:N0} lines · {s.Entries:N0} entries\n{s.Format} · {s.Encoding}{extra}";
+    }
 
     public static string FormatSize(long b) => b switch
     {

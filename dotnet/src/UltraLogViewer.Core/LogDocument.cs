@@ -7,8 +7,9 @@ namespace UltraLogViewer.Core;
 /// What a tab shows: one file, or several files merged into one timeline.
 /// Base rows are every entry of every source (merged by timestamp when there are several sources);
 /// view rows are the base rows that pass the current filter (plus context rows), in base order.
-/// Filtering and search run per source in file order (sequential reads) and produce bitmaps,
-/// which are then walked in base order; that keeps merged views fast too.
+/// Filtering and search run per source in file order and produce bitmaps, which are then walked in base order; that
+/// keeps merged views fast too. Entry texts are read and tested in batches on all cores and merged in entry order
+/// (see <see cref="InOrder"/>), so the answers are exactly those of a sequential pass.
 /// Snapshots (merge, view) are immutable and swapped atomically, so reads never block.
 /// </summary>
 public sealed class LogDocument : IDisposable
@@ -26,6 +27,14 @@ public sealed class LogDocument : IDisposable
     /// <summary>Per-source filter verdicts of already evaluated entries: 1 = match.</summary>
     private List<Grow<byte>> _verdict = [];
     private int _filterGen;
+    private int _viewEpoch;
+
+    /// <summary>How often a running filter publishes the rows it has found so far.</summary>
+    internal int PartialViewMs { get; set; } = 200;
+    /// <summary>Entries per batch when scanning entry texts.</summary>
+    internal int ScanBatch { get; set; } = 4096;
+    /// <summary>False scans on the calling thread only: the sequential reference for the equivalence tests.</summary>
+    internal bool ScanInParallel { get; set; } = true;
     /// <summary>Per-source repeat-key hashes for group repeats, computed for <see cref="_repeatMode"/>.</summary>
     private List<Grow<ulong>> _repeatHash = [];
     private string _repeatMode = "";
@@ -38,6 +47,12 @@ public sealed class LogDocument : IDisposable
     public double Progress { get; private set; }
     public bool Merged => _sources.Count > 1;
     public FilterSpec? Filter => _filter;
+
+    /// <summary>
+    /// Changes whenever the view is replaced by one with different rows. While a filter runs, the partial views it
+    /// publishes keep the epoch: each one only appends rows, so a grid can keep what it has cached.
+    /// </summary>
+    public int ViewEpoch => _viewEpoch;
 
     /// <summary>
     /// "Show in context": every entry is shown, the current filter is kept (and stays up to date), and entries it
@@ -84,6 +99,72 @@ public sealed class LogDocument : IDisposable
             RebuildBase();
             return _filter is not null ? ApplyNowAsync(_filter, false, _filterGen, null, ct) : Task.FromResult(true);
         });
+    }
+
+    /// <summary>
+    /// Opens several files at once (a merged view): they are indexed in parallel, each reporting its own progress
+    /// (<see cref="FileSource.Progress"/>). A file that fails is left out; the failures are returned. Throws only when
+    /// cancelled.
+    /// </summary>
+    public async Task<List<(string Path, Exception Error)>> AddSourcesAsync(IReadOnlyList<string> paths, Func<string, SourceOptions> opts,
+        IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        if (_sources.Count + paths.Count > ushort.MaxValue + 1) throw new InvalidOperationException($"A merged view supports at most {ushort.MaxValue + 1} files.");
+        var added = paths.Select((p, i) => new FileSource(_sources.Count + i, p, opts(p))).ToList();
+        lock (_sources) _sources.AddRange(added);
+        Indexing = true;
+        var failed = new List<(string, Exception)>();
+        try
+        {
+            void Report()
+            {
+                Progress = added.Average(s => s.Indexing ? s.Progress : 1);
+                progress?.Report(Progress);
+            }
+            // On the thread pool: each file's encoding and format detection runs before its first await, and would
+            // otherwise run one file after the other on the caller's (UI) thread.
+            var tasks = added.Select(s => Task.Run(() => s.OpenAsync(new SyncProgress(_ => Report()), ct), ct)).ToArray();
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch
+            {
+                // looked at per file below
+            }
+            ct.ThrowIfCancellationRequested();
+            lock (_sources)
+            {
+                for (var i = 0; i < added.Count; i++)
+                {
+                    if (tasks[i].Exception is not { } e) continue;
+                    failed.Add((added[i].Path, e.InnerException ?? e));
+                    _sources.Remove(added[i]);
+                    added[i].Dispose();
+                }
+                for (var i = 0; i < _sources.Count; i++) _sources[i].Id = i;
+            }
+        }
+        catch
+        {
+            lock (_sources)
+                foreach (var s in added)
+                {
+                    _sources.Remove(s);
+                    s.Dispose();
+                }
+            throw;
+        }
+        finally
+        {
+            Indexing = false;
+        }
+        await Serial(() =>
+        {
+            RebuildBase();
+            return _filter is not null ? ApplyNowAsync(_filter, false, _filterGen, null, ct) : Task.FromResult(true);
+        });
+        return failed;
     }
 
     private async Task<T> Serial<T>(Func<Task<T>> fn)
@@ -171,23 +252,30 @@ public sealed class LogDocument : IDisposable
         _filter = spec;
         if (spec is null || spec.IsTrivial)
         {
-            _view = null;
+            SetView(null);
             _verdict = [];
             return true;
         }
-        (Func<string, bool> M, string? Column, string? Template) Compile(FilterRule r) =>
-            r.PatternMatch ? (_ => false, null, r.Text) : (Query.RuleMatcher(r), r.Column, null);
+        TextRule Compile(FilterRule r) =>
+            r.PatternMatch ? new(_ => false, null, r.Text) : new(Query.RuleMatcher(r), r.Column, null);
         var includes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Include).Select(Compile).ToArray();
         var excludes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Exclude).Select(Compile).ToArray();
         var cleared = spec.ClearedBefore;
-        var query = string.IsNullOrWhiteSpace(spec.Query) ? null : Query.CompileQuery(spec.Query, spec.QueryCaseSensitive);
+        // The query's top-level since:/until: join the time range, which the index answers without reading entries.
+        var (query, qFrom, qTo) = string.IsNullOrWhiteSpace(spec.Query) ? (null, null, null) : Query.CompileQueryWithTimeRange(spec.Query, spec.QueryCaseSensitive);
         var needsText = includes.Length > 0 || excludes.Length > 0 || query is not null;
         var bookmarks = spec.BookmarksOnly ? spec.Bookmarks : null;
-        var from = spec.TimeFrom ?? long.MinValue;
-        var to = spec.TimeTo ?? long.MaxValue;
-        var hasTime = spec.TimeFrom is not null || spec.TimeTo is not null;
+        var from = Math.Max(spec.TimeFrom ?? long.MinValue, qFrom ?? long.MinValue);
+        var to = Math.Min(spec.TimeTo ?? long.MaxValue, qTo ?? long.MaxValue);
+        var hasTime = spec.TimeFrom is not null || spec.TimeTo is not null || qFrom is not null || qTo is not null;
         var total = _sources.Sum(s => (long)s.EntryCount);
         long done = 0;
+        // A full (not tail) text filter publishes partial views as it goes. Each one is a prefix of the next and of the
+        // final view (see ViewBuilder), so rows never move once shown. Grouping folds rows at the end, so it waits.
+        var progressive = !incremental && !spec.Grouped;
+        var published = false;
+        var partialClock = System.Diagnostics.Stopwatch.StartNew();
+        var builder = new ViewBuilder(this, spec.Context);
 
         for (var si = 0; si < _sources.Count; si++)
         {
@@ -215,62 +303,119 @@ public sealed class LogDocument : IDisposable
                 done += count - start;
                 continue;
             }
-            var fmt = src.Format;
             var cancelled = false;
             src.ForEachEntryBatch(start, count, (first, texts) =>
+            {
+                // Runs on the thread pool, several batches at once; commit below appends the verdicts in entry order.
+                var output = new byte[texts.Length];
+                if (gen != _filterGen || ct.IsCancellationRequested) return output; // commit drops it
+                var test = new TextTest(src, includes, excludes, query);
+                for (var i = 0; i < texts.Length; i++)
+                {
+                    var e = first + i;
+                    output[i] = Cheap(e) && test.Matches(e, texts[i]) ? (byte)1 : (byte)0;
+                }
+                return output;
+            }, (first, n, verdicts) =>
             {
                 if (gen != _filterGen || ct.IsCancellationRequested)
                 {
                     cancelled = true;
                     return false;
                 }
-                for (var i = 0; i < texts.Length; i++)
-                {
-                    var e = first + i;
-                    var ok = Cheap(e);
-                    if (ok)
-                    {
-                        var text = texts[i];
-                        Dictionary<string, string>? parsed = null;
-                        string Field(string k)
-                        {
-                            // The level is already indexed: answer without parsing the entry.
-                            if (k == "level") return LevelNames.Match[(int)src.LevelOf(e)];
-                            parsed ??= fmt.Parse(text);
-                            if (parsed.TryGetValue(k, out var val)) return val;
-                            var alias = k == "timestamp" ? "time" : k;
-                            if (parsed.TryGetValue(alias, out val)) return val;
-                            return parsed.FirstOrDefault(p => p.Key.Equals(k, StringComparison.OrdinalIgnoreCase)).Value ?? "";
-                        }
-                        string? template = null;
-                        bool Test((Func<string, bool> M, string? Column, string? Template) r)
-                        {
-                            if (r.Template is not null)
-                            {
-                                template ??= Patterns.Template(Patterns.MessageOf(text, parsed ??= fmt.Parse(text)));
-                                return template == r.Template;
-                            }
-                            return r.Column is null ? r.M(text) : r.M(Field(r.Column));
-                        }
-                        if (includes.Length > 0 && !includes.Any(Test)) ok = false;
-                        else if (excludes.Any(Test)) ok = false;
-                        else if (query is not null && !query(text, Field)) ok = false;
-                    }
-                    v.Add(ok ? (byte)1 : (byte)0);
-                }
-                done += texts.Length;
+                v.AddRange(verdicts);
+                done += n;
                 progress?.Report(total > 0 ? (double)done / total : 1);
+                // Show the rows found so far while the rest of the file is filtered.
+                if (progressive && partialClock.ElapsedMilliseconds >= PartialViewMs)
+                {
+                    SetView(builder.Extend(partial: true), extends: published);
+                    published = true;
+                    partialClock.Restart();
+                }
                 return true;
-            });
+            }, default, ScanBatch, ScanInParallel);
             if (cancelled) return false;
         }
-        BuildView(spec.Context);
-        if (spec.Grouped && !GroupView(spec.GroupRepeats, gen, ct)) return false;
+        var view = builder.Extend();
+        if (spec.Grouped)
+        {
+            if (GroupView(view, spec.GroupRepeats, gen, ct) is not { } grouped) return false;
+            view = grouped;
+        }
+        SetView(view, extends: published);
         return true;
     }, CancellationToken.None);
 
-    /// <summary>Folds consecutive view rows with the same repeat key into their first row.</summary>
-    private bool GroupView(string mode, int gen, CancellationToken ct)
+    /// <summary>A compiled rule: a matcher (on the text, or on one field), or a message template to compare with.</summary>
+    private readonly record struct TextRule(Func<string, bool> M, string? Column, string? Template);
+
+    /// <summary>
+    /// The text part of a filter: include rules (any), exclude rules (none) and the quick-filter query. One instance per
+    /// batch and thread, reused for every entry, so testing an entry allocates nothing but what parsing it needs.
+    /// </summary>
+    private sealed class TextTest
+    {
+        private readonly FileSource _src;
+        private readonly LogFormat _fmt;
+        private readonly TextRule[] _includes, _excludes;
+        private readonly Func<string, Func<string, string>, bool>? _query;
+        private readonly Func<string, string> _field;
+        private readonly Predicate<TextRule> _test;
+        private string _text = "";
+        private int _entry;
+        private Dictionary<string, string>? _parsed;
+        private string? _template;
+
+        public TextTest(FileSource src, TextRule[] includes, TextRule[] excludes, Func<string, Func<string, string>, bool>? query)
+        {
+            _src = src;
+            _fmt = src.Format;
+            _includes = includes;
+            _excludes = excludes;
+            _query = query;
+            _field = Field;
+            _test = Test;
+        }
+
+        public bool Matches(int entry, string text)
+        {
+            _entry = entry;
+            _text = text;
+            _parsed = null;
+            _template = null;
+            if (_includes.Length > 0 && !Array.Exists(_includes, _test)) return false;
+            if (Array.Exists(_excludes, _test)) return false;
+            return _query is null || _query(text, _field);
+        }
+
+        private Dictionary<string, string> Parsed => _parsed ??= _fmt.Parse(_text);
+
+        private string Field(string k)
+        {
+            // The level is already indexed: answer without parsing the entry.
+            if (k == "level") return LevelNames.Match[(int)_src.LevelOf(_entry)];
+            if (k == Query.TimeField) return _src.TimeOf(_entry) is var t && t != Timestamps.None ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+            var parsed = Parsed;
+            if (parsed.TryGetValue(k, out var val)) return val;
+            var alias = k == "timestamp" ? "time" : k;
+            if (parsed.TryGetValue(alias, out val)) return val;
+            return parsed.FirstOrDefault(p => p.Key.Equals(k, StringComparison.OrdinalIgnoreCase)).Value ?? "";
+        }
+
+        private bool Test(TextRule r)
+        {
+            if (r.Template is not null)
+            {
+                _template ??= Patterns.Template(Patterns.MessageOf(_text, Parsed));
+                return _template == r.Template;
+            }
+            return r.Column is null ? r.M(_text) : r.M(Field(r.Column));
+        }
+    }
+
+    /// <summary>Folds consecutive view rows with the same repeat key into their first row. Null when superseded.</summary>
+    private View? GroupView(View view, string mode, int gen, CancellationToken ct)
     {
         if (mode != _repeatMode)
         {
@@ -287,18 +432,23 @@ public sealed class LogDocument : IDisposable
             var cancelled = false;
             src.ForEachEntryBatch(h.Count, src.EntryCount, (first, texts) =>
             {
+                var output = new ulong[texts.Length];
+                if (gen != _filterGen || ct.IsCancellationRequested) return output; // commit drops it
+                for (var i = 0; i < texts.Length; i++)
+                    output[i] = Patterns.Hash(Patterns.RepeatKey(src.LevelOf(first + i), fmt.Parse(texts[i]), texts[i], mode));
+                return output;
+            }, (_, _, hashes) =>
+            {
                 if (gen != _filterGen || ct.IsCancellationRequested)
                 {
                     cancelled = true;
                     return false;
                 }
-                for (var i = 0; i < texts.Length; i++)
-                    h.Add(Patterns.Hash(Patterns.RepeatKey(src.LevelOf(first + i), fmt.Parse(texts[i]), texts[i], mode)));
+                h.AddRange(hashes);
                 return true;
-            });
-            if (cancelled) return false;
+            }, default, ScanBatch, ScanInParallel);
+            if (cancelled) return null;
         }
-        var view = _view!;
         var m = _merge;
         var rows = new List<int>(view.Rows.Length);
         var ctx = view.Context is null ? null : new List<byte>(view.Rows.Length);
@@ -320,53 +470,83 @@ public sealed class LogDocument : IDisposable
             repeat.Add(1);
             prev = key;
         }
-        _view = new View(rows.ToArray(), ctx?.ToArray(), repeat.ToArray());
-        return true;
+        return new View(rows.ToArray(), ctx?.ToArray(), repeat.ToArray());
     }
 
-    private void BuildView(int context)
+    /// <summary>
+    /// Publishes a view. <paramref name="extends"/> says it only appends rows to the current one (a filter still
+    /// running); anything else starts a new <see cref="ViewEpoch"/>.
+    /// </summary>
+    private void SetView(View? view, bool extends = false)
     {
-        var m = _merge;
-        var n = m?.Ent.Length ?? (_sources.Count > 0 ? Math.Min(_sources[0].EntryCount, _verdict.Count > 0 ? _verdict[0].Count : 0) : 0);
-        var verdict = _verdict;
-        bool Hit(int b)
+        _view = view;
+        if (!extends) Interlocked.Increment(ref _viewEpoch);
+    }
+
+    /// <summary>
+    /// Builds the view rows (matches plus <c>context</c> rows around them) in one pass over the base rows, and can
+    /// resume where it stopped. While a filter runs it is extended over the base rows whose verdicts are known so far,
+    /// so each partial view costs only the new rows. A row is added when it matches, when it is within
+    /// <c>context</c> rows before a match, or within <c>context</c> rows after the latest match before it. That
+    /// depends only on rows above it and the next <c>context</c> rows, and leading context never reaches back before
+    /// the last row added, so the view only ever gains rows at its end: every partial view is a prefix of the final one.
+    /// </summary>
+    private sealed class ViewBuilder(LogDocument doc, int context)
+    {
+        private readonly List<int> _rows = [];
+        private readonly List<byte>? _ctx = context > 0 ? [] : null;
+        private int _next;
+        private int _lastAdded = -1;
+        private long _lastHit = int.MinValue;
+
+        /// <summary>
+        /// Extends the view over the remaining base rows and returns it. With <paramref name="partial"/> it stops at the
+        /// first row whose verdict is not known yet; otherwise such rows count as not matching.
+        /// </summary>
+        public View Extend(bool partial = false)
         {
-            var (s, e) = Ref(b, m);
-            if (s >= verdict.Count) return false;
-            var v = verdict[s];
-            return e < v.Count && v[e] == 1;
-        }
-        var rows = new List<int>();
-        List<byte>? ctx = context > 0 ? [] : null;
-        if (context <= 0)
-        {
-            for (var b = 0; b < n; b++)
-                if (Hit(b)) rows.Add(b);
-        }
-        else
-        {
-            var lastAdded = -1;
-            for (var b = 0; b < n; b++)
+            var m = doc._merge;
+            var verdict = doc._verdict;
+            var n = m?.Ent.Length ?? (doc._sources.Count > 0 ? Math.Min(doc._sources[0].EntryCount, verdict.Count > 0 ? verdict[0].Count : 0) : 0);
+            var b = _next;
+            for (; b < n; b++)
             {
-                if (!Hit(b)) continue;
-                for (var c = Math.Max(lastAdded + 1, b - context); c < b; c++)
+                int s = 0, e = b;
+                if (m is not null)
                 {
-                    rows.Add(c);
-                    ctx!.Add(1);
+                    s = m.Src[b];
+                    e = m.Ent[b];
                 }
-                rows.Add(b);
-                ctx!.Add(0);
-                lastAdded = b;
-                for (var c = b + 1; c <= Math.Min(n - 1, b + context); c++)
+                var v = s < verdict.Count ? verdict[s] : null;
+                if (partial && (v is null || e >= v.Count)) break;
+                var hit = v is not null && e < v.Count && v[e] == 1;
+                if (_ctx is null)
                 {
-                    if (Hit(c)) break;
-                    rows.Add(c);
-                    ctx.Add(1);
-                    lastAdded = c;
+                    if (hit) _rows.Add(b);
+                    continue;
+                }
+                if (hit)
+                {
+                    for (var c = Math.Max(_lastAdded + 1, b - context); c < b; c++)
+                    {
+                        _rows.Add(c);
+                        _ctx.Add(1);
+                    }
+                    _rows.Add(b);
+                    _ctx.Add(0);
+                    _lastAdded = b;
+                    _lastHit = b;
+                }
+                else if (b - _lastHit <= context)
+                {
+                    _rows.Add(b);
+                    _ctx.Add(1);
+                    _lastAdded = b;
                 }
             }
+            _next = b;
+            return new View(_rows.ToArray(), _ctx?.ToArray());
         }
-        _view = new View(rows.ToArray(), ctx?.ToArray());
     }
 
     // --------------------------------------------------------------------- rows
@@ -434,7 +614,6 @@ public sealed class LogDocument : IDisposable
     /// </summary>
     public Task<FieldStats> FieldStatsAsync(int maxRows = 100_000, int top = 10, CancellationToken ct = default) => Task.Run(() =>
     {
-        const int Block = 1000;
         const int DistinctCap = 5000;
         var n = ViewCount;
         var counts = new Dictionary<string, (Dictionary<string, int> Values, int Present, bool Capped)>(StringComparer.OrdinalIgnoreCase);
@@ -475,25 +654,9 @@ public sealed class LogDocument : IDisposable
             }
             scanned += rows.Count;
         }
-        var sampled = n > maxRows;
-        if (!sampled)
-        {
-            for (var r = 0; r < n; r += 2000)
-            {
-                ct.ThrowIfCancellationRequested();
-                Count(GetRows(r, 2000));
-            }
-        }
-        else
-        {
-            var blocks = Math.Max(1, maxRows / Block);
-            var stride = (double)(n - Block) / Math.Max(1, blocks - 1);
-            for (var b = 0; b < blocks; b++)
-            {
-                ct.ThrowIfCancellationRequested();
-                Count(GetRows((int)(b * stride), Block));
-            }
-        }
+        var (blocks, sampled) = ScanBlocks(n, maxRows);
+        // Reading and parsing the rows is the expensive part: done on all cores, counted here in row order.
+        ForEachRowBlock(blocks, rows => rows, Count, ct);
         var fields = order.Select(k =>
         {
             var c = counts[k];
@@ -502,6 +665,34 @@ public sealed class LogDocument : IDisposable
         }).ToList();
         return new FieldStats(scanned, n, sampled, fields);
     }, ct);
+
+    private const int StatsBlock = 1000;
+
+    /// <summary>
+    /// The view-row blocks that field stats and patterns read: every row (in blocks of 2000), or, for views larger than
+    /// <paramref name="maxRows"/>, evenly spaced blocks of <see cref="StatsBlock"/> rows.
+    /// </summary>
+    private static (List<(int Start, int Count)> Blocks, bool Sampled) ScanBlocks(int n, int maxRows)
+    {
+        var blocks = new List<(int, int)>();
+        if (n <= maxRows)
+        {
+            for (var r = 0; r < n; r += 2000) blocks.Add((r, 2000));
+            return (blocks, false);
+        }
+        var count = Math.Max(1, maxRows / StatsBlock);
+        var stride = (double)(n - StatsBlock) / Math.Max(1, count - 1);
+        for (var b = 0; b < count; b++) blocks.Add(((int)(b * stride), StatsBlock));
+        return (blocks, true);
+    }
+
+    /// <summary>Reads blocks of view rows and runs <paramref name="work"/> on them on all cores; <paramref name="commit"/> gets the results here, in order.</summary>
+    private void ForEachRowBlock<T>(List<(int Start, int Count)> blocks, Func<List<RowData>, T> work, Action<T> commit, CancellationToken ct) =>
+        InOrder.Run(blocks.Count, i => work(GetRows(blocks[i].Start, blocks[i].Count)), (_, r) =>
+        {
+            commit(r);
+            return true;
+        }, ct, ScanInParallel);
 
     /// <summary>
     /// Makes room in a full value-count table by dropping the rarest values (count ≤ 1, then ≤ 2, …) until at most
@@ -522,20 +713,18 @@ public sealed class LogDocument : IDisposable
     /// </summary>
     public Task<PatternStats> PatternsAsync(int maxRows = 200_000, int top = 300, CancellationToken ct = default) => Task.Run(() =>
     {
-        const int Block = 1000;
         const int Cap = 20_000;
         const string Other = "(other)";
         var n = ViewCount;
-        var sampled = n > maxRows;
-        var expected = Math.Max(1, sampled ? Math.Max(1, maxRows / Block) * Block : n);
+        var (blocks, sampled) = ScanBlocks(n, maxRows);
+        var expected = Math.Max(1, sampled ? Math.Max(1, maxRows / StatsBlock) * StatsBlock : n);
         var map = new Dictionary<string, (int Count, int[] Levels, string Sample, int[] Spark)>(StringComparer.Ordinal);
         var scanned = 0;
-        void Count(List<RowData> rows)
+        void Count((RowData Row, string Msg, string Template)[] rows)
         {
-            foreach (var row in rows)
+            foreach (var (row, msg, tpl) in rows)
             {
-                var msg = Patterns.MessageOf(row.Text, row.Fields);
-                var t = Patterns.Template(msg);
+                var t = tpl;
                 if (!map.TryGetValue(t, out var p))
                 {
                     if (map.Count >= Cap) t = Other;
@@ -553,24 +742,12 @@ public sealed class LogDocument : IDisposable
                 scanned++;
             }
         }
-        if (!sampled)
+        // Messages and templates are worked out on all cores; the counting (and the cap) runs here in row order.
+        ForEachRowBlock(blocks, rows => rows.Select(r =>
         {
-            for (var r = 0; r < n; r += 2000)
-            {
-                ct.ThrowIfCancellationRequested();
-                Count(GetRows(r, 2000));
-            }
-        }
-        else
-        {
-            var blocks = Math.Max(1, maxRows / Block);
-            var stride = (double)(n - Block) / Math.Max(1, blocks - 1);
-            for (var b = 0; b < blocks; b++)
-            {
-                ct.ThrowIfCancellationRequested();
-                Count(GetRows((int)(b * stride), Block));
-            }
-        }
+            var msg = Patterns.MessageOf(r.Text, r.Fields);
+            return (r, msg, Patterns.Template(msg));
+        }).ToArray(), Count, ct);
         var list = map.OrderByDescending(kv => kv.Value.Count).ThenBy(kv => kv.Key, StringComparer.Ordinal).Take(top)
             .Select(kv => new PatternInfo(kv.Key, kv.Value.Count, kv.Value.Levels, kv.Value.Sample, kv.Value.Spark)).ToList();
         return new PatternStats(scanned, n, sampled, map.Count, list);
@@ -596,6 +773,7 @@ public sealed class LogDocument : IDisposable
                 var src = _sources[si];
                 var inView = v is not null && v.Context is null && si < verdict.Count ? verdict[si] : null;
                 var h = hits[si];
+                // Batches run in parallel; each one only writes its own entries' slots in h.
                 src.ForEachEntryBatch(0, h.Length, (first, texts) =>
                 {
                     for (var i = 0; i < texts.Length; i++)
@@ -604,10 +782,13 @@ public sealed class LogDocument : IDisposable
                         if (inView is not null && (e >= inView.Count || inView[e] != 1)) continue;
                         if (match(texts[i])) h[e] = true;
                     }
-                    done += texts.Length;
+                    return true;
+                }, (_, n, _) =>
+                {
+                    done += n;
                     progress?.Report(total > 0 ? (double)done / total : 1);
                     return true;
-                }, ct);
+                }, ct, ScanBatch, ScanInParallel);
             }
         }
         catch (OperationCanceledException)
@@ -805,31 +986,41 @@ public sealed class LogDocument : IDisposable
         static string Q(string s) => "\"" + s.Replace("\"", "\"\"") + "\"";
         if (format == "csv")
             w.WriteLine(string.Join(',', (Merged ? new[] { "source" } : []).Concat(["line"]).Concat(cols.Select(c => c.Title)).Select(Q)));
-        for (var r = 0; r < n; r += 2000)
+        var blocks = new List<(int Start, int Count)>();
+        for (var r = 0; r < n; r += 2000) blocks.Add((r, 2000));
+        var written = 0;
+        var newLine = w.NewLine;
+        // Rows are read and formatted on all cores, and written here in order.
+        ForEachRowBlock(blocks, rows =>
         {
-            foreach (var row in GetRows(r, 2000))
+            var sb = new StringBuilder();
+            foreach (var row in rows)
             {
                 var srcName = System.IO.Path.GetFileName(_sources[row.Source].Path);
                 switch (format)
                 {
                     case "csv":
-                        w.WriteLine(string.Join(',', (Merged ? new[] { srcName } : []).Concat([row.Line.ToString()]).Concat(cols.Select(c => row.Field(c.Key))).Select(Q)));
+                        sb.Append(string.Join(',', (Merged ? new[] { srcName } : []).Concat([row.Line.ToString()]).Concat(cols.Select(c => row.Field(c.Key))).Select(Q))).Append(newLine);
                         break;
                     case "jsonl":
                         var obj = new Dictionary<string, object>();
                         if (Merged) obj["source"] = srcName;
                         obj["line"] = row.Line;
                         foreach (var (k, val) in row.Fields) obj[k] = val;
-                        w.WriteLine(JsonSerializer.Serialize(obj));
+                        sb.Append(JsonSerializer.Serialize(obj)).Append(newLine);
                         break;
                     default:
-                        w.Write(row.Text);
-                        w.Write('\n');
+                        sb.Append(row.Text).Append('\n');
                         break;
                 }
             }
-            progress?.Report(Math.Min(1, (r + 2000.0) / Math.Max(1, n)));
-        }
+            return (Text: sb.ToString(), Rows: rows.Count);
+        }, chunk =>
+        {
+            w.Write(chunk.Text);
+            written += chunk.Rows;
+            progress?.Report(Math.Min(1, (double)written / Math.Max(1, n)));
+        }, default);
         return n;
     });
 

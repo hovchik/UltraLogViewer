@@ -1,12 +1,14 @@
 // A small pool of worker threads that scan file chunks in parallel (see scanChunk.ts). Indexing is CPU bound on the
-// per-line format scan, so spreading chunks over the cores is what makes multi-gigabyte files open quickly.
+// per-line format scan, so spreading chunks over the cores is what makes multi-gigabyte files open quickly. The same
+// workers read and test entry batches for search, filtering, grouping, patterns, field stats and export (entryScan.ts).
 
 import * as os from 'node:os';
 import { Worker } from 'node:worker_threads';
+import { EntryJob, jobBuffers, RangeResult, RowsResult } from './entryScan';
 import { ChunkScan, FormatSpec } from './scanChunk';
 
 interface Job {
-  resolve: (r: ChunkScan) => void;
+  resolve: (r: unknown) => void;
   reject: (e: Error) => void;
 }
 
@@ -27,6 +29,11 @@ export class ScanPool {
 
   constructor(private script: string, readonly size = Math.max(1, Math.min(8, os.availableParallelism?.() ?? os.cpus().length))) {}
 
+  /** Chunks queued or being scanned, over all files. */
+  get pending() {
+    return this.jobs.size;
+  }
+
   /** False once a worker failed to start or crashed; callers then scan on their own thread. */
   get usable() {
     return !this.broken;
@@ -34,6 +41,16 @@ export class ScanPool {
 
   /** Scans `buf` (which is transferred to the worker and unusable afterwards). */
   scan(spec: FormatSpec, encoding: string, buf: Uint8Array, pos: number): Promise<ChunkScan> {
+    const ab = buf.buffer as ArrayBuffer;
+    return this.post(spec, { encoding, buf: ab, offset: buf.byteOffset, length: buf.byteLength, pos }, [ab]);
+  }
+
+  /** Reads and evaluates a batch of entries (see entryScan.ts); the job's arrays are transferred to the worker. */
+  entries(spec: FormatSpec, job: EntryJob): Promise<RangeResult | RowsResult> {
+    return this.post(spec, { job }, jobBuffers(job));
+  }
+
+  private post<T>(spec: FormatSpec, msg: object, transfer: ArrayBuffer[]): Promise<T> {
     if (this.slots.length < this.size) this.spawn();
     const slot = this.slots.reduce((a, b) => (b.pending < a.pending ? b : a));
     let specId = specIds.get(spec);
@@ -42,22 +59,18 @@ export class ScanPool {
     slot.specs.add(specId);
     const id = this.nextJob++;
     slot.pending++;
-    return new Promise<ChunkScan>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       this.jobs.set(id, {
         resolve: (r) => {
           slot.pending--;
-          resolve(r);
+          resolve(r as T);
         },
         reject: (e) => {
           slot.pending--;
           reject(e);
         },
       });
-      const ab = buf.buffer as ArrayBuffer;
-      slot.worker.postMessage(
-        { id, specId, spec: sendSpec ? spec : undefined, encoding, buf: ab, offset: buf.byteOffset, length: buf.byteLength, pos },
-        [ab],
-      );
+      slot.worker.postMessage({ id, specId, spec: sendSpec ? spec : undefined, ...msg }, transfer);
     });
   }
 
@@ -65,7 +78,7 @@ export class ScanPool {
     const worker = new Worker(this.script);
     worker.unref(); // an idle pool never keeps the process alive
     const slot: Slot = { worker, pending: 0, specs: new Set() };
-    worker.on('message', (m: { id: number; result?: ChunkScan; error?: string }) => {
+    worker.on('message', (m: { id: number; result?: unknown; error?: string }) => {
       const job = this.jobs.get(m.id);
       if (!job) return;
       this.jobs.delete(m.id);

@@ -441,6 +441,422 @@ export function customFormat(def: CustomFormat, ctx: FormatContext): LogFormat {
   };
 }
 
+// ------------------------------------------------------------------ logfmt
+//
+// Built-in formats for databases, Rust, macOS, Laravel and logfmt. Each regex is written from the format's
+// documented default layout; test/fixtures/format-samples.json shows what each one accepts.
+
+/** logfmt `key=value` pairs: values are bare up to a space, or "quoted" with backslash escapes. */
+export function logfmtPairs(line: string, requireEquals = false): [string, string][] {
+  const out: [string, string][] = [];
+  let i = 0;
+  const isSep = (c: string) => c === ' ' || c === '\t';
+  while (i < line.length) {
+    while (i < line.length && isSep(line[i])) i++;
+    const ks = i;
+    while (i < line.length && !isSep(line[i]) && line[i] !== '=' && line[i] !== '"') i++;
+    const key = line.slice(ks, i);
+    if (!key) {
+      if (i < line.length) i++; // stray '=' or '"'
+      continue;
+    }
+    if (i >= line.length || line[i] !== '=') {
+      if (!requireEquals) out.push([key, '']);
+      continue;
+    }
+    i++;
+    let value = '';
+    if (line[i] === '"') {
+      i++;
+      while (i < line.length && line[i] !== '"') {
+        if (line[i] === '\\' && i + 1 < line.length) {
+          i++;
+          value += line[i] === 'n' ? '\n' : line[i] === 't' ? '\t' : line[i];
+        } else value += line[i];
+        i++;
+      }
+      i++;
+    } else {
+      const vs = i;
+      while (i < line.length && !isSep(line[i])) i++;
+      value = line.slice(vs, i);
+    }
+    out.push([key, value]);
+  }
+  return out;
+}
+
+const LOGFMT_KEYS = {
+  time: ['ts', 'time', 't', 'timestamp', '@timestamp', 'date', 'datetime'],
+  level: ['level', 'lvl', 'severity', 'loglevel', 'log.level'],
+  message: ['msg', 'message', 'event'],
+  logger: ['logger', 'component', 'module', 'name', 'source'],
+};
+const LOGFMT_START = /^[A-Za-z_@][\w.@/-]*=/;
+
+/** A logfmt line: starts with key=value, has at least two pairs, and one of them is a time, level or message key. */
+function isLogfmt(line: string): boolean {
+  if (!LOGFMT_START.test(line)) return false;
+  const pairs = logfmtPairs(line, true);
+  if (pairs.length < 2) return false;
+  const known = [...LOGFMT_KEYS.time, ...LOGFMT_KEYS.level, ...LOGFMT_KEYS.message];
+  return pairs.some(([k]) => known.includes(k.toLowerCase()));
+}
+
+function pickPair(pairs: [string, string][], keys: string[]): [string, string | null] {
+  for (const k of keys) for (const [pk, v] of pairs) if (pk.toLowerCase() === k) return [v, pk];
+  return ['', null];
+}
+
+export function logfmtFormat(): LogFormat {
+  return {
+    id: 'logfmt',
+    name: 'logfmt (key=value: Go kit, logrus, Grafana, Heroku…)',
+    columns: [C_TIME, C_LEVEL, C_LOGGER, C_MESSAGE],
+    multiline: false,
+    isEntryStart: () => true,
+    quick(line) {
+      const pairs = logfmtPairs(line, true);
+      if (!pairs.length) return { level: detectLevel(line), time: null };
+      const [lv, lk] = pickPair(pairs, LOGFMT_KEYS.level);
+      return { level: lk === null ? detectLevel(line) : parseLevel(lv), time: parseTimestamp(pickPair(pairs, LOGFMT_KEYS.time)[0] || null) };
+    },
+    parse(entry) {
+      const pairs = logfmtPairs(entry, true);
+      const [time, tk] = pickPair(pairs, LOGFMT_KEYS.time);
+      const [level, lk] = pickPair(pairs, LOGFMT_KEYS.level);
+      const [msg, mk] = pickPair(pairs, LOGFMT_KEYS.message);
+      const [logger, gk] = pickPair(pairs, LOGFMT_KEYS.logger);
+      const lvl = levelText(lk === null ? detectLevel(entry) : parseLevel(level));
+      const d: Record<string, string> = { time, level: lvl || level, logger, message: mk === null ? entry : msg };
+      for (const [k, v] of pairs) {
+        if (k === tk || k === lk || k === mk || k === gk || k === '__proto__' || Object.hasOwn(d, k) || Object.keys(d).length >= MAX_FIELDS) continue;
+        d[k] = v;
+      }
+      return d;
+    },
+  };
+}
+
+// ------------------------------------------------------------ Rust tracing
+
+// Microsecond (or finer) RFC 3339 time, as tracing prints it; generic "ISO INFO name: text" lines stay "timestamped".
+const RUST = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6,9}(?:Z|[+-]\d{2}:\d{2})) {1,2}(TRACE|DEBUG|INFO|WARN|ERROR) (?:((?:[\w-]+(?:\{[^}]*\})?)(?::[\w-]+(?:\{[^}]*\})?)*): )??([A-Za-z_]\w*(?:::\w+)*): (.*)$/;
+const RUST_FIELD = /(?<![\w.])([A-Za-z_][\w.]*)=("(?:[^"\\]|\\.)*"|[^\s{}]+)/g;
+
+/**
+ * Rust `tracing_subscriber::fmt` default output:
+ *   2024-05-01T10:00:00.123456Z  INFO request{id=7}:db: my_app::store: saved rows=3
+ * Span fields and trailing key=value fields become fields.
+ */
+export function rustTracingFormat(): LogFormat {
+  return {
+    id: 'rust',
+    name: 'Rust tracing (fmt)',
+    columns: [C_TIME, C_LEVEL, col('spans', 'Spans', 160), col('target', 'Target', 180), C_MESSAGE],
+    multiline: true,
+    isEntryStart: (line) => RUST.test(line),
+    quick(line) {
+      const m = RUST.exec(line);
+      return m ? { level: parseLevel(m[2]), time: parseTimestamp(m[1]) } : { level: detectLevel(line), time: null };
+    },
+    parse(entry) {
+      const m = RUST.exec(firstLine(entry));
+      if (!m) return { message: entry };
+      const d: Record<string, string> = { time: m[1], level: levelText(parseLevel(m[2])), spans: m[3] ?? '', target: m[4], message: m[5] + restLines(entry) };
+      for (const f of `${m[3] ?? ''} ${m[5]}`.matchAll(RUST_FIELD)) {
+        const v = f[2];
+        if (!Object.hasOwn(d, f[1]) && f[1] !== '__proto__') d[f[1]] = v.length > 1 && v[0] === '"' ? v.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\') : v;
+      }
+      return d;
+    },
+  };
+}
+
+// --------------------------------------------------------------- PostgreSQL
+
+const POSTGRES =
+  /^(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?)(?: (?<tz>[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?))? \[(?<pid>\d+)\](?::? \[\d+(?:-\d+)?\])? (?:user=(?<user>[^,\s]*),db=(?<db>[^,\s]*)(?:,app=(?<app>[^,]*?))?(?:,client=(?<client>\S*?))? |(?<user2>[^@\s]*)@(?<db2>\S*) )?(?<sev>DEBUG[1-5]?|LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION): {1,2}(?<msg>.*)$/;
+const PG_DETAIL = new Set(['DETAIL', 'HINT', 'STATEMENT', 'CONTEXT', 'QUERY', 'LOCATION']);
+
+function pgSeverity(sev: string): Level {
+  if (sev === 'LOG' || sev === 'INFO' || sev === 'NOTICE') return Level.Info;
+  if (sev === 'WARNING') return Level.Warn;
+  if (sev === 'ERROR') return Level.Error;
+  if (sev === 'FATAL' || sev === 'PANIC') return Level.Fatal;
+  return sev.startsWith('DEBUG') ? Level.Debug : Level.None;
+}
+
+function pgTime(g: Record<string, string | undefined>): number | null {
+  const tz = g.tz ?? '';
+  const iso = g.time!.replace(' ', 'T');
+  // Named zones other than UTC/GMT are read as local time.
+  return parseTimestamp(tz === 'UTC' || tz === 'GMT' ? iso + 'Z' : tz && (tz[0] === '+' || tz[0] === '-') ? iso + (tz.length === 3 ? tz + ':00' : tz) : iso);
+}
+
+/**
+ * PostgreSQL with the default `log_line_prefix = '%m [%p] '` (Debian: `'%m [%p] %q%u@%d '`, pgBadger:
+ * `'%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '`). DETAIL/HINT/STATEMENT/CONTEXT lines belong to the message
+ * above them, so an ERROR keeps its statement.
+ */
+export function postgresFormat(): LogFormat {
+  const scan = (line: string): QuickInfo | null => {
+    const m = POSTGRES.exec(line);
+    if (!m || PG_DETAIL.has(m.groups!.sev)) return null;
+    return { level: pgSeverity(m.groups!.sev), time: pgTime(m.groups!) };
+  };
+  return {
+    id: 'postgres',
+    name: 'PostgreSQL',
+    columns: [C_TIME, col('pid', 'PID', 64), col('user', 'User', 90), col('db', 'DB', 90), C_LEVEL, C_MESSAGE],
+    multiline: true,
+    isEntryStart: (line) => scan(line) !== null,
+    scan,
+    quick: (line) => scan(line) ?? { level: detectLevel(line), time: null },
+    parse(entry) {
+      const m = POSTGRES.exec(firstLine(entry));
+      if (!m) return { message: entry };
+      const g = m.groups!;
+      const d: Record<string, string> = {
+        time: g.time + (g.tz ? ' ' + g.tz : ''),
+        pid: g.pid,
+        user: g.user ?? g.user2 ?? '',
+        db: g.db ?? g.db2 ?? '',
+        level: levelText(pgSeverity(g.sev)),
+        severity: g.sev,
+        message: g.msg + restLines(entry),
+      };
+      if (g.app !== undefined) d.app = g.app;
+      if (g.client !== undefined) d.client = g.client;
+      const dm = /\bduration: (\d+(?:\.\d+)? ms)/.exec(g.msg);
+      if (dm) d.duration = dm[1];
+      return d;
+    },
+  };
+}
+
+// -------------------------------------------------------------------- MySQL
+
+const MYSQL_ERROR = /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?) +(\d+) \[(System|Note|Warning|Error|ERROR|Warn)\](?: \[(MY-\d+)\])?(?: \[(\w+)\])? ?(.*)$/;
+const mysqlLevel = (s: string) => (s === 'Warning' || s === 'Warn' ? Level.Warn : s === 'Error' || s === 'ERROR' ? Level.Error : Level.Info);
+
+/** MySQL / MariaDB error log: `2024-05-01T10:00:00.123456Z 0 [Warning] [MY-010068] [Server] CA certificate is self signed.` */
+export function mysqlErrorFormat(): LogFormat {
+  return {
+    id: 'mysql-error',
+    name: 'MySQL error log',
+    columns: [C_TIME, col('thread', 'Thread', 64), C_LEVEL, col('code', 'Code', 100), col('subsystem', 'Subsystem', 90), C_MESSAGE],
+    multiline: true,
+    isEntryStart: (line) => MYSQL_ERROR.test(line),
+    quick(line) {
+      const m = MYSQL_ERROR.exec(line);
+      return m ? { level: mysqlLevel(m[3]), time: parseTimestamp(m[1]) } : { level: detectLevel(line), time: null };
+    },
+    parse(entry): Record<string, string> {
+      const m = MYSQL_ERROR.exec(firstLine(entry));
+      if (!m) return { message: entry };
+      return { time: m[1], thread: m[2], level: levelText(mysqlLevel(m[3])), code: m[4] ?? '', subsystem: m[5] ?? '', message: m[6] + restLines(entry) };
+    },
+  };
+}
+
+/** Lines MySQL writes at the top of the general and slow query logs, and again after every restart. */
+const MYSQL_PREAMBLE = /^(?:.*mysqld(?:\.exe)?, Version: .*started with:|Tcp port: \d+ .*|Time +Id +Command +Argument)\s*$/;
+const MYSQL_GENERAL =
+  /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+(\d+) (Connect|Query|Quit|Init DB|Prepare|Execute|Close stmt|Reset stmt|Field List|Statistics|Ping|Shutdown|Change user|Binlog Dump|Long Data|Refresh|Kill|Debug|Processlist|Set option|Fetch|Daemon|Error|Sleep|Time|Register Slave|Connect Out|Create DB|Drop DB)(?:\t(.*))?$/;
+const isMysqlGeneral = (line: string) => MYSQL_GENERAL.test(line) || MYSQL_PREAMBLE.test(line);
+const generalLevel = (command: string, arg: string) =>
+  command === 'Error' ? Level.Error : command === 'Connect' && arg.startsWith('Access denied') ? Level.Warn : Level.Info;
+
+/** MySQL general query log: `2024-05-01T10:00:00.123456Z\t    8 Query\tSELECT 1`. */
+export function mysqlGeneralFormat(): LogFormat {
+  return {
+    id: 'mysql-general',
+    name: 'MySQL general query log',
+    columns: [C_TIME, col('id', 'Thread', 64), col('command', 'Command', 90), C_LEVEL, C_MESSAGE],
+    multiline: true,
+    isEntryStart: isMysqlGeneral,
+    quick(line) {
+      const m = MYSQL_GENERAL.exec(line);
+      return m ? { level: generalLevel(m[3], m[4] ?? ''), time: parseTimestamp(m[1]) } : { level: Level.None, time: null };
+    },
+    parse(entry): Record<string, string> {
+      const m = MYSQL_GENERAL.exec(firstLine(entry));
+      if (!m) return { message: entry };
+      return { time: m[1], id: m[2], command: m[3], level: levelText(generalLevel(m[3], m[4] ?? '')), message: (m[4] ?? '') + restLines(entry) };
+    },
+  };
+}
+
+const SLOW_TIME = /^# Time: (?:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)|(\d{2})(\d{2})(\d{2}) +(\d{1,2}):(\d{2}):(\d{2}))\s*$/;
+const SLOW_USER = /^# User@Host: (\S*?)\[[^\]]*\] @ (\S*) \[([^\]]*)\](?:\s+Id:\s*(\d+))?/;
+
+function slowTime(m: RegExpExecArray): number | null {
+  return m[1] ? parseTimestamp(m[1]) : new Date(2000 + +m[2], +m[3] - 1, +m[4], +m[5], +m[6], +m[7]).getTime();
+}
+
+/**
+ * MySQL slow query log. Each entry starts at `# Time:` and holds the `# User@Host` and `# Query_time` lines and the
+ * statement. Servers that print `# Time:` only when the second changes (MySQL 5.6, MariaDB) put queries of the same
+ * second in one entry.
+ */
+export function mysqlSlowFormat(): LogFormat {
+  return {
+    id: 'mysql-slow',
+    name: 'MySQL slow query log',
+    columns: [C_TIME, col('query_time', 'Query time', 90), col('rows_examined', 'Rows examined', 100), col('user', 'User', 90), col('db', 'DB', 80), C_MESSAGE],
+    multiline: true,
+    isEntryStart: (line) => line.startsWith('# Time: ') || MYSQL_PREAMBLE.test(line),
+    quick(line) {
+      const m = SLOW_TIME.exec(line);
+      return m ? { level: Level.Info, time: slowTime(m) } : { level: Level.None, time: null };
+    },
+    parse(entry) {
+      const lines = entry.split('\n');
+      if (!SLOW_TIME.test(lines[0].replace(/\r$/, ''))) return { message: entry };
+      const d: Record<string, string> = { time: lines[0].slice(8).trim(), query_time: '', rows_examined: '', user: '', db: '', level: levelText(Level.Info), message: '' };
+      const sql: string[] = [];
+      for (const raw of lines.slice(1)) {
+        const l = raw.replace(/\r$/, '');
+        let m: RegExpExecArray | null;
+        if ((m = SLOW_USER.exec(l))) {
+          d.user = m[1];
+          d.host = m[2] || m[3];
+          if (m[4] !== undefined) d.id = m[4];
+        } else if (l.startsWith('#')) {
+          // "# Query_time: 2.5  Lock_time: 0.0001 Rows_sent: 1  Rows_examined: 100000", MariaDB "# Schema: shop ..."
+          for (const s of l.matchAll(/(\w+): (\S+)/g)) {
+            const k = s[1].toLowerCase();
+            d[k === 'schema' ? 'db' : k] = s[2];
+          }
+        } else if ((m = /^use (\w+);$/i.exec(l))) d.db = m[1];
+        else if (!/^SET timestamp=/i.test(l) && l) sql.push(l);
+      }
+      d.message = sql.length ? sql.join('\n') : entry;
+      return d;
+    },
+  };
+}
+
+// ------------------------------------------------------------------ MongoDB
+
+const MONGO_HEAD = /^\s*\{"t":\{"\$date":"([^"]+)"\},\s*"s":"(\w+)"/;
+
+/** F fatal, E error, W warning, I info, D1 debug, D2–D5 more verbose debug (shown as trace). */
+function mongoSeverity(s: string): Level {
+  switch (s) {
+    case 'F':
+      return Level.Fatal;
+    case 'E':
+      return Level.Error;
+    case 'W':
+      return Level.Warn;
+    case 'I':
+      return Level.Info;
+    case 'D':
+    case 'D1':
+      return Level.Debug;
+    default:
+      return s.length === 2 && s[0] === 'D' ? Level.Trace : Level.None;
+  }
+}
+
+/** MongoDB 4.4+ structured log: `{"t":{"$date":"…"},"s":"I","c":"NETWORK","id":22943,"ctx":"listener","msg":"…","attr":{…}}`. */
+export function mongoFormat(): LogFormat {
+  return {
+    id: 'mongodb',
+    name: 'MongoDB (4.4+ JSON)',
+    columns: [C_TIME, C_LEVEL, col('component', 'Component', 90), col('ctx', 'Context', 110), col('id', 'ID', 64), C_MESSAGE],
+    multiline: false,
+    isEntryStart: () => true,
+    quick(line) {
+      const m = MONGO_HEAD.exec(line);
+      return m ? { level: mongoSeverity(m[2]), time: parseTimestamp(m[1]) } : { level: detectLevel(line), time: null };
+    },
+    parse(entry) {
+      const o = tryJson(entry);
+      if (!o) return { message: entry };
+      const t = o.t;
+      const time = t && typeof t === 'object' ? str((t as Record<string, unknown>).$date) : str(t);
+      const d: Record<string, string> = { time, level: levelText(mongoSeverity(str(o.s))), component: str(o.c), ctx: str(o.ctx), id: str(o.id), message: str(o.msg) };
+      addExtras(d, o, '', new Set(['s', 'c', 'ctx', 'id', 'msg']), 0, { n: Object.keys(d).length });
+      delete d['t.$date']; // already the time
+      return d;
+    },
+  };
+}
+
+// ---------------------------------------------------------- macOS unified log
+
+const MACOS = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+[+-]\d{4})\s+(0x[0-9a-f]+)\s+(\w+)\s+(0x[0-9a-f]+)\s+(\d+)\s+(?:(\d+)\s+)?(.*)$/;
+const MACOS_REST = /^(.+?)(?:\[\d+\])?: (?:\(([^)]*)\) )?(?:\[([^\]:]+)(?::([^\]]*))?\] )?([\s\S]*)$/;
+const MACOS_PREAMBLE = /^(?:Filtering the log data using .*|Skipping info and debug messages.*|Timestamp +Thread +Type +Activity +PID.*|-{20,}|Log +- Default:.*)$/;
+const isMacos = (line: string) => MACOS.test(line) || MACOS_PREAMBLE.test(line);
+const macLevel = (type: string) =>
+  type === 'Debug' ? Level.Debug : type === 'Info' || type === 'Default' ? Level.Info : type === 'Error' ? Level.Error : type === 'Fault' ? Level.Fatal : Level.None;
+
+/** macOS unified log as printed by `log show` (default style). */
+export function macosFormat(): LogFormat {
+  return {
+    id: 'macos',
+    name: 'macOS unified log (log show)',
+    columns: [C_TIME, C_LEVEL, col('process', 'Process', 140), col('pid', 'PID', 64), col('subsystem', 'Subsystem', 160), C_MESSAGE],
+    multiline: true,
+    isEntryStart: isMacos,
+    quick(line) {
+      const m = MACOS.exec(line);
+      return m ? { level: macLevel(m[3]), time: parseTimestamp(m[1]) } : { level: Level.None, time: null };
+    },
+    parse(entry) {
+      const m = MACOS.exec(firstLine(entry));
+      if (!m) return { message: entry };
+      const d: Record<string, string> = {
+        time: m[1], level: levelText(macLevel(m[3])), process: '', pid: m[5], subsystem: '', message: m[7] + restLines(entry), thread: m[2], type: m[3], activity: m[4],
+      };
+      if (m[6] !== undefined) d.ttl = m[6];
+      const r = MACOS_REST.exec(m[7] + restLines(entry));
+      if (r) {
+        d.process = r[1];
+        if (r[2] !== undefined) d.library = r[2];
+        d.subsystem = r[3] ?? '';
+        if (r[4] !== undefined) d.category = r[4];
+        d.message = r[5];
+      }
+      return d;
+    },
+  };
+}
+
+// ------------------------------------------------------------------ Laravel
+
+const LARAVEL = /^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\] ([\w-]+)\.(DEBUG|INFO|NOTICE|WARNING|ERROR|CRITICAL|ALERT|EMERGENCY): (.*)$/;
+
+/** Laravel (Monolog line format): `[2024-05-01 10:00:00] production.ERROR: message {"exception":"…"} []` plus a stack trace. */
+export function laravelFormat(): LogFormat {
+  return {
+    id: 'laravel',
+    name: 'Laravel',
+    columns: [C_TIME, col('channel', 'Env', 90), C_LEVEL, C_MESSAGE],
+    multiline: true,
+    isEntryStart: (line) => LARAVEL.test(line),
+    quick(line) {
+      const m = LARAVEL.exec(line);
+      return m ? { level: parseLevel(m[3]), time: parseTimestamp(m[1]) } : { level: detectLevel(line), time: null };
+    },
+    parse(entry) {
+      const m = LARAVEL.exec(firstLine(entry));
+      if (!m) return { message: entry };
+      const d: Record<string, string> = { time: m[1], channel: m[2], level: levelText(parseLevel(m[3])), message: m[4] + restLines(entry) };
+      const e = /"exception":"\[object\] \(([\w\\]+)\(code: (-?\d+)\)/.exec(m[4]);
+      if (e) {
+        d.exception = e[1].replace(/\\\\/g, '\\');
+        d.code = e[2];
+      }
+      return d;
+    },
+  };
+}
+
 // ---------------------------------------------------------------- detection
 
 export interface DetectOptions {
@@ -486,12 +902,26 @@ export function detectFormatInfo(sample: string[], opts: DetectOptions = {}): Fo
     const f = w3cFormat(w3cFields.slice(8).trim().split(/\s+/));
     candidates.push({ f, min: 0, test: () => true });
   }
+  // Order matters: specific formats come before the general ones that would also accept their lines (MongoDB before
+  // JSON; the timestamp-first formats before "timestamped"). The slow query log is mostly SQL lines, so it is only
+  // picked when its "# Query_time:" lines are there (it can always be chosen by hand). Multi-line formats need fewer
+  // matching lines (stack traces, SQL), but their first line must match.
+  const slow = mysqlSlowFormat();
   candidates.push(
+    { f: slow, min: lines.some((l) => l.startsWith('# Query_time:')) ? 0 : 2, test: slow.isEntryStart },
+    { f: mongoFormat(), min: 0.6, test: (l) => MONGO_HEAD.test(l) },
     { f: jsonFormat(), min: 0.6, test: (l) => tryJson(l) !== null },
     { f: accessLogFormat(), min: 0.6, test: (l) => ACCESS.test(l) },
     { f: syslog5424Format(), min: 0.6, test: (l) => RFC5424.test(l) },
     { f: logcatFormat(ctx), min: 0.6, test: (l) => LOGCAT.test(l) },
     { f: syslogFormat(ctx), min: 0.5, test: (l) => RFC3164.test(l) },
+    { f: logfmtFormat(), min: 0.6, test: isLogfmt },
+    { f: postgresFormat(), min: 0.3, test: (l) => POSTGRES.test(l) },
+    { f: mysqlErrorFormat(), min: 0.3, test: (l) => MYSQL_ERROR.test(l) },
+    { f: mysqlGeneralFormat(), min: 0.3, test: isMysqlGeneral },
+    { f: rustTracingFormat(), min: 0.3, test: (l) => RUST.test(l) },
+    { f: macosFormat(), min: 0.3, test: isMacos },
+    { f: laravelFormat(), min: 0.3, test: (l) => LARAVEL.test(l) },
     { f: timestampedFormat(ctx), min: 0.1, test: (l) => matchTimestamp(l, ctx.year) !== null },
   );
   const count = (test: (l: string) => boolean) => lines.reduce((n, l) => n + (test(l) ? 1 : 0), 0);
@@ -512,7 +942,9 @@ export function detectFormatInfo(sample: string[], opts: DetectOptions = {}): Fo
   return plain(true);
 }
 
-export const FORMAT_IDS = ['json', 'access', 'syslog5424', 'logcat', 'syslog', 'timestamped', 'plain'] as const;
+export const FORMAT_IDS = [
+  'json', 'access', 'syslog5424', 'logcat', 'syslog', 'timestamped', 'logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel', 'plain',
+] as const;
 
 /** Short names for the format picker and the status bar. */
 export const FORMAT_LABELS: Record<string, string> = {
@@ -523,6 +955,15 @@ export const FORMAT_LABELS: Record<string, string> = {
   access: 'Apache / Nginx',
   w3c: 'W3C / IIS',
   logcat: 'Android logcat',
+  logfmt: 'logfmt',
+  postgres: 'PostgreSQL',
+  'mysql-error': 'MySQL error log',
+  'mysql-general': 'MySQL general log',
+  'mysql-slow': 'MySQL slow log',
+  mongodb: 'MongoDB JSON',
+  rust: 'Rust tracing',
+  macos: 'macOS unified log',
+  laravel: 'Laravel',
   plain: 'Plain text',
 };
 

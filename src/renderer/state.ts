@@ -1,4 +1,5 @@
 import type { TimeMode } from '../core/timestamp';
+import type { OpenWindow } from '../core/timeWindow';
 import { DEFAULT_FRAMEWORK_PACKAGES } from '../core/folding';
 import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, PatternsResult, SearchResult, TextPattern } from '../core/types';
 
@@ -65,6 +66,8 @@ export interface Settings {
   frameworkPackages?: string[];
   /** Workspace files, most recent first. */
   recentWorkspaces?: string[];
+  /** Save the index of big files so reopening them is instant (default on). */
+  indexCache?: boolean;
 }
 
 /** Display settings with their defaults resolved. */
@@ -120,8 +123,16 @@ export interface Tab {
   follow: boolean;
   formatId: string;
   encoding?: string;
+  /** The time window this tab was opened with (null: the whole file). */
+  window?: OpenWindow | null;
   error?: string;
   progress?: { phase: string; fraction: number };
+  /** What the last filter or search scanned and how long it took, e.g. "Filtered 8,695,680 entries in 0.82 s". */
+  scanCost?: string;
+  /** The latest filter run (rows it finds arrive as partial views tagged with it) and the epoch the grid shows. */
+  filterSeq?: number;
+  filtering?: boolean;
+  partialEpoch?: number;
   /** "Show in context": every entry is shown, rows the filter hides are dimmed. */
   contextMode?: boolean;
   /** Line of the entry that was focused when context mode was entered (for the banner). */
