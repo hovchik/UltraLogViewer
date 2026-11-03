@@ -94,8 +94,13 @@ public record CustomFormat(string Name, string Pattern);
 /// <summary>A column; Width 0 means "take the remaining space".</summary>
 public record ColumnDef(string Key, string Title, double Width);
 
+/// <param name="Format">Format name (also the key for per-format column settings).</param>
+/// <param name="FormatLabel">Short format name for the picker and the status bar.</param>
+/// <param name="FormatAuto">The format was detected (false: the user picked it).</param>
+/// <param name="FormatMatched">Sampled non-empty lines from the start of the file that start an entry in this format.</param>
 public sealed record SourceInfo(int Id, string Path, string DisplayName, long Size, int Lines, int Entries,
-    string Format, string Encoding, bool Compressed, bool Live);
+    string Format, string Encoding, bool Compressed, bool Live,
+    string FormatId = "", string FormatLabel = "", bool FormatAuto = true, int FormatMatched = 0, int FormatSampled = 0);
 
 public sealed record DocInfo(int Total, int ViewCount, int[] LevelCounts, bool Indexing, double Progress,
     long? TimeMin, long? TimeMax, bool Merged, IReadOnlyList<SourceInfo> Sources, IReadOnlyList<ColumnDef> Columns);

@@ -450,10 +450,27 @@ export interface DetectOptions {
   force?: string;
 }
 
+/** The chosen format and how it was chosen, shown to the user as the file's format. */
+export interface FormatDetection {
+  format: LogFormat;
+  /** Picked by detection (false: the user chose it). */
+  auto: boolean;
+  /** Non-empty sample lines that start an entry in this format, out of `sampled`. */
+  matched: number;
+  sampled: number;
+}
+
 /** Picks the best format for a sample of lines from the start of a file. */
 export function detectFormat(sample: string[], opts: DetectOptions = {}): LogFormat {
+  return detectFormatInfo(sample, opts).format;
+}
+
+/** detectFormat, plus how well the sample fits the chosen format. */
+export function detectFormatInfo(sample: string[], opts: DetectOptions = {}): FormatDetection {
   const ctx: FormatContext = { year: opts.year ?? new Date().getFullYear() };
   const lines = sample.filter((l) => l.trim().length > 0).slice(0, 500);
+  const sampled = lines.length;
+  const plain = (auto: boolean): FormatDetection => ({ format: plainFormat(), auto, matched: sampled, sampled });
 
   const w3cFields = lines.find((l) => l.startsWith('#Fields:'));
   const candidates: { f: LogFormat; min: number; test: (l: string) => boolean }[] = [];
@@ -477,19 +494,38 @@ export function detectFormat(sample: string[], opts: DetectOptions = {}): LogFor
     { f: syslogFormat(ctx), min: 0.5, test: (l) => RFC3164.test(l) },
     { f: timestampedFormat(ctx), min: 0.1, test: (l) => matchTimestamp(l, ctx.year) !== null },
   );
+  const count = (test: (l: string) => boolean) => lines.reduce((n, l) => n + (test(l) ? 1 : 0), 0);
 
   if (opts.force) {
-    if (opts.force === 'plain') return plainFormat();
+    if (opts.force === 'plain') return plain(false);
     const forced = candidates.find((c) => c.f.id === opts.force);
-    if (forced) return forced.f;
+    if (forced) return { format: forced.f, auto: false, matched: count(forced.test), sampled };
   }
-  if (!lines.length) return plainFormat();
+  if (!lines.length) return plain(true);
   for (const c of candidates) {
-    const hits = lines.reduce((n, l) => n + (c.test(l) ? 1 : 0), 0);
+    const hits = count(c.test);
     // The first non-empty line must start an entry, otherwise we'd be guessing.
-    if (hits / lines.length >= c.min && hits > 0 && (c.min === 0 || c.test(lines[0]) || hits / lines.length > 0.5)) return c.f;
+    if (hits / lines.length >= c.min && hits > 0 && (c.min === 0 || c.test(lines[0]) || hits / lines.length > 0.5)) {
+      return { format: c.f, auto: true, matched: hits, sampled };
+    }
   }
-  return plainFormat();
+  return plain(true);
 }
 
 export const FORMAT_IDS = ['json', 'access', 'syslog5424', 'logcat', 'syslog', 'timestamped', 'plain'] as const;
+
+/** Short names for the format picker and the status bar. */
+export const FORMAT_LABELS: Record<string, string> = {
+  timestamped: 'Timestamped text',
+  json: 'JSON lines',
+  syslog: 'Syslog RFC 3164',
+  syslog5424: 'Syslog RFC 5424',
+  access: 'Apache / Nginx',
+  w3c: 'W3C / IIS',
+  logcat: 'Android logcat',
+  plain: 'Plain text',
+};
+
+export function formatLabel(id: string, name: string): string {
+  return FORMAT_LABELS[id] ?? (id.startsWith('custom:') ? `Custom: ${name}` : name);
+}

@@ -21,6 +21,9 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 - Auto-detected formats: timestamped text (log4j, logback, log4net, NLog, Serilog, Spring Boot,
   Python, Monolog…), JSON lines (Serilog, pino, bunyan, ECS, Logstash), syslog RFC 3164 and
   RFC 5424, Apache/Nginx access logs, W3C/IIS, Android logcat, plain text.
+- The status bar names each file's detected format (hover for how well the file matched it; click
+  to pick another). Plain text files without timestamps open one entry per line, with levels
+  guessed from words like `ERROR`/`error:` and the timeline hidden.
 - Custom formats: a regex with named groups (`timestamp`, `level`, `thread`, `logger`, `message`,
   or anything else), with a live tester.
 - Multi-line entries: stack traces stay attached to their entry (`+4` in the line gutter).

@@ -43,6 +43,10 @@ public class LevelTests
         Assert.Equal(Level.None, Levels.Parse("constructor"));
         Assert.Equal(Level.Error, Levels.Detect("12:00 [error] something"));
         Assert.Equal(Level.None, Levels.Detect("nothing here"));
+        // plain text often starts the line with the level
+        Assert.Equal(Level.Error, Levels.Detect("error: could not copy config.ini"));
+        Assert.Equal(Level.Warn, Levels.Detect("Warning: disk almost full"));
+        Assert.Equal(Level.None, Levels.Detect("Errors found: 0"));
     }
 }
 
@@ -95,6 +99,19 @@ public class FormatTests
         var w = FormatDetector.Detect(["#Software: IIS", "#Fields: date time cs-method cs-uri-stem sc-status", "2024-05-01 10:00:00 GET /x 404"]);
         Assert.Equal("w3c", w.Id);
         Assert.Equal(Level.Warn, w.Quick("2024-05-01 10:00:00 GET /x 404").Level);
+    }
+
+    [Fact]
+    public void ReportsHowTheFormatWasChosen()
+    {
+        var json = FormatDetector.DetectWithInfo(["{\"level\":\"info\",\"msg\":\"a\"}", "{\"level\":\"warn\",\"msg\":\"b\"}", "not json"]);
+        Assert.Equal(("json", true, 2, 3), (json.Format.Id, json.Auto, json.Matched, json.Sampled));
+        Assert.Equal("JSON lines", FormatDetector.Label(json.Format));
+        var forced = FormatDetector.DetectWithInfo(["hello", "{\"level\":\"info\"}"], force: "json");
+        Assert.Equal((false, 1, 2), (forced.Auto, forced.Matched, forced.Sampled));
+        var empty = FormatDetector.DetectWithInfo(["", "  "]);
+        Assert.Equal(("plain", true, 0), (empty.Format.Id, empty.Auto, empty.Sampled));
+        Assert.Equal("Custom: Mine", FormatDetector.Label(new CustomRegexFormat(new CustomFormat("Mine", "^(?<message>.*)$"), 2024)));
     }
 
     [Fact]

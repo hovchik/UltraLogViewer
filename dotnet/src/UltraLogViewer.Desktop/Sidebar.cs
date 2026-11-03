@@ -17,6 +17,7 @@ public sealed class Sidebar : ScrollViewer
     private readonly Dictionary<Level, TextBlock> _levelCounts = [];
     private TextBlock? _sourcesInfo;
     private TextBlock? _timeSpan;
+    private Control? _timeInputs;
     private readonly Border _fieldsHost = new();
     private DocumentTab? _tab;
 
@@ -64,6 +65,7 @@ public sealed class Sidebar : ScrollViewer
         foreach (var (l, tb) in _levelCounts) tb.Text = tab.Info.LevelCounts[(int)l].ToString("N0", CultureInfo.CurrentCulture);
         if (_sourcesInfo is not null) _sourcesInfo.Text = SourcesText(tab);
         if (_timeSpan is not null) _timeSpan.Text = TimeSpanText(tab);
+        SyncTimeInputs(tab);
     }
 
     // ---------------------------------------------------------------- helpers
@@ -386,8 +388,18 @@ public sealed class Sidebar : ScrollViewer
 
     // ------------------------------------------------------------------- time
 
+    private static bool Timeless(DocumentTab tab) =>
+        tab.Info is { Indexing: false, Total: > 0, TimeMin: null } && tab.Filter.TimeFrom is null && tab.Filter.TimeTo is null;
+
     private static string TimeSpanText(DocumentTab tab) =>
-        tab.Info.TimeMin is long a && tab.Info.TimeMax is long b ? $"{Timestamps.Format(a)} →\n{Timestamps.Format(b)}" : "No timestamps detected";
+        tab.Info.TimeMin is long a && tab.Info.TimeMax is long b ? $"{Timestamps.Format(a)} →\n{Timestamps.Format(b)}"
+        : Timeless(tab) ? "No timestamps in this file, so entries stay in file order and time filters don’t apply."
+        : "No timestamps detected";
+
+    private void SyncTimeInputs(DocumentTab tab)
+    {
+        if (_timeInputs is not null) _timeInputs.IsVisible = !Timeless(tab);
+    }
 
     private Border TimeSection(DocumentTab tab)
     {
@@ -428,11 +440,13 @@ public sealed class Sidebar : ScrollViewer
             return dp;
         }
         _timeSpan = Hint(TimeSpanText(tab));
+        _timeInputs = new StackPanel { Spacing = 4, Children = { Row("From", from), Row("To", to), Hint("Tip: drag across the timeline to select a range.") } };
+        SyncTimeInputs(tab);
         return Section(Header("Time range", Mini("Clear", () =>
         {
             f.TimeFrom = f.TimeTo = null;
             _host.ApplyFilter();
-        })), _timeSpan, Row("From", from), Row("To", to), Hint("Tip: drag across the timeline to select a range."));
+        })), _timeSpan, _timeInputs);
     }
 
     // ------------------------------------------------------------- highlights

@@ -55,7 +55,7 @@ public static partial class Levels
     [GeneratedRegex(@"\b(TRACE|VERBOSE|FINEST|FINER|DEBUG|FINE|INFO|INFORMATION|NOTICE|WARN|WARNING|ERROR|ERR|SEVERE|CRITICAL|CRIT|FATAL|PANIC|EMERG)\b", RegexOptions.CultureInvariant)]
     private static partial Regex BareRe();
 
-    [GeneratedRegex(@"[\[<(|:\s](trace|debug|info|notice|warn(?:ing)?|error|err|fatal|crit(?:ical)?|alert|emerg)[\]>)|:]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?:^|[\[<(|:\s])(trace|debug|info|notice|warn(?:ing)?|error|err|fatal|crit(?:ical)?|alert|emerg)[\]>)|:]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DelimitedRe();
 
     /// <summary>Heuristic level detection for free-form text: looks at the beginning of the line only.</summary>
@@ -63,7 +63,12 @@ public static partial class Levels
     {
         var head = text.Length > 240 ? text[..240] : text;
         foreach (var m in BareRe().EnumerateMatches(head)) return Parse(head.Slice(m.Index, m.Length).ToString());
-        foreach (var m in DelimitedRe().EnumerateMatches(head)) return Parse(head.Slice(m.Index + 1, m.Length - 2).ToString());
+        foreach (var m in DelimitedRe().EnumerateMatches(head))
+        {
+            // the match starts with its delimiter, except at the start of the text ("error: ...")
+            var lead = char.IsLetter(head[m.Index]) ? 0 : 1;
+            return Parse(head.Slice(m.Index + lead, m.Length - lead - 1).ToString());
+        }
         return Level.None;
     }
 

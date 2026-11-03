@@ -266,6 +266,9 @@ export class Sidebar {
     from.onchange = apply;
     to.onchange = apply;
     const info = tab.info;
+    if (!info.indexing && info.total > 0 && info.timeMin == null && f.timeFrom == null && f.timeTo == null) {
+      return h('div', { class: 'sec' }, h('h3', {}, 'Time range'), h('div', { class: 'empty-hint' }, 'No timestamps in this file, so entries stay in file order and time filters don’t apply.'));
+    }
     const span = info.timeMin != null && info.timeMax != null ? `${formatTime(info.timeMin)} → ${formatTime(info.timeMax)}` : 'No timestamps detected';
     return h(
       'div',

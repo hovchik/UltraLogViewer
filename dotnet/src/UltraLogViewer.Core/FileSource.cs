@@ -52,7 +52,8 @@ public sealed class FileSource : IDisposable
 
     public int Id { get; }
     public string Path { get; }
-    public LogFormat Format { get; private set; } = new PlainFormat();
+    public LogFormat Format => Detection.Format;
+    public FormatDetection Detection { get; private set; } = new(new PlainFormat(), true, 0, 0);
     public string EncodingName { get; private set; } = "utf-8";
     public bool Compressed { get; private set; }
     public bool Live => _tempFile is null;
@@ -66,7 +67,8 @@ public sealed class FileSource : IDisposable
     public ReadOnlySpan<byte> Levels => _entryLevel.Span;
     public ReadOnlySpan<long> Times => _entryTime.Span;
 
-    public SourceInfo Info() => new(Id, Path, System.IO.Path.GetFileName(Path), DataEnd, LineCount, EntryCount, Format.Name, EncodingName, Compressed, Live);
+    public SourceInfo Info() => new(Id, Path, System.IO.Path.GetFileName(Path), DataEnd, LineCount, EntryCount, Format.Name, EncodingName, Compressed, Live,
+        Format.Id, FormatDetector.Label(Format), Detection.Auto, Detection.Matched, Detection.Sampled);
 
     /// <summary>Prepares the file (decompress / transcode if needed), detects the format and indexes it.</summary>
     public async Task OpenAsync(IProgress<double>? progress = null, CancellationToken ct = default)
@@ -98,7 +100,7 @@ public sealed class FileSource : IDisposable
         }
         _handle = File.OpenHandle(_readPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         var size = RandomAccess.GetLength(_handle);
-        Format = FormatDetector.Detect(SampleLines(256 * 1024), File.GetLastWriteTime(_readPath).Year, _opts.CustomFormats, _opts.Format);
+        Detection = FormatDetector.DetectWithInfo(SampleLines(256 * 1024), File.GetLastWriteTime(_readPath).Year, _opts.CustomFormats, _opts.Format);
         DataEnd = _dataStart;
         await _gate.WaitAsync(ct);
         try
@@ -121,7 +123,7 @@ public sealed class FileSource : IDisposable
         try
         {
             var size = RandomAccess.GetLength(_handle!);
-            Format = FormatDetector.Detect(SampleLines(256 * 1024), File.GetLastWriteTime(_readPath).Year, _opts.CustomFormats, formatId);
+            Detection = FormatDetector.DetectWithInfo(SampleLines(256 * 1024), File.GetLastWriteTime(_readPath).Year, _opts.CustomFormats, formatId);
             ResetIndex();
             await Task.Run(() => IndexFrom(size, null, default));
         }
