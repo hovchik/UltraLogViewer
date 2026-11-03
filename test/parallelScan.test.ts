@@ -8,7 +8,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { LogDocument } from '../src/core/document';
-import { splitEntries } from '../src/core/entryScan';
+import { compileTextTest, splitEntries } from '../src/core/entryScan';
+import { detectFormat } from '../src/core/formats';
 import { FileSource } from '../src/core/fileSource';
 import { ScanPool } from '../src/core/scanPool';
 import { FilterRule, FilterSpec, Level, TextPattern } from '../src/core/types';
@@ -282,5 +283,15 @@ describe('entry texts', () => {
     await s.open();
     expect(s.readEntries(1, 2)).toEqual(s.readEntries(0, 2).slice(1));
     s.close();
+  });
+});
+
+describe('relative query times', () => {
+  it('count from the moment the filter fixed, not when a batch runs', () => {
+    const now = Date.UTC(2024, 4, 1, 12);
+    const fmt = detectFormat(['2024-05-01 10:00:00 INFO a']);
+    const test = compileTextTest({ rules: [], query: 'since:-1h and a', queryNow: now }, fmt)!;
+    expect(test('2024-05-01 11:30:00 INFO a', Level.Info, now - 30 * 60_000)).toBe(true);
+    expect(test('2024-05-01 10:30:00 INFO a', Level.Info, now - 90 * 60_000)).toBe(false);
   });
 });

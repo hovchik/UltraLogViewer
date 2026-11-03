@@ -30,7 +30,10 @@ export function splitEntries(text: string, counts: ArrayLike<number>): string[] 
 }
 
 /** The part of a filter that needs the entry text. */
-export type TextFilter = Pick<FilterSpec, 'rules' | 'query' | 'queryCaseSensitive'>;
+export type TextFilter = Pick<FilterSpec, 'rules' | 'query' | 'queryCaseSensitive'> & {
+  /** The moment relative times (`since:-1h`) count from, fixed once per filter so every batch and worker agrees. */
+  queryNow?: number;
+};
 
 /**
  * Compiles the text part of a filter: some include rule matches (when there are any), no exclude rule matches, and the
@@ -41,7 +44,7 @@ export function compileTextTest(spec: TextFilter, fmt: LogFormat): ((text: strin
     spec.rules.filter((r) => r.enabled && r.text && r.mode === mode).map((r) => ({ m: ruleMatcher(r), col: r.patternMatch ? undefined : r.column, pattern: !!r.patternMatch }));
   const includes = compiled('include');
   const excludes = compiled('exclude');
-  const query = spec.query?.trim() ? compileQuery(spec.query, !!spec.queryCaseSensitive) : null;
+  const query = spec.query?.trim() ? compileQuery(spec.query, !!spec.queryCaseSensitive, spec.queryNow ?? Date.now()) : null;
   if (!includes.length && !excludes.length && !query) return null;
   // Per-entry state lives here, and the closures are made once, so testing an entry allocates only what parsing needs.
   let text = '';

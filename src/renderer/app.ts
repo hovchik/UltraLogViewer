@@ -328,15 +328,19 @@ async function onDocReady(tab: Tab) {
   tab.progress = undefined;
   if (tab.pending) await applyPending(tab);
   // Line numbers of a partial view are not the file's: its bookmarks are neither restored nor saved.
-  if (tab.paths.length === 1 && !isPartial(tab)) {
-    const saved = settings.bookmarks?.[tab.paths[0]] ?? [];
-    for (const s of saved) {
-      const key = await engine.keyForLine(tab.id, 0, s.line);
-      if (!key) continue;
-      const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key)) ?? 0, 1);
-      tab.bookmarks.set(key, { key, line: s.line, source: 0, note: s.note, preview: firstLine(rows[0]?.fields.message || rows[0]?.text || '') });
+  // Saved per source path, so the members of a zip and the files of a merge each keep their own (as in the .NET app).
+  if (!isPartial(tab)) {
+    let restored = 0;
+    for (const [source, src] of tab.info.sources.entries()) {
+      for (const s of settings.bookmarks?.[src.path] ?? []) {
+        const key = await engine.keyForLine(tab.id, source, s.line);
+        if (!key) continue;
+        const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key)) ?? 0, 1);
+        tab.bookmarks.set(key, { key, line: s.line, source, note: s.note, preview: firstLine(rows[0]?.fields.message || rows[0]?.text || '') });
+        restored++;
+      }
     }
-    if (saved.length) await resolveBookmarkRows(tab);
+    if (restored) await resolveBookmarkRows(tab);
   }
   if (!isDefaultFilter(tab)) await applyFilter(tab);
   if (tab.search.pattern.text) void runSearch(tab, false, tab.search.pattern);
@@ -1118,11 +1122,13 @@ const firstLine = (s: string) => {
 };
 
 function persistBookmarks(tab: Tab) {
-  if (tab.paths.length !== 1 || isPartial(tab)) return;
-  settings.bookmarks ??= {};
-  const list = [...tab.bookmarks.values()].map((b) => ({ line: b.line, note: b.note }));
-  if (list.length) settings.bookmarks[tab.paths[0]] = list;
-  else delete settings.bookmarks[tab.paths[0]];
+  if (isPartial(tab)) return;
+  const bookmarks = (settings.bookmarks ??= {});
+  for (const [source, src] of tab.info.sources.entries()) {
+    const list = [...tab.bookmarks.values()].filter((b) => b.source === source).sort((a, b) => a.line - b.line).map((b) => ({ line: b.line, note: b.note }));
+    if (list.length) bookmarks[src.path] = list;
+    else delete bookmarks[src.path];
+  }
   saveSettings();
 }
 
@@ -1307,7 +1313,10 @@ async function applyPending(tab: Tab) {
     else saveSettings();
   }
   for (const b of p.bookmarks) {
-    const source = Math.max(0, tab.paths.indexOf(b.path));
+    // Saved paths are source paths (a zip member is `archive.zip::member`); a single-file tab takes older entries too.
+    let source = tab.info.sources.findIndex((src) => src.path === b.path);
+    if (source < 0) source = tab.info.sources.length === 1 ? 0 : tab.paths.indexOf(b.path);
+    if (source < 0) continue;
     const key = await engine.keyForLine(tab.id, source, b.line);
     if (!key) continue;
     const rows = await engine.rows(tab.id, (await engine.rowForKey(tab.id, key, true)) ?? 0, 1);
