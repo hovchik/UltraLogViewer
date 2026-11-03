@@ -161,6 +161,8 @@ export interface Tab {
   scanCost?: string;
   /** The latest filter run (rows it finds arrive as partial views tagged with it) and the epoch the grid shows. */
   filterSeq?: number;
+  /** onDocReady is still restoring bookmarks, pins and the tab's filter (a request waits for it, see openRequests.ts). */
+  settling?: boolean;
   filtering?: boolean;
   partialEpoch?: number;
   /** "Show in context": every entry is shown, rows the filter hides are dimmed. */

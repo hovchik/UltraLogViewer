@@ -79,7 +79,7 @@ await step('filters by a cell value from the row menu', async () => {
   await win.waitForFunction((l) => {
     const cells = [...document.querySelectorAll('.grid-rows .r .c[data-col="logger"]')];
     return cells.length > 0 && cells.every((c) => c.textContent.trim() === l);
-  }, logger, { timeout: 20000 }).catch(() => {});
+  }, logger, { timeout: 20000 });
   const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
   assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === logger), `loggers: ${loggers.slice(0, 5)}`);
   assert.ok((await win.locator('#sidebar .rule .txt').allInnerTexts()).includes(`Logger = ${logger}`));
@@ -199,7 +199,11 @@ await step('colours tokens in messages', async () => {
   assert.notEqual(await win.$eval('.grid-rows .r:not(.sel) .c.msg .tk-number', (e) => getComputedStyle(e).color), await win.$eval('.grid-rows .r:not(.sel) .c.msg', (e) => getComputedStyle(e).color));
   // the level stripe replaces the row tint by default
   assert.equal(await win.locator('#grid.tint').count(), 0);
-  assert.equal(await win.$eval('.grid-rows .r.l5:not(.sel)', (e) => getComputedStyle(e, '::after').width), '3px');
+  // (polled: under load the rows can be redrawn between finding one and reading its style)
+  await win.waitForFunction(() => {
+    const r = document.querySelector('.grid-rows .r.l5:not(.sel)');
+    return !!r && getComputedStyle(r, '::after').width === '3px';
+  }, null, { timeout: 10000 });
   await shot('11-tokens');
 });
 
@@ -208,9 +212,8 @@ await step('wraps long messages with Alt+Z', async () => {
   await win.setViewportSize({ width: 1000, height: 900 });
   await win.focus('#grid');
   await win.keyboard.press('Alt+z');
-  await win.waitForSelector('#grid.wrap .grid-rows .r.var');
-  const tallest = await win.$$eval('.grid-rows .r.var', (els) => Math.max(...els.map((e) => e.offsetHeight)));
-  assert.ok(tallest > 30, `tallest wrapped row: ${tallest}px`);
+  // (rows are drawn again as they arrive: wait for a wrapped one rather than reading the first frame)
+  await win.waitForFunction(() => [...document.querySelectorAll('#grid.wrap .grid-rows .r.var')].some((e) => e.offsetHeight > 30), null, { timeout: 10000 });
   await shot('12-wrap');
   await win.keyboard.press('Alt+z');
   await win.waitForSelector('#grid:not(.wrap)');
@@ -225,7 +228,8 @@ await step('expands a multi-line entry inline with the arrow keys', async () => 
   const open = win.locator('.grid-rows .r.cur.open');
   await open.waitFor();
   assert.match(await open.locator('.rx').innerText(), /at com\.acme/);
-  assert.ok((await open.evaluate((e) => e.offsetHeight)) > 60);
+  // the open row gets its height when the grid measures it, a frame after the text is in
+  await win.waitForFunction(() => (document.querySelector('.grid-rows .r.cur.open')?.offsetHeight ?? 0) > 60, null, { timeout: 10000 });
   await shot('13-expand');
   await win.keyboard.press('ArrowLeft');
   await win.waitForSelector('.grid-rows .r.open', { state: 'detached' });
@@ -409,8 +413,11 @@ await step('Clear hides every entry so far', async () => {
   await win.waitForFunction(() => /[\d,]+ cleared · Show/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   await win.waitForFunction(() => document.querySelectorAll('.grid-rows .r .c').length === 0);
   fs.appendFileSync(log, '2030-01-01 00:00:03,000 [main] WARN  com.acme.Tail - after clear\n');
-  await win.waitForSelector('.grid-rows .r:has-text("after clear")', { timeout: 10000 });
-  assert.equal(await win.locator('.grid-rows .r .c[data-col="message"]').count(), 1);
+  // one entry since the clear (an update redraws the rows: wait for the drawn state, not a frame of it)
+  await win.waitForFunction(() => {
+    const msgs = [...document.querySelectorAll('.grid-rows .r .c[data-col="message"]')];
+    return msgs.length === 1 && /after clear/.test(msgs[0].textContent);
+  }, null, { timeout: 10000 });
   await win.locator('#status .show-cleared').click();
   await win.waitForFunction(() => !/cleared/.test(document.querySelector('#status')?.textContent ?? '') && document.querySelectorAll('.grid-rows .r .c').length > 20, null, { timeout: 20000 });
 });
@@ -458,6 +465,10 @@ await step('groups the timeline by logger and filters from the legend', async ()
   await win.locator('#histogram .hist-legend .lg').nth(1).click();
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   assert.equal(await win.inputValue('#quick'), `logger==${key}`);
+  await win.waitForFunction((k) => {
+    const cells = [...document.querySelectorAll('.grid-rows .r .c[data-col="logger"]')];
+    return cells.length > 0 && cells.every((c) => c.textContent.trim() === k);
+  }, key, { timeout: 20000 });
   const loggers = await win.locator('.grid-rows .r .c[data-col="logger"]').allInnerTexts();
   assert.ok(loggers.length > 0 && loggers.every((l) => l.trim() === key), `loggers: ${loggers.slice(0, 3)}`);
   // the grouping follows the filter: one logger left
@@ -675,6 +686,7 @@ await step('names the detected format and opens plain text without timestamps', 
   assert.match(await win.locator('#status .fmt').innerText(), /Plain text\s*auto/);
   assert.match(await win.locator('#status .fmt').getAttribute('title'), /no known log layout, so each line is one entry/);
   assert.equal(await win.locator('#format option[value=""]').innerText(), 'Auto: Plain text');
+  await win.waitForFunction(() => [...document.querySelectorAll('.grid-header .h')].map((h) => h.textContent).join() === 'Level,Message', null, { timeout: 10000 }).catch(() => {});
   assert.deepEqual(await win.locator('.grid-header .h').allInnerTexts(), ['Level', 'Message']);
   assert.equal((await win.locator('.grid-rows .r:has-text("could not copy") .c[data-col="level"]').innerText()).trim(), 'ERROR');
   await win.waitForSelector('#histogram.hidden', { state: 'attached' });
@@ -924,7 +936,17 @@ await step('a second launch hands its files, filter and "go to" to the running w
   assert.equal(await activeTab(), 'api.log');
   await win.waitForFunction(() => document.querySelector('#quick')?.value === 'db=users');
   await win.waitForFunction(() => /20 of 40|20 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
-  await win.waitForSelector('.grid-rows .r.sel:has-text("call 21 ")', { timeout: 10000 });
+  await win.waitForSelector('.grid-rows .r.sel:has-text("call 21 ")', { timeout: 20000 });
+  // a remote file on the command line opens over ssh, and handing it over again shows the same tab
+  const tabs = await win.locator('.tab').count();
+  assert.equal(await secondLaunch(['web1:/var/log/app.log']), 0);
+  await win.waitForFunction(() => document.querySelector('.tab.active .name')?.textContent === 'web1:/var/log/app.log', null, { timeout: 20000 });
+  await win.waitForSelector('.grid-rows .r:has-text("remote two")', { timeout: 20000 });
+  assert.equal(await secondLaunch(['ssh://web1/var/log/app.log']), 0);
+  await win.waitForTimeout(500);
+  assert.equal(await win.locator('.tab').count(), tabs + 1);
+  await win.locator('.tab.active .x').click();
+  await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n, tabs);
 });
 
 await step('a link asks before it opens, then shows its filter', async () => {
@@ -938,6 +960,9 @@ await step('a link asks before it opens, then shows its filter', async () => {
   // and a link with a relative path opens nothing
   fs.writeFileSync(linkLog, '');
   assert.equal(await secondLaunch(['ultralogviewer://open?path=api.log']), 0);
+  // nor does a link to a remote file (that would run ssh)
+  assert.equal(await secondLaunch([`ultralogviewer://open?path=${encodeURIComponent('ssh://web1/var/log/app.log')}`]), 0);
+  assert.equal(await secondLaunch(['ultralogviewer://open?path=web1:/var/log/app.log']), 0);
   await win.waitForTimeout(500);
   assert.equal(await win.locator('.tab').count(), before + 1);
   assert.equal(fs.readFileSync(linkLog, 'utf-8'), '');

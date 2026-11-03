@@ -152,10 +152,14 @@ export class SqlPanel {
     this.editor.value = st.query;
     this.render(st.result);
     if (st.schema) this.renderSchema(st.schema);
-    else if (!tab.info.indexing) void engine.sqlSchema(tab.id).then((cols) => {
-      st.schema = cols;
-      if (this.tab === tab) this.renderSchema(cols);
-    });
+    else if (!tab.info.indexing)
+      void engine.sqlSchema(tab.id).then(
+        (cols) => {
+          st.schema = cols;
+          if (this.tab === tab) this.renderSchema(cols);
+        },
+        () => undefined, // closed meanwhile; Run asks again
+      );
   }
 
   /** The tab was closed: forget it (the engine drops its table with the document). */

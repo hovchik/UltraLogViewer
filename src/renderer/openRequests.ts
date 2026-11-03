@@ -7,6 +7,7 @@ import { curlExample, OpenRequest, requestToUrl } from '../core/openRequest';
 import type { OpenWindow } from '../core/timeWindow';
 import type { RowData } from '../core/types';
 import { engine, ulv } from './api';
+import { normalizeRemote, sourceUrl } from './remote';
 import type { Tab } from './state';
 import { toast } from './util';
 
@@ -37,7 +38,8 @@ const sameWindow = (a: OpenWindow | null | undefined, b: OpenWindow | null | und
   (a?.since ?? null) === (b?.since ?? null) && (a?.until ?? null) === (b?.until ?? null) && (a?.last ?? null) === (b?.last ?? null);
 
 const indexed = async (h: OpenRequestHost, t: Tab) => {
-  while (t.info.indexing && !t.error && h.allTabs().includes(t)) await new Promise((r) => setTimeout(r, 30));
+  // (also while the tab restores its own filter: that filter would run over this request's and move the selection)
+  while ((t.info.indexing || t.settling) && !t.error && h.allTabs().includes(t)) await new Promise((r) => setTimeout(r, 30));
   return h.allTabs().includes(t) && !t.error;
 };
 
@@ -47,7 +49,8 @@ const indexed = async (h: OpenRequestHost, t: Tab) => {
  */
 export async function applyOpenRequest(h: OpenRequestHost, req: OpenRequest): Promise<Tab | null> {
   if (req.errors.length) toast(req.errors.slice(0, 5).join('\n'), true);
-  const files = req.paths.filter((p) => p !== '-');
+  // remote files (only the command line can name them) as ssh:// URLs, the form kept in recent files
+  const files = req.paths.filter((p) => p !== '-').map(normalizeRemote);
   if (!files.length) return null;
   let format = req.format ?? undefined;
   if (format && !h.knownFormat(format)) {
@@ -59,7 +62,8 @@ export async function applyOpenRequest(h: OpenRequestHost, req: OpenRequest): Pr
   const groups = req.merge && files.length > 1 ? [files] : files.map((f) => [f]);
   let last: Tab | null = null;
   for (const g of groups) {
-    let tab = req.newTab ? undefined : h.tabs().find((t) => t.paths.length === g.length && t.paths.every((p, i) => p === g[i]) && sameWindow(t.window, window) && (!format || t.formatId === format));
+    // (a remote file's tab has its local copy, whose source names the URL)
+    let tab = req.newTab ? undefined : h.tabs().find((t) => t.paths.length === g.length && t.paths.every((p, i) => sourceUrl(t.info.sources, p) === g[i]) && sameWindow(t.window, window) && (!format || t.formatId === format));
     if (tab) h.activate(tab);
     else {
       // null: it could not open (a remote file that failed already said why)

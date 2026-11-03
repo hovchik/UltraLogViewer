@@ -63,6 +63,13 @@ function gridHost(self: () => Grid) {
     },
     onSelectionChange: () => {
       if (!focus()) return;
+      // Selecting an earlier row stops following (as in the .NET app): when every row fits on the screen the grid is
+      // "at the end" and would follow, and the next update would move the selection away from the chosen row.
+      const t = paneTab(self());
+      if (t?.follow && t.focus < t.info.viewCount - 1) {
+        t.follow = false;
+        renderToolbar();
+      }
       void updateDetail();
       renderStatus();
       syncOtherPane();
@@ -341,12 +348,17 @@ async function closeTab(tab: Tab) {
   sqlPanel.closed(tab);
   const split = tab.split;
   tab.split = null;
+  // Another tab first: while the engine closes this one, nothing may still treat it as the active tab (a debounced
+  // search or redraw would ask the engine about a document that is gone).
+  if (wasActive) activate(tabs[Math.min(i, tabs.length - 1)] ?? null);
+  else renderTabs();
   // The files stay open while another tab (a duplicate) still uses them.
   await engine.close(tab.id);
   if (split) await engine.close(split.id);
-  if (wasActive) activate(tabs[Math.min(i, tabs.length - 1)] ?? null);
-  else renderTabs();
 }
+
+/** The tab was closed (its document may be gone from the engine). */
+const gone = (t: Tab) => !allTabs().includes(t);
 
 function renderTabs() {
   const el = $('#tabs');
@@ -629,8 +641,8 @@ function refreshInactivePane(t: Tab) {
 
 // --------------------------------------------------------------- engine events
 
-const refreshOverviewSoon = debounce((tab: Tab) => void refreshOverview(tab, true), 250);
-const rerunSearchSoon = debounce((tab: Tab) => void runSearch(tab, false, undefined, false), 800);
+const refreshOverviewSoon = debounce((tab: Tab) => !gone(tab) && void refreshOverview(tab, true), 250);
+const rerunSearchSoon = debounce((tab: Tab) => !gone(tab) && void runSearch(tab, false, undefined, false), 800);
 
 window.ulv.onEvent((raw) => {
   const ev = raw as EngineEvent;
@@ -653,6 +665,8 @@ window.ulv.onEvent((raw) => {
   }
   const wasIndexing = tab.info.indexing;
   const before = tab.info.viewCount;
+  // the columns can arrive with any update (not only a reset): the header must follow them
+  const columnsChanged = tab.info.columns.map((c) => c.key).join('\n') !== ev.info.columns.map((c) => c.key).join('\n');
   tab.info = ev.info;
   if (wasIndexing && !ev.info.indexing) void onDocReady(tab);
   // live tail: rows appended to the view
@@ -666,10 +680,11 @@ window.ulv.onEvent((raw) => {
   }
   if (appended > 0 && document.visibilityState === 'visible') grid.flash(before, ev.info.viewCount);
   renderPill();
-  if (ev.reset) grid.renderHeader();
+  if (ev.reset || columnsChanged) grid.renderHeader();
   if (tab.follow) tab.topRow = Number.MAX_SAFE_INTEGER;
   grid.invalidate();
-  if (tab.follow && tab.info.viewCount) {
+  // Following moves the selection to new rows; any other update (a filter's reset, a status change) leaves it alone.
+  if (tab.follow && tab.info.viewCount && (appended > 0 || tab.focus >= tab.info.viewCount)) {
     tab.focus = tab.anchor = tab.info.viewCount - 1;
     void updateDetail();
   }
@@ -711,6 +726,16 @@ function showPartialView(tab: Tab, ev: Extract<EngineEvent, { type: 'view-partia
 const scanCost = (verb: string, entries: number, ms: number) => `${verb} ${fmtNum(entries)} ${entries === 1 ? 'entry' : 'entries'} in ${(ms / 1000).toFixed(2)} s`;
 
 async function onDocReady(tab: Tab) {
+  // Set in the same tick as info.indexing turns false, so nothing sees the tab ready before this has run.
+  tab.settling = true;
+  try {
+    await settle(tab);
+  } finally {
+    tab.settling = false;
+  }
+}
+
+async function settle(tab: Tab) {
   tab.progress = undefined;
   if (tab.pending) await applyPending(tab);
   // Line numbers of a partial view are not the file's: its bookmarks are neither restored nor saved.
@@ -1427,7 +1452,13 @@ async function runSearch(tab: Tab, jump: boolean, pattern: TextPattern = tab ===
     return;
   }
   const started = performance.now();
-  const result = await engine.search(tab.id, pattern);
+  let result: Awaited<ReturnType<typeof engine.search>>;
+  try {
+    result = await engine.search(tab.id, pattern);
+  } catch (e) {
+    if (gone(tab)) return; // closed meanwhile
+    throw e;
+  }
   if (result.cancelled || tab.search.pattern !== pattern) return;
   tab.search.result = result;
   if (showCost) tab.scanCost = scanCost('Searched', tab.info.total, performance.now() - started);
@@ -1961,7 +1992,13 @@ async function updateDetail() {
   const token = ++detailToken;
   const get = async (r: number) => grid.getCached(r) ?? (await engine.rows(t.id, r, 1))[0];
   const lo = Math.min(t.anchor, t.focus), hi = Math.max(t.anchor, t.focus);
-  const [first, last] = await Promise.all([get(lo), lo === hi ? Promise.resolve(undefined) : get(hi)]);
+  let first: RowData | undefined, last: RowData | undefined;
+  try {
+    [first, last] = await Promise.all([get(lo), lo === hi ? Promise.resolve(undefined) : get(hi)]);
+  } catch (e) {
+    if (gone(t)) return; // closed meanwhile
+    throw e;
+  }
   if (token !== detailToken) return;
   detail.render(t, t.anchor === t.focus ? first : (t.focus === lo ? first : last) ?? first, last);
 }
