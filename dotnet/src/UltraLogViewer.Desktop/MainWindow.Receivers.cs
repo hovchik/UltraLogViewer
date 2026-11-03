@@ -171,11 +171,12 @@ public sealed partial class MainWindow
             }
             s.Protocol = ReceiverOptions.Protocols[Math.Max(0, protocol.SelectedIndex)].P;
             s.Port = int.Parse(port.Text!, CultureInfo.InvariantCulture);
-            s.Bind = bind.Text!.Trim();
+            var chosen = bind.Text!.Trim();
+            s.Bind = LogReceiver.IsLoopback(chosen) ? chosen : "127.0.0.1"; // a public bind is never remembered: it is chosen each time
             s.MaxMessageKb = int.Parse(max.Text!, CultureInfo.InvariantCulture);
             s.CapMb = long.Parse(cap.Text!, CultureInfo.InvariantCulture);
             _settings.Save();
-            w.Close(new ReceiverOptions(s.Protocol, s.Bind, s.Port, s.MaxMessageKb * 1024, s.CapMb * 1024 * 1024));
+            w.Close(new ReceiverOptions(s.Protocol, chosen, s.Port, s.MaxMessageKb * 1024, s.CapMb * 1024 * 1024));
         };
         cancel.Click += (_, _) => w.Close(null);
         return await w.ShowDialog<ReceiverOptions?>(this);

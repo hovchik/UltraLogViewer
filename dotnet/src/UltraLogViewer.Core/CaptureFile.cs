@@ -177,9 +177,12 @@ public sealed class CaptureFile : IDisposable
         while (Written + Dropped < Lines && !_writer.IsCompleted && DateTime.UtcNow < until) await Task.Delay(10);
     }
 
-    /// <summary>Stops taking lines and closes the file after writing what is queued (waits at most a few seconds).</summary>
+    /// <summary>
+    /// Stops taking lines; what is queued is still written and the file closed in the background (this waits a moment
+    /// for that, never long: it runs when a tab closes, on the UI thread).
+    /// </summary>
     public void Dispose()
     {
-        if (_queue.Writer.TryComplete()) _writer.Wait(TimeSpan.FromSeconds(3));
+        if (_queue.Writer.TryComplete()) _writer.Wait(TimeSpan.FromMilliseconds(300));
     }
 }

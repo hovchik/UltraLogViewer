@@ -712,6 +712,6 @@ public sealed partial class Sidebar : ScrollViewer
         _sourcesInfo = new TextBlock { Classes = { "hint" }, Text = SourcesText(tab) };
         ToolTip.SetTip(_sourcesInfo, string.Join("\n", tab.Paths));
         var title = tab.Paths.Length > 1 ? "Sources (merged by time)" : "Source";
-        return tab.Capture is { } c ? Section(title, CaptureBox(tab, c), _sourcesInfo) : Section(title, _sourcesInfo);
+        return Section(title, [.. CaptureControls(tab), _sourcesInfo]);
     }
 }

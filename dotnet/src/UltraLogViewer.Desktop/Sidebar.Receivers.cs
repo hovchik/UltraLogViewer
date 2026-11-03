@@ -11,6 +11,13 @@ public sealed partial class Sidebar
     private TextBlock? _captureInfo;
     private Button? _captureStop;
 
+    private Control[] CaptureControls(DocumentTab tab)
+    {
+        _captureInfo = null;
+        _captureStop = null;
+        return tab.Capture is { } c ? [CaptureBox(tab, c)] : [];
+    }
+
     private Control CaptureBox(DocumentTab tab, ILiveCapture capture)
     {
         _captureInfo = new TextBlock { Text = capture.Status, TextWrapping = Avalonia.Media.TextWrapping.Wrap, FontSize = 12, Name = "capture-status" };
