@@ -29,6 +29,14 @@ const api = {
   startupOptions: (): Promise<{ window: { since?: number | null; until?: number | null; last?: number | null } | null; errors: string[]; stdin: boolean }> =>
     ipcRenderer.invoke('startup-options'),
   pathForFile: (f: File) => webUtils.getPathForFile(f),
+  /** Which AI keys are saved (never the keys themselves) and how they are protected. */
+  aiKeys: (): Promise<{ anthropic: boolean; openai: boolean; protection: string }> => ipcRenderer.invoke('ai:keys'),
+  /** Saves a key in the main process; an empty key deletes it. */
+  aiSetKey: (provider: string, key: string) => ipcRenderer.invoke('ai:set-key', provider, key),
+  /** Sends a prompt the user approved; the main process adds the key and refuses while AI is off. */
+  aiSend: (id: number, prompt: { system: string; user: string }): Promise<{ ok: boolean; text?: string; error?: string; cancelled?: boolean }> =>
+    ipcRenderer.invoke('ai:send', id, prompt),
+  aiAbort: (id: number) => ipcRenderer.invoke('ai:abort', id),
   platform: process.platform,
 };
 

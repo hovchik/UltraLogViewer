@@ -6,6 +6,7 @@ import { fieldToken, OPERATORS, operatorHint, splitToken, tokenAt, validatePatte
 import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
+import { AiFeatures, aiSettingsDialog, isAiQuestion } from './ai';
 import { AutoHighlight } from './autoHighlight';
 import { DetailView } from './detail';
 import { Grid } from './grid';
@@ -129,8 +130,34 @@ const detail = new DetailView(
   (ref) => void openSourceRef(ref, settings),
 );
 
+// AI: Extract fields… (with an offline guess), Explain this entry / pattern, "? question" in the quick filter.
+const ai = new AiFeatures({
+  settings: () => settings.ai,
+  openSettings: () => openAiSettings(),
+  rows: (t, start, count) => (count > 0 ? engine.rows(t.id, start, count) : Promise.resolve([])),
+  formatLabel: (t) => formatSummary(t)?.label ?? 'unknown',
+  filtered: (t) => !isDefaultFilter(t) && !t.contextMode,
+  showDetail: () => settings.showDetail === false && toggleLayout('showDetail'),
+  editFormat: (sample, name, pattern) => editCustomFormat({ sample, name, pattern }),
+  validateQuery: (t, q) => validateQuery(q, !!t.filter.queryCaseSensitive),
+  applyQuery: (t, q) => {
+    applyQuery(t, q);
+    if (t === active) saveHistory(q);
+  },
+});
+detail.aiPane = ai.pane.el;
+
+async function openAiSettings(): Promise<boolean> {
+  settings.ai ??= {};
+  // Saved right away (not debounced): the main process reads the opt-in from settings.json before each request.
+  const saved = await aiSettingsDialog(settings.ai, () => ulv().setSettings(settings as Record<string, unknown>));
+  if (saved) toast(settings.ai.enabled ? 'AI is on. Every request asks first.' : 'AI is off: nothing is sent');
+  return !!settings.ai.enabled;
+}
+
 const patternsView = new PatternsView($('#patterns'), {
   onlyPattern: (p) => active && addPatternRule(active, p, 'include'),
+  explain: (p) => active && void ai.explainPattern(active, p),
   excludePattern: (p) => active && addPatternRule(active, p, 'exclude'),
   copy: (text, what) => copyText(text, what),
   rescan: (all) => active && void refreshPatterns(active, all),
@@ -257,12 +284,14 @@ function activate(tab: Tab | null) {
 
 /** Closes a tab (with its split pane); for a split pane, closes the split. */
 async function closeTab(tab: Tab) {
+  ai.requests.abort(tab);
   if (tab.splitOf) return closeSplit(tab.splitOf);
   const i = tabs.indexOf(tab);
   if (i < 0) return;
   tabs.splice(i, 1);
   const wasActive = ownerOf(active) === tab;
   for (const t of tab.split ? [tab, tab.split] : [tab]) {
+    ai.requests.abort(t);
     clearTimeout(statsTimers.get(t));
     statsTimers.delete(t);
     clearTimeout(patternTimers.get(t));
@@ -1311,6 +1340,8 @@ function rowMenu(e: MouseEvent, row: RowData, key: string | null) {
     { label: 'Copy entry', action: () => copyText(row.text, 'Entry') },
     { label: 'Toggle bookmark', shortcut: 'B', action: () => void toggleBookmark(row) },
     { label: pins.has(t, row.key) ? 'Unpin row' : 'Pin row', shortcut: 'Ctrl+P', action: () => pins.toggle(row) },
+    'sep',
+    ...ai.rowItems(t, row),
   );
   contextMenu(e.clientX, e.clientY, items);
 }
@@ -1445,7 +1476,8 @@ $('#s-filter').onclick = () => {
 
 /** Applies the quick-filter box (no-op when unchanged). */
 function commitQuick() {
-  if (!active || (active.filter.query ?? '') === quickInput.value) return;
+  // "? question" goes to the AI on Enter, never in as a filter.
+  if (!active || (active.filter.query ?? '') === quickInput.value || isAiQuestion(quickInput.value)) return;
   // A bad query is reported and the view keeps the last good filter.
   const err = validateQuery(quickInput.value, !!active.filter.queryCaseSensitive);
   if (err) return toast(`Quick filter: ${err}`, true);
@@ -1553,6 +1585,7 @@ quickInput.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (ac.open && ac.acceptCurrent()) return;
     ac.close();
+    if (isAiQuestion(quickInput.value)) return void (active && ai.askFilter(active, quickInput.value));
     commitQuick();
     saveHistory(quickInput.value);
   } else if (e.key === 'Tab') {
@@ -2109,11 +2142,12 @@ async function reformat(t: Tab) {
   void refreshOverview(t);
 }
 
-function editCustomFormat() {
-  const sample = active ? grid.getCached(active.focus)?.text.split('\n')[0] ?? '' : '';
+/** `prefill` comes from "Extract fields…": a proposed name and pattern, and sample lines to test them on. */
+function editCustomFormat(prefill?: { sample: string[]; name: string; pattern: string }) {
+  const sample = prefill?.sample[0] ?? (active ? grid.getCached(active.focus)?.text.split('\n')[0] ?? '' : '');
   modal((box, close) => {
-    const name = h('input', { type: 'text', placeholder: 'Name, e.g. My service' });
-    const pattern = h('input', { type: 'text', placeholder: '^(?<timestamp>\\S+ \\S+) (?<level>\\w+) (?<message>.*)$', spellcheck: false });
+    const name = h('input', { type: 'text', placeholder: 'Name, e.g. My service', value: prefill?.name });
+    const pattern = h('input', { type: 'text', class: 'cf-pattern', placeholder: '^(?<timestamp>\\S+ \\S+) (?<level>\\w+) (?<message>.*)$', spellcheck: false, value: prefill?.pattern });
     const test = h('input', { type: 'text', value: sample, spellcheck: false });
     const out = h('pre', { style: 'font:12px var(--mono);background:var(--bg-2);padding:8px;border-radius:6px;min-height:40px;white-space:pre-wrap' });
     const check = () => {
@@ -2253,6 +2287,9 @@ function showHelp() {
     ['Ctrl+Alt+S', 'Save workspace'],
     ['Timeline: click / drag', 'Jump to time / filter to a time range'],
     ['Timeline: Group by', 'Stack by logger, thread, file or any field; click a legend item to filter'],
+    ['? question in the quick filter, Enter', 'Ask AI for a filter; you review the query before it runs (AI › AI settings…)'],
+    ['Right-click a row › Extract fields…', 'Propose a custom format for plain-text lines (AI, or a guess from the tokens when AI is off)'],
+    ['Right-click a row › Explain this entry', 'Ask AI what an entry means; the answer appears in the details pane'],
   ];
   // The quick-filter syntax, shown under the shortcuts.
   const syntax: [string, string][] = [
@@ -2269,6 +2306,7 @@ function showHelp() {
     ['logger:com.acme.*, thread:worker-*', 'Wildcards match the whole value; a trailing .* is the package and everything below it'],
     ['exists(traceId), env?=prod', 'The field is present / equals the value or is missing'],
     ['since:-3h, until:-10m', 'Relative to now; also since:2024-05-01T10:00, since:today'],
+    ['? errors from the db logger in the last hour', 'A leading ? asks AI to write the query (when AI is on); it is shown for review first'],
   ];
   modal((box, close) => {
     const table = (rows: [string, string][]) => {
@@ -2357,6 +2395,19 @@ window.ulv.onMenu((cmd, ...args) => {
       return void togglePinAtFocus();
     case 'source-settings':
       return editSourceSettings(settings, saveSettings);
+    case 'ai-settings':
+      return void openAiSettings();
+    case 'ai-explain':
+    case 'ai-extract': {
+      const t = active;
+      const row = t && grid.getCached(t.focus);
+      if (!t || !row) return toast('Select a row first');
+      return void (cmd === 'ai-explain' ? ai.explainEntry(t, row) : ai.extract(t, row));
+    }
+    case 'ai-filter':
+      focusQuick();
+      if (!isAiQuestion(quickInput.value)) quickInput.value = '? ';
+      return quickInput.setSelectionRange(quickInput.value.length, quickInput.value.length);
     case 'toggle-follow':
       return toggleFollow();
     case 'toggle-histogram':
@@ -2506,6 +2557,7 @@ async function init() {
     timelineGroups: () => histogram.shownGroups,
     setHistogramGroup: (field: string) => active && setHistogramGroup(active, field),
     autoHighlight: () => autoHighlight.current,
+    ai,
   };
 }
 

@@ -16,8 +16,8 @@ public static class AiRedaction
 
     private static readonly (string Name, Regex Re, Func<Match, string?> Replace)[] Rules =
     [
-        // Authorization: Bearer xyz (also "Basic"): the scheme stays, the credential goes.
-        ("bearer", new Regex(@"\b(Bearer|Basic)(\s+)[A-Za-z0-9\-._~+/]+=*", O | RegexOptions.IgnoreCase, Limit), m => $"{m.Groups[1].Value}{m.Groups[2].Value}<token>"),
+        // Authorization: Bearer xyz (also "Basic"): the scheme stays, the credential (8+ chars) goes.
+        ("bearer", new Regex(@"\b((?i:bearer)|Basic)(\s+)[A-Za-z0-9\-._~+/]{8,}=*", O, Limit), m => $"{m.Groups[1].Value}{m.Groups[2].Value}<token>"),
         ("jwt", new Regex(@"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", O, Limit), _ => "<jwt>"),
         // password=..., "secret": "...", api_key: ..., token=...: keep the key, mask the value.
         ("secret", new Regex(@"\b((?:pass(?:word|wd)?|pwd|secret|client[_-]?secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|access[_-]?key|private[_-]?key|auth)""?)(\s*[:=]\s*)(""[^""]*""|'[^']*'|[^\s,;&""']+)",

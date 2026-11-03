@@ -5,6 +5,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import * as http from 'node:http';
 import assert from 'node:assert/strict';
 
 const out = path.resolve('e2e/out');
@@ -652,6 +653,80 @@ await step('opens only a time window, says so, and loads the whole file', async 
     const m = document.querySelector('#status')?.textContent?.match(/([\d,]+) entries/);
     return !!m && Number(m[1].replace(/,/g, '')) > n && !/Indexing/.test(document.querySelector('#status')?.textContent ?? '');
   }, partial, { timeout: 30000 });
+});
+
+await step('AI: extract fields offline, consent preview (Cancel sends nothing), explain and a reviewed filter', async () => {
+  const labels = (await win.evaluate(() => window.ulv.menuItems())).map((m) => m.label);
+  for (const l of ['AI › Explain selected entry', 'AI › Extract fields from selected line…', 'AI › Ask AI for a filter… (? in the quick filter)', 'AI › AI settings…'])
+    assert.ok(labels.includes(l), `menu item ${l}`);
+  // A local OpenAI-compatible endpoint stands in for the provider: nothing leaves the machine.
+  const seen = [];
+  let answer = 'Disk space is low.';
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen.push({ url: req.url, body });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: answer } }] }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}/v1`;
+  try {
+    await win.click('.tab:has-text("notes.txt")');
+    const row = win.locator('.grid-rows .r:has-text("disk almost full") .c[data-col="message"]');
+    await row.click({ button: 'right' });
+    await win.locator('.ctxmenu .item', { hasText: 'Explain this entry' }).waitFor();
+    await win.locator('.ctxmenu .item', { hasText: 'Extract fields…' }).click();
+    // AI is off: the existing custom format editor opens with a guess from the tokens
+    const guess = await win.locator('.modal .cf-pattern').inputValue();
+    assert.match(guess, /^\^.*\(\?<message>\.\*\)\$$/);
+    await win.locator('.modal .btn', { hasText: 'Cancel' }).click();
+    // turn AI on, pointed at the local endpoint
+    const settingsId = (await win.evaluate(() => window.ulv.menuItems())).find((m) => m.label === 'AI › AI settings…').id;
+    await win.evaluate((id) => window.ulv.runMenuItem(id), settingsId);
+    await win.waitForSelector('#ai-enabled');
+    await win.waitForTimeout(300);
+    await win.check('#ai-enabled');
+    await win.check('.modal input[value="openai"]');
+    await win.locator('.modal input[placeholder="http://localhost:11434/v1"]').fill(base);
+    await win.locator('.modal .btn.primary', { hasText: 'Save' }).click();
+    await win.waitForSelector('.modal', { state: 'hidden' });
+    // the consent preview appears; Cancel sends nothing
+    await row.click({ button: 'right' });
+    await win.locator('.ctxmenu .item', { hasText: 'Explain this entry' }).click();
+    await win.waitForSelector('.modal .ai-consent-text');
+    assert.match(await win.locator('.modal .ai-consent-text').inputValue(), />>> Entry to explain:\nWARNING: disk almost full\n<<</);
+    assert.match(await win.locator('.modal').innerText(), /This will be sent to 127\.0\.0\.1:\d+, model llama3\.1/);
+    await shot('26-ai-consent');
+    await win.locator('.modal .ai-cancel').click();
+    await win.waitForTimeout(300);
+    assert.equal(seen.length, 0, 'Cancel must send nothing');
+    // Send: the answer shows in the details pane
+    await row.click({ button: 'right' });
+    await win.locator('.ctxmenu .item', { hasText: 'Explain this entry' }).click();
+    await win.locator('.modal .ai-send').click();
+    await win.waitForSelector('#detail .ai-pane:not(.hidden):not(.running) .ai-text:has-text("Disk space is low.")');
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].url, '/v1/chat/completions');
+    assert.match(JSON.parse(seen[0].body).messages[1].content, /WARNING: disk almost full/);
+    await shot('27-ai-answer');
+    // "? question" in the quick filter: the proposed query is reviewed before it runs
+    answer = '{"query": "level:error", "explanation": "Only errors"}';
+    await win.fill('#quick', '? only the errors');
+    await win.press('#quick', 'Enter');
+    await win.locator('.modal .ai-send').click();
+    await win.waitForSelector('.modal .ai-query');
+    assert.equal(await win.locator('.modal .ai-query').inputValue(), 'level:error');
+    assert.doesNotMatch(await status(), /filtered|shown/);
+    await win.locator('.modal .ai-apply').click();
+    await win.waitForFunction(() => /1 of 7|1 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+    assert.equal(await win.inputValue('#quick'), 'level:error');
+    assert.equal(seen.length, 2);
+  } finally {
+    server.close();
+  }
 });
 
 await step('dark theme renders', async () => {

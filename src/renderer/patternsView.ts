@@ -9,6 +9,8 @@ export interface PatternsHost {
   onlyPattern(p: PatternStat): void;
   excludePattern(p: PatternStat): void;
   copy(text: string, what: string): void;
+  /** Explain this pattern (AI). */
+  explain?(p: PatternStat): void;
   /** Rescan; `all` reads every view row instead of a sample. */
   rescan(all: boolean): void;
   selectionChanged(): void;
@@ -86,6 +88,7 @@ export class PatternsView {
         'sep',
         { label: 'Copy pattern', action: () => this.host.copy(p.template, 'Pattern') },
         { label: 'Copy sample', action: () => this.host.copy(p.sample, 'Sample') },
+        ...(this.host.explain ? ['sep' as const, { label: 'Explain this pattern', action: () => this.host.explain?.(p) }] : []),
       ]);
     });
   }

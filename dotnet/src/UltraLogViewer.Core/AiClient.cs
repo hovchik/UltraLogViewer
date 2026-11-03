@@ -93,7 +93,8 @@ public static class AiClient
         if (status is < 200 or > 299)
         {
             var detail = json?["error"] is JsonObject e ? e["message"]?.GetValue<string>() : json?["error"] is JsonValue v ? v.ToString() : null;
-            throw new AiException(StatusMessage(status) + (string.IsNullOrWhiteSpace(detail) ? "" : $": {AiPrompts.Cap(detail, 200)}"), status);
+            // The server's message is masked too, in case it echoes a key or other data back.
+            throw new AiException(StatusMessage(status) + (string.IsNullOrWhiteSpace(detail) ? "" : $": {AiPrompts.Cap(AiRedaction.Redact(detail).Text, 200)}"), status);
         }
         if (json is null) throw new AiException("The AI service sent an answer that is not valid JSON", status);
         string? text;

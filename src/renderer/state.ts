@@ -1,3 +1,4 @@
+import type { AiSettings } from '../core/aiClient';
 import type { TimeMode } from '../core/timestamp';
 import type { OpenWindow } from '../core/timeWindow';
 import { DEFAULT_FRAMEWORK_PACKAGES } from '../core/folding';
@@ -86,6 +87,8 @@ export interface Settings {
   editorCommand?: string;
   /** Folders that relative source paths in stack traces are resolved against, first match wins. */
   sourceRoots?: string[];
+  /** AI features (off by default). The API keys are not here: the main process keeps them (safeStorage). */
+  ai?: AiSettings;
 }
 
 /** Display settings with their defaults resolved. */

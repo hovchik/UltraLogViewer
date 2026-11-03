@@ -58,7 +58,10 @@ export function modal(build: (box: HTMLElement, close: () => void) => void, onCl
     m.innerHTML = '';
     onClose?.();
   };
-  m.onclick = (e) => e.target === m && close();
+  // (a block body: an onclick handler that returns false cancels the click, which broke checkboxes in dialogs)
+  m.onclick = (e) => {
+    if (e.target === m) close();
+  };
   box.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       e.stopPropagation();

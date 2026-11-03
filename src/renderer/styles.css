@@ -442,3 +442,23 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .fv.pkg .v { color: var(--fg-2); }
 .fv.pkg .v::before { content: '▸ '; color: var(--fg-3); }
 .src-roots { width: 100%; min-height: 90px; font: 12px var(--mono); border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); padding: 4px 6px; }
+
+/* AI: the answer pane in the details pane, the consent preview and the settings */
+.ai-pane { margin: 6px 10px 4px; padding: 6px 10px; border: 1px solid color-mix(in srgb, #7048e8 35%, transparent); border-radius: 6px; background: color-mix(in srgb, #7048e8 8%, transparent); font-size: 12.5px; flex: none; }
+.ai-pane.hidden { display: none; }
+.ai-head { display: flex; gap: 4px; align-items: center; }
+.ai-head .sp { flex: 1; }
+.ai-title { font-weight: 600; font-size: 12px; }
+.ai-text { white-space: pre-wrap; margin-top: 4px; user-select: text; }
+.ai-spinner { display: none; height: 3px; margin-top: 4px; border-radius: 2px; background: linear-gradient(90deg, transparent, #7048e8, transparent); background-size: 40% 100%; background-repeat: no-repeat; animation: ai-run 1.1s linear infinite; }
+.ai-pane.running .ai-spinner { display: block; }
+.ai-pane:not(.running) .ai-cancel-run, .ai-pane.running .ai-head button:first-of-type { display: none; }
+@keyframes ai-run { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+.modal .box.ai-consent { width: min(760px, 94vw); }
+.modal .ai-sub { font-weight: 600; font-size: 12px; margin: 10px 0 4px; }
+.modal textarea.ai-instructions { opacity: 0.8; font-size: 11.5px; resize: vertical; }
+.modal textarea.ai-consent-text { resize: vertical; min-height: 160px; max-height: 50vh; }
+.modal label.row { display: flex; gap: 6px; align-items: center; margin: 4px 0; font-size: 12.5px; }
+.modal .box.ai-settings input[type='password'], .modal .box.ai-settings input[type='text'] { width: 100%; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font: 12.5px var(--mono); }
+.err-text { color: var(--error); font-size: 12px; margin-top: 4px; }
+.err-text:empty { display: none; }

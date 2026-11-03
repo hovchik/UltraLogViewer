@@ -48,6 +48,13 @@ export class DetailView {
     private onOpenSource?: (ref: SourceRef) => void,
   ) {}
 
+  /** The AI answer pane, kept at the top of the pane's body across re-renders. */
+  aiPane: HTMLElement | null = null;
+
+  private withAi(...els: HTMLElement[]): HTMLElement[] {
+    return this.aiPane ? [this.aiPane, ...els] : els;
+  }
+
   /** The selected pattern of the patterns view: its template and sample message. */
   renderPattern(p: PatternStat | undefined, scanned: number) {
     this.el.innerHTML = '';
@@ -55,7 +62,7 @@ export class DetailView {
     resizer.addEventListener('mousedown', (e) => this.startResize(e));
     this.el.append(resizer);
     if (!p) {
-      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), h('div', { class: 'placeholder' }, 'Select a pattern to see a sample message.'));
+      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), ...this.withAi(h('div', { class: 'placeholder' }, 'Select a pattern to see a sample message.')));
       return;
     }
     const pct = scanned ? ((p.count / scanned) * 100).toFixed(1) : '0.0';
@@ -70,7 +77,7 @@ export class DetailView {
     const tpl = h('div', { class: 'fields' }, h('table', {}, h('tr', {}, h('td', { class: 'k' }, 'template'), h('td', {}, p.template))));
     const pre = h('pre', { class: 'pattern-sample' });
     pre.textContent = p.sample;
-    this.el.append(bar, h('div', { class: 'body' }, tpl, pre));
+    this.el.append(bar, h('div', { class: 'body' }, ...this.withAi(tpl, pre)));
   }
 
   private dockButton() {
@@ -84,7 +91,7 @@ export class DetailView {
     resizer.addEventListener('mousedown', (e) => this.startResize(e));
     this.el.append(resizer);
     if (!tab || !row) {
-      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), h('div', { class: 'placeholder' }, 'Select a row to see the full entry.'));
+      this.el.append(h('div', { class: 'bar' }, h('span', { class: 'sp' }), this.dockButton()), ...this.withAi(h('div', { class: 'placeholder' }, 'Select a row to see the full entry.')));
       return;
     }
     const src = tab.info.sources[row.source];
@@ -133,7 +140,7 @@ export class DetailView {
       const ref = link && document.getSelection()?.isCollapsed !== false ? refOfLink(link) : null;
       if (ref) this.onOpenSource?.(ref);
     });
-    const body = h('div', { class: 'body' }, table.rows.length ? fields : null, pre);
+    const body = h('div', { class: 'body' }, ...this.withAi(...(table.rows.length ? [fields] : []), pre));
     this.el.append(bar, body);
   }
 

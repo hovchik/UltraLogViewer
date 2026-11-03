@@ -40,6 +40,7 @@ public class AiTests
         Assert.Equal("gh <key>", AiRedaction.Redact("gh ghp_" + new string('a', 36)).Text);
         Assert.Equal("card <card>", AiRedaction.Redact("card 5555-5555-5555-4444").Text);
         Assert.Equal("ok 2024-05-01T10:00:00.123Z took 15ms status=500", AiRedaction.Redact("ok 2024-05-01T10:00:00.123Z took 15ms status=500").Text);
+        Assert.Equal("Using basic auth, Bearer short", AiRedaction.Redact("Using basic auth, Bearer short").Text);
         Assert.True(AiRedaction.Luhn("4111111111111111"));
         Assert.False(AiRedaction.Luhn("4111111111111112"));
     }
@@ -114,6 +115,7 @@ public class AiTests
         Assert.Contains("Levels present: error (5), info (90)", f.User);
         Assert.Contains("Now: 2024-05-01T12:00:00", f.User);
         Assert.Contains("since:-3h", f.System);
+        Assert.Equal("Meaning\n• Job finished normally.\ncode", AiPrompts.PlainAnswer("## Meaning\n- **Job** finished normally.\n```\ncode\n```"));
         Assert.Contains("\"query\"", f.System);
     }
 
@@ -240,6 +242,13 @@ public class AiTests
         var e = await Assert.ThrowsAsync<AiException>(() => AiClient.SendAsync(new HttpClient(h), c, P, TimeSpan.FromSeconds(5), CancellationToken.None));
         Assert.Contains(expected, e.Message);
         Assert.DoesNotContain("sk-secret-value", e.Message);
+    }
+
+    [Fact]
+    public void A_key_the_server_echoes_in_an_error_is_masked()
+    {
+        var e = Assert.Throws<AiException>(() => AiClient.ParseResponse(AiConfig.OpenAi, 401, """{"error":{"message":"Incorrect API key provided: sk-proj-abcdefghijklmnop1234"}}"""));
+        Assert.EndsWith("provided: <key>", e.Message);
     }
 
     [Fact]

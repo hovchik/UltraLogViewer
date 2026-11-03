@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
+import type { AiSettings } from '../core/aiClient';
+import { registerAi } from './aiMain';
 import { editorTemplate, expandCommand, expandUrl, isUnsafeUrlTemplate, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
@@ -321,6 +323,16 @@ function buildMenu() {
       ],
     },
     {
+      label: 'AI',
+      submenu: [
+        { label: 'Explain selected entry', click: () => send('ai-explain') },
+        { label: 'Extract fields from selected line…', click: () => send('ai-extract') },
+        { label: 'Ask AI for a filter… (? in the quick filter)', click: () => send('ai-filter') },
+        { type: 'separator' },
+        { label: 'AI settings…', click: () => send('ai-settings') },
+      ],
+    },
+    {
       label: 'Help',
       submenu: [
         // F1 opens the command palette (handled by the renderer)
@@ -425,6 +437,7 @@ if (!app.requestSingleInstanceLock()) {
       if (menuKey(readSettings()) !== menuState) buildMenu();
     });
     ipcMain.handle('menu:items', () => menuItems());
+    registerAi(() => app.getPath('userData'), () => readSettings().ai as AiSettings | undefined);
     ipcMain.handle('menu:run', (_e, id: string) => {
       const item = Menu.getApplicationMenu()?.getMenuItemById(String(id));
       if (!item || !item.enabled) return false;
