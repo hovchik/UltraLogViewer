@@ -549,11 +549,17 @@ await step('duplicates a tab over the same file, filters it differently and spli
   await win.waitForFunction(() => /300 entries/.test(document.querySelector('#status')?.textContent ?? '') && !/Indexing/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   const counts = () => win.evaluate(() => window.__ulv.state().tabs.filter((t) => t.paths[0].endsWith('split.log')).map((t) => [t.info.viewCount, t.info.total]));
 
+  // A pin, which the duplicate and the split pane must keep (pins are saved per file).
+  await win.focus('#grid');
+  await win.keyboard.press('Control+p');
+  await win.waitForFunction(() => document.querySelectorAll('#pins .pin').length === 1);
+
   // Duplicate: opens at once over the same index, then gets its own filter.
   await win.focus('#grid');
   await win.keyboard.press('Control+Shift+T');
   await win.waitForFunction((n) => document.querySelectorAll('.tab').length === n + 2, before);
   assert.equal(await win.locator('.tab.active .name').innerText(), 'split.log (2)');
+  assert.equal(await win.locator('#pins .pin').count(), 1);
   await win.fill('#quick', 'level:error');
   await win.waitForFunction(() => /100 shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   assert.deepEqual(await counts(), [[300, 300], [100, 300]]);
@@ -570,6 +576,7 @@ await step('duplicates a tab over the same file, filters it differently and spli
   await win.focus('#grid');
   await win.keyboard.press('Control+Backslash');
   await win.waitForSelector('#pane-split:not(.hidden) #grid2 .grid-rows .r .c', { timeout: 10000 });
+  assert.equal(await win.locator('#pins .pin').count(), 1); // the split pane (now active) has the tab's pin
   await win.fill('#head-main .pane-quick', 'level:error');
   await win.waitForFunction(() => document.querySelector('#head-main .pane-count')?.textContent === '101 of 301', null, { timeout: 10000 });
   assert.equal(await win.locator('#head-split .pane-count').innerText(), '301');

@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
-import { editorTemplate, expandCommand, expandUrl, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
+import { editorTemplate, expandCommand, expandUrl, isUnsafeUrlTemplate, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
 
@@ -73,11 +73,12 @@ function callEngine(method: string, args: unknown[]): Promise<unknown> {
 async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unknown; command?: unknown }): Promise<{ ok: boolean; file?: string; target?: string; error?: string }> {
   if (!ref || typeof ref.path !== 'string' || typeof ref.line !== 'number') return { ok: false, error: 'bad location' };
   const roots = Array.isArray(opts?.roots) ? opts.roots.filter((r): r is string => typeof r === 'string') : [];
-  const file = resolveSource(ref, roots, isFile, path.join);
+  const file = resolveSource(ref, roots, isFile, path);
   if (!file) return { ok: false };
   const template = editorTemplate(typeof opts?.editor === 'string' ? opts.editor : undefined, typeof opts?.command === 'string' ? opts.command : '');
   if (!template.trim()) return { ok: false, file, error: 'Set the command line of your editor under Edit › Editor and source roots…' };
   const col = typeof ref.col === 'number' ? ref.col : 0;
+  if (isUnsafeUrlTemplate(template)) return { ok: false, file, error: 'A file:// editor URL would run the file instead of opening it in an editor; set another one under Edit › Editor and source roots…' };
   const log = process.env.ULV_SOURCE_LAUNCH_LOG;
   if (isUrlTemplate(template)) {
     const target = expandUrl(template, file, ref.line, col);

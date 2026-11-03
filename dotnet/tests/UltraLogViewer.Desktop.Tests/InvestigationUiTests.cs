@@ -121,6 +121,26 @@ public sealed class InvestigationUiTests : IDisposable
         Assert.Equal([13, second], tab.Pins.Select(p => p.Line).Order());
         Assert.Equal(2, w.PinStripForTest.Count);
 
+        // A duplicate and a split pane start with the tab's pins, so pinning there keeps the file's other pins.
+        var dup = (await w.DuplicateTab(tab))!;
+        Assert.Equal([13, second], dup.Pins.Select(p => p.Line).Order());
+        Assert.Equal(2, w.PinStripForTest.Count);
+        var third = dup.Doc.GetRows(100, 1)[0];
+        w.TogglePin(third);
+        Assert.Equal([13, third.Line, second], settings.Pins[path]);
+        w.TogglePin(third);
+        Assert.Equal([13, second], settings.Pins[path]);
+        w.CloseTab(dup);
+        Assert.Same(tab, w.ActiveTab);
+        var pane = (await w.SplitRight(tab))!;
+        Assert.Same(pane, w.ActiveTab);
+        Assert.Equal(2, w.PinStripForTest.Count);
+        w.TogglePin(third);
+        Assert.Equal([13, third.Line, second], settings.Pins[path]);
+        w.TogglePin(third);
+        w.CloseSplit(tab);
+        Assert.Equal([13, second], settings.Pins[path]);
+
         // and so does a workspace
         var ws = Path.Combine(_dir, "pins.ulvw");
         await w.SaveWorkspaceAsync(ws);
@@ -193,6 +213,12 @@ public sealed class InvestigationUiTests : IDisposable
         settings.EditorCommand = "myeditor --line {line} \"{path}\"";
         w.ClickDetailLinkForTest(0);
         Assert.Equal($"myeditor --line 88 {Path.Combine(root, "com", "shop", "http", "Client.java")}", launched[1]);
+
+        // a file:// URL would hand the file to its default program (which runs a script): refused
+        settings.EditorCommand = "file://{path}";
+        w.ClickDetailLinkForTest(0);
+        Assert.Equal(2, launched.Count);
+        Assert.Contains("file://", w.ToastForTest);
         w.Close();
     }
 
@@ -238,7 +264,18 @@ public sealed class InvestigationUiTests : IDisposable
         Assert.Null(w.GridForTest.AutoHighlight);
         Assert.Null(MainWindow.AutoHighlightText("x"));
         Assert.Null(MainWindow.AutoHighlightText("two\nlines"));
-        _ = tab;
+
+        // In a split, moving the focus to the other pane leaves no highlight behind in the first one.
+        await w.SplitRight(tab);
+        w.FocusPaneForTest(right: false);
+        w.MainGridForTest.Select(6);
+        await Until(() => w.DetailTextForTest.Contains("Cache miss"));
+        at = w.DetailTextForTest.IndexOf("Cache miss", StringComparison.Ordinal);
+        w.SelectDetailTextForTest(at, at + "Cache miss".Length);
+        Assert.Equal("Cache miss", w.MainGridForTest.AutoHighlight);
+        w.FocusPaneForTest(right: true);
+        Assert.Null(w.MainGridForTest.AutoHighlight);
+        Assert.Null(w.SplitGridForTest.AutoHighlight);
         w.Close();
     }
 }

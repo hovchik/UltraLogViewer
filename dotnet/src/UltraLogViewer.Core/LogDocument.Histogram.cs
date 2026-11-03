@@ -12,9 +12,10 @@ public sealed partial class LogDocument
     /// </summary>
     public Task<GroupedHistogram?> HistogramByAsync(string field, int buckets, CancellationToken ct = default) => Task.Run(() =>
     {
-        var key = $"{_viewEpoch}:{ViewCount}:{IgnoreFilter}:{BaseCount}:{field}:{buckets}";
+        var key = $"{_viewEpoch}:{_dataEpoch}:{ViewCount}:{IgnoreFilter}:{BaseCount}:{field}:{buckets}";
         if (_groupCache is { } c && c.Key == key) return c.Result;
         var epoch = _viewEpoch;
+        var data = _dataEpoch;
         if (Histogram(buckets) is not { } shape) return null;
         var groups = new HistogramGroups(shape.Start, shape.BucketMs, shape.Counts.Length);
         var n = ViewCount;
@@ -40,7 +41,7 @@ public sealed partial class LogDocument
             }, ct);
         }
         var result = groups.Build(field);
-        if (epoch == _viewEpoch) _groupCache = (key, result);
+        if (epoch == _viewEpoch && data == _dataEpoch) _groupCache = (key, result);
         return result;
     }, ct);
 

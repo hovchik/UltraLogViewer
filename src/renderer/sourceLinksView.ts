@@ -57,7 +57,7 @@ export async function openSourceRef(ref: SourceRef, settings: Settings) {
   }
   if (r.ok) return toast(`Opening ${name}`);
   if (r.error) return toast(r.error, true);
-  toast(roots.length ? `${name} was not found under your source roots. ${NO_MATCH_HINT}` : `${name} is not on this computer as written. ${NO_MATCH_HINT}`, true);
+  toast(roots.length ? `${name} was not found under your source roots. ${NO_MATCH_HINT}` : `Source locations open only from your source roots. ${NO_MATCH_HINT}`, true);
 }
 
 /** Edit › Editor and source roots…: the editor preset or custom command, and the folders relative paths resolve under. */
@@ -95,7 +95,7 @@ export function editSourceSettings(settings: Settings, save: () => void) {
         h('label', {}, 'Open source links in ', editor),
         cmdRow,
         h('div', { class: 'muted' }, 'A command can use {path}, {line} and {col}.'),
-        h('div', { style: 'margin-top:8px' }, 'Source roots: relative paths in stack traces (Foo.java:42, src/app.ts:10) are looked up under these folders, first match wins.'),
+        h('div', { style: 'margin-top:8px' }, 'Source roots: paths in stack traces (Foo.java:42, src/app.ts:10, also absolute ones) are looked up under these folders, first match wins; nothing outside them opens.'),
         roots,
         h('div', { class: 'row' }, add),
       ),

@@ -70,33 +70,54 @@ public static class SourceLinks
         return list;
     }
 
-    private static bool Rooted(string p) => p.StartsWith('/') || (p.Length > 2 && char.IsAsciiLetter(p[0]) && p[1] == ':' && p[2] is '/' or '\\') || p.StartsWith(@"\\", StringComparison.Ordinal);
+    private static readonly HashSet<string> SourceExts = new(Exts.Split('|'), StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The file on disk a location refers to, or null. An absolute path that exists wins; otherwise the source roots are
-    /// tried in order, and under each root the candidate paths, longest tail first (so a path from the build machine,
-    /// /build/agent/src/app/File.cs, still finds app/File.cs under a local root). The first existing match wins.
+    /// The file on disk a location refers to, or null. The text comes from the log, so it is not trusted: only an
+    /// existing source file (one of the known source extensions) inside a configured root is ever returned, and no path
+    /// segment may step out of the root ("..", a drive or a stream after a colon). The roots are tried in order, and under
+    /// each root the candidate paths, longest tail first, so an absolute path under a root opens as written and a path
+    /// from the build machine, /build/agent/src/app/File.cs, still finds app/File.cs under a local root.
     /// </summary>
     public static string? Resolve(SourceRef r, IReadOnlyList<string> roots, Func<string, bool>? exists = null)
     {
         exists ??= File.Exists;
-        if (Rooted(r.Path) && exists(r.Path)) return r.Path;
-        foreach (var root in roots)
+        if (!SourceExts.Contains(System.IO.Path.GetExtension(r.Path).TrimStart('.'))) return null;
+        foreach (var raw in roots)
         {
-            if (string.IsNullOrWhiteSpace(root)) continue;
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            var root = raw.Trim();
             foreach (var cand in Candidates(r))
             {
                 var segs = cand.Split('/', StringSplitOptions.RemoveEmptyEntries);
                 // a drive letter is never a folder under a root
                 var first = segs.Length > 0 && segs[0].EndsWith(':') ? 1 : 0;
+                // the longest tail that stays inside the root: nothing before the last unsafe segment can be used
+                for (var i = first; i < segs.Length; i++)
+                    if (segs[i].TrimEnd(' ', '.').Length == 0 || segs[i].Contains(':')) first = i + 1; // also "...", ".. " (Windows trims those to "..")
                 for (var k = first; k < segs.Length; k++)
                 {
-                    var p = System.IO.Path.Combine([root.Trim(), .. segs[k..]]);
-                    if (exists(p)) return p;
+                    var p = System.IO.Path.Combine([root, .. segs[k..]]);
+                    if (Inside(p, root) && exists(p)) return p;
                 }
             }
         }
         return null;
+    }
+
+    /// <summary>Whether <paramref name="path"/>, normalised, is inside <paramref name="root"/> (a second check after the segment rules).</summary>
+    private static bool Inside(string path, string root)
+    {
+        try
+        {
+            var full = System.IO.Path.GetFullPath(path);
+            var dir = System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(root)) + System.IO.Path.DirectorySeparatorChar;
+            return full.StartsWith(dir, OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+        catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Editor presets: id, label and the URL or command line template.</summary>
@@ -114,6 +135,12 @@ public static class SourceLinks
 
     /// <summary>A template is a URL ("scheme://…") rather than a command line.</summary>
     public static bool IsUrl(string template) => Regex.IsMatch(template.TrimStart(), @"^[A-Za-z][\w+.-]*://");
+
+    /// <summary>
+    /// A URL template that would hand the file itself to the system (file://{path}): that opens a source file with its
+    /// default program, which for a script runs it, so it is refused.
+    /// </summary>
+    public static bool IsUnsafeUrl(string template) => Regex.IsMatch(template.TrimStart(), @"^file:", RegexOptions.IgnoreCase);
 
     /// <summary>A URL template with its placeholders filled in (forward slashes, spaces and specials escaped).</summary>
     public static string ExpandUrl(string template, string path, int line, int col)

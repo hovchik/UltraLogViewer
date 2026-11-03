@@ -107,6 +107,10 @@ export class LogDocument implements SetMember {
   private merge: Merge | null = null;
   /** What the set changed since the last sync: 0 nothing, 1 data appended (verdicts truncated), 2 everything. */
   private resync = 0;
+  /** The set's version this document's merge and verdicts are from (see SourceSet.version). */
+  private seen = 0;
+  /** Bumped whenever this document takes up a change of the files: cached results over the entries are stale then. */
+  private dataEpoch = 0;
   private closed = false;
   private filter: FilterSpec | null = null;
   private view: Uint32Array | null = null;
@@ -143,6 +147,7 @@ export class LogDocument implements SetMember {
   constructor(readonly id: number, readonly title: string, set?: SourceSet) {
     this.set = set ?? new SourceSet();
     this.set.attach(this);
+    this.seen = this.set.version;
     this.merge = this.set.merge;
   }
 
@@ -293,10 +298,19 @@ export class LogDocument implements SetMember {
    */
   sync(onProgress?: Progress): Promise<boolean> {
     return this.serial(async () => {
-      const r = this.resync;
+      let r = this.resync;
+      if (!r && this.seen !== this.set.version) {
+        // Attached while a change ran, so not told what it was: start over on the current files.
+        this.verdict = [];
+        this.repeatHi = [];
+        this.repeatLo = [];
+        r = 2;
+      }
       if (!r) return false;
       this.resync = 0;
+      this.seen = this.set.version;
       this.merge = this.set.merge;
+      this.dataEpoch++;
       if (this.filter) await this.applyFilterNow(this.filter, r === 1, this.filterGen, onProgress);
       return true;
     });
@@ -843,9 +857,10 @@ export class LogDocument implements SetMember {
    * when the view has no timestamps (or the run was cancelled).
    */
   async histogramBy(field: string, buckets: number, cancelled: () => boolean = () => false): Promise<GroupedHistogram | null> {
-    const key = `${this.viewEpoch}:${this.viewCount()}:${this.ignoreFilter}:${this.baseCount()}:${field}:${buckets}`;
+    const key = `${this.viewEpoch}:${this.dataEpoch}:${this.viewCount()}:${this.ignoreFilter}:${this.baseCount()}:${field}:${buckets}`;
     if (this.groupCache?.key === key) return this.groupCache.result;
     const epoch = this.viewEpoch;
+    const data = this.dataEpoch;
     const shape = this.histogram(buckets);
     if (!shape) return null;
     const groups = new HistogramGroups(shape.start, shape.bucketMs, shape.counts.length);
@@ -866,7 +881,7 @@ export class LogDocument implements SetMember {
       if (cancelled()) return null;
     }
     const result = groups.build(field);
-    if (epoch === this.viewEpoch) this.groupCache = { key, result };
+    if (epoch === this.viewEpoch && data === this.dataEpoch) this.groupCache = { key, result };
     return result;
   }
 

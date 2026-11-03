@@ -445,6 +445,8 @@ function cloneTab(t: Tab, id: number, info: DocInfo, extra: Partial<Tab>): Tab {
     filter: defaultFilter(),
     search: { pattern: { ...t.search.pattern }, result: null, current: 0 },
     bookmarks: new Map([...t.bookmarks].map(([k, b]) => [k, { ...b }])),
+    // the pins too: they are saved per file, so a copy without them would drop the file's pins on its first save
+    pins: new Map([...(t.pins ?? [])].map(([k, p]) => [k, { ...p }])),
     anchor: 0,
     focus: 0,
     topRow: 0,

@@ -101,7 +101,13 @@ export class Pins {
 
   /** Workspace: adds the saved pins to a tab whose document is ready, and remembers them for its files. */
   async applyWorkspacePins(t: Tab, pins: WorkspacePin[]) {
-    for (const p of pins) await this.add(t, Math.max(0, t.paths.indexOf(p.path)), p.line);
+    for (const p of pins) {
+      // As for bookmarks: saved paths are source paths (a zip member is `archive.zip::member`); a single-file tab takes
+      // older entries too, and a pin of a file that was skipped (missing) is dropped rather than put on another file.
+      let source = t.info.sources.findIndex((src) => src.path === p.path);
+      if (source < 0) source = t.info.sources.length === 1 ? 0 : t.paths.indexOf(p.path);
+      if (source >= 0) await this.add(t, source, p.line);
+    }
     if (pins.length) this.save(t);
   }
 

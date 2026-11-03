@@ -31,6 +31,11 @@ export class SourceSet {
   indexing = false;
   progress = 0;
   closed = false;
+  /**
+   * Counts the changes to the index. A document remembers the version it last synced to, so one attached while a
+   * change was running (and so not told about it) still notices on its next sync.
+   */
+  version = 0;
   private members: SetMember[] = [];
   private gate: Promise<unknown> = Promise.resolve();
 
@@ -65,6 +70,7 @@ export class SourceSet {
       try {
         for (const m of members) releases.push(await m.lock());
         const r = await change();
+        this.version++;
         for (const m of members) apply(m, r);
         return r;
       } finally {

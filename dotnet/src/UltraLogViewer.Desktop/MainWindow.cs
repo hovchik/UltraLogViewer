@@ -640,6 +640,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
     {
         _active = tab;
         ShowPanes(tab);
+        // The highlight belongs to the selection of the pane that had the focus: the other pane must not keep it.
+        _gridMain.AutoHighlight = _gridSplit.AutoHighlight = null;
         _welcome.IsVisible = tab is null;
         _center.IsVisible = tab is not null;
         if (tab is null) RebuildRecent();

@@ -126,6 +126,56 @@ public class SharedSourceTests
     }
 
     [Fact]
+    public async Task ADocumentDuplicatedWhileTheFilesArePolledGetsTheMergeThatPollBuilt()
+    {
+        var x = TestFiles.Write("dx.log", "2024-01-01 00:00:01 INFO a1\n");
+        var y = TestFiles.Write("dy.log", "2024-01-01 00:00:02 INFO b2\n");
+        using var a = new LogDocument("d");
+        await a.AddSourcesAsync([x, y], _ => new SourceOptions());
+        File.AppendAllText(y, "2024-01-01 00:00:03 INFO b3\n");
+        // A poll held inside its read of the files (as SourceSet.RefreshAsync does it), and a duplicate made meanwhile
+        // (Ctrl+Shift+T during a tail refresh).
+        var entered = new TaskCompletionSource();
+        var held = new TaskCompletionSource();
+        var poll = a.Set.ExclusiveAsync<int[]?>(async () =>
+        {
+            entered.SetResult();
+            await held.Task;
+            var first = new int[a.Sources.Count];
+            for (var i = 0; i < first.Length; i++)
+            {
+                var r = await a.Set.List[i].RefreshAsync();
+                first[i] = r.Changed ? r.FirstChangedEntry : a.Set.List[i].EntryCount;
+            }
+            a.Set.RebuildMerge();
+            return first;
+        }, (d, first) => d.SourcesChanged(first));
+        await entered.Task;
+        using var b = a.Duplicate();
+        held.SetResult();
+        await poll;
+        Assert.True(await a.SyncAsync());
+        Assert.True(await b.SyncAsync()); // b missed the poll's notice, but sees that the files changed since it was made
+        Assert.Equal(["a1", "b2", "b3"], Messages(b));
+        Assert.Equal(3, b.ViewCount);
+        Assert.False(await b.SyncAsync());
+    }
+
+    [Fact]
+    public async Task TheTimelineIsGroupedAgainAfterAnotherViewReparsedTheFiles()
+    {
+        using var a = new LogDocument("g");
+        await a.AddSourceAsync(TestFiles.Write("g.log", TestFiles.Log4j), new SourceOptions());
+        using var b = a.Duplicate();
+        var before = (await b.HistogramByAsync("logger", 10))!;
+        Assert.Contains("com.acme.App", before.Keys);
+        await a.ReformatAsync("plain", null);
+        Assert.True(await b.SyncAsync());
+        // unfiltered, so the view itself did not change; the fields did (plain text has no timestamps: no timeline)
+        Assert.Null(await b.HistogramByAsync("logger", 10));
+    }
+
+    [Fact]
     public async Task ARunningFilterInOneViewDoesNotRaceTheTail()
     {
         var lines = string.Concat(Enumerable.Range(0, 20_000).Select(i => $"2024-01-01 00:00:{i % 60:00} {(i % 7 == 0 ? "ERROR" : "INFO")} line {i}\n"));

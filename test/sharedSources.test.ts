@@ -144,6 +144,54 @@ describe('shared sources', () => {
     b.close();
   });
 
+  it('gives a document duplicated while the files are polled the merge that poll built', async () => {
+    const x = tmpFile('dx.log', '2024-01-01 00:00:01 INFO a1\n');
+    const y = tmpFile('dy.log', '2024-01-01 00:00:02 INFO b2\n');
+    const a = new LogDocument(1, 'd');
+    await a.addSources([x, y], () => ({}));
+    fs.appendFileSync(y, '2024-01-01 00:00:03 INFO b3\n');
+    // Hold the poll inside its read of the file, and duplicate meanwhile (Ctrl+Shift+T during a tail refresh).
+    const src = a.sources[1];
+    const read = src.refresh.bind(src);
+    let entered!: () => void;
+    let release!: () => void;
+    const inRead = new Promise<void>((r) => (entered = r));
+    const held = new Promise<void>((r) => (release = r));
+    src.refresh = async () => {
+      entered();
+      await held;
+      return read();
+    };
+    const poll = a.set.refresh();
+    await inRead;
+    const b = a.duplicate(2);
+    release();
+    await poll;
+    expect(await a.sync()).toBe(true);
+    expect(await b.sync()).toBe(true); // b missed the poll's notice, but sees that the files changed since it was made
+    expect(messages(b)).toEqual(['a1', 'b2', 'b3']);
+    expect(b.viewCount()).toBe(3);
+    expect(await b.sync()).toBe(false);
+    a.close();
+    b.close();
+  });
+
+  it('groups the timeline again after another view re-parsed the files', async () => {
+    const a = new LogDocument(1, 'g');
+    await a.addSource(tmpFile('g.log', LOG4J), {});
+    const b = a.duplicate(2);
+    const before = (await b.histogramBy('logger', 10))!;
+    expect(before.keys).toContain('com.acme.App');
+    await a.reformat('plain');
+    expect(await b.sync()).toBe(true);
+    // unfiltered, so the view itself did not change; the fields did
+    const after = await b.histogramBy('logger', 10); // plain text has no timestamps: no timeline at all
+    expect(after).not.toBe(before);
+    expect(after).toBeNull();
+    a.close();
+    b.close();
+  });
+
   it('duplicates in the engine, polls each file once and closes files with the last document', async () => {
     const p = tmpFile('e.log', '2024-01-01 00:00:01 INFO one\n');
     const events: EngineEvent[] = [];

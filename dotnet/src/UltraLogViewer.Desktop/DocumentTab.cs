@@ -105,7 +105,7 @@ public sealed class DocumentTab : IDisposable
 
     /// <summary>
     /// A new tab over the same, already indexed files: no reindexing. It starts unfiltered (the caller applies a filter
-    /// if it gives one) and has its own view, search, bookmarks and columns.
+    /// if it gives one) and has its own view, search, bookmarks, pins and columns.
     /// </summary>
     public DocumentTab Duplicate(int copy, DocumentTab? splitOf, TabColumns columns)
     {
@@ -115,6 +115,8 @@ public sealed class DocumentTab : IDisposable
         t.Window = Window;
         t.Ready = true;
         foreach (var (k, b) in Bookmarks) t.Bookmarks[k] = new Bookmark { Key = b.Key, Line = b.Line, Source = b.Source, Preview = b.Preview, Note = b.Note };
+        // The pins too: they are saved per file, so a copy without them would drop the file's pins on its first save.
+        foreach (var p in Pins) t.Pins.Add(new Bookmark { Key = p.Key, Line = p.Line, Source = p.Source, Preview = p.Preview, Row = p.Row });
         foreach (var k in ExpandedRows) t.ExpandedRows.Add(k);
         foreach (var k in Unfolded) t.Unfolded.Add(k);
         return t;

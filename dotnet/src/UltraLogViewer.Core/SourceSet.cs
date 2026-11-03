@@ -18,6 +18,7 @@ public sealed class SourceSet
     private readonly List<LogDocument> _docs = [];
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _closed;
+    private int _version;
 
     internal Merge? Merged { get; private set; }
 
@@ -33,6 +34,11 @@ public sealed class SourceSet
         }
     }
     public bool Closed => _closed;
+    /// <summary>
+    /// Counts the changes to the index. A document remembers the version it last synced to, so one attached while a
+    /// change was running (and so not told about it) still notices on its next sync. Bumped after the merge is rebuilt.
+    /// </summary>
+    internal int Version => Volatile.Read(ref _version);
 
     internal void Attach(LogDocument doc)
     {
@@ -74,6 +80,7 @@ public sealed class SourceSet
                 held.Add(d);
             }
             var r = await change();
+            Interlocked.Increment(ref _version);
             foreach (var d in docs) apply(d, r);
             return r;
         }

@@ -63,25 +63,47 @@ export function sourceCandidates(r: SourceRef): string[] {
   return list;
 }
 
-const rooted = (p: string) => p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith('\\\\');
+const SOURCE_EXTS = new Set(EXTS.split('|'));
+
+/** The path functions resolveSource needs: node:path in the main process, path.posix or path.win32 in tests. */
+export interface PathOps {
+  join(...parts: string[]): string;
+  resolve(...parts: string[]): string;
+  sep: string;
+}
+
+/** Whether `p`, normalised, is inside `root` (a second check after the segment rules). */
+function inside(p: string, root: string, ops: PathOps): boolean {
+  const full = ops.resolve(p);
+  let dir = ops.resolve(root);
+  if (!dir.endsWith(ops.sep)) dir += ops.sep;
+  const fold = ops.sep === '\\' || (typeof process !== 'undefined' && process.platform === 'darwin');
+  return fold ? full.toLowerCase().startsWith(dir.toLowerCase()) : full.startsWith(dir);
+}
 
 /**
- * The file on disk a location refers to, or null. An absolute path that exists wins; otherwise the source roots are
- * tried in order, and under each root the candidate paths, longest tail first (so a path from the build machine,
- * /build/agent/src/app/File.cs, still finds app/File.cs under a local root). The first existing match wins.
+ * The file on disk a location refers to, or null. The text comes from the log, so it is not trusted: only an existing
+ * source file (one of the known source extensions) inside a configured root is ever returned, and no path segment may
+ * step out of the root ("..", a drive or a stream after a colon). The roots are tried in order, and under each root the
+ * candidate paths, longest tail first, so an absolute path under a root opens as written and a path from the build
+ * machine, /build/agent/src/app/File.cs, still finds app/File.cs under a local root.
  */
-export function resolveSource(r: SourceRef, roots: string[], exists: (p: string) => boolean, join: (...parts: string[]) => string): string | null {
-  if (rooted(r.path) && exists(r.path)) return r.path;
+export function resolveSource(r: SourceRef, roots: string[], exists: (p: string) => boolean, ops: PathOps): string | null {
+  const ext = /\.([^./\\]+)$/.exec(r.path)?.[1]?.toLowerCase();
+  if (!ext || !SOURCE_EXTS.has(ext)) return null;
   for (const raw of roots) {
     const root = raw.trim();
     if (!root) continue;
     for (const cand of sourceCandidates(r)) {
       const segs = cand.split('/').filter(Boolean);
       // a drive letter is never a folder under a root
-      const first = segs.length && segs[0].endsWith(':') ? 1 : 0;
+      let first = segs.length && segs[0].endsWith(':') ? 1 : 0;
+      // the longest tail that stays inside the root: nothing before the last unsafe segment can be used
+      // ("...", ".. " too: Windows trims those to "..")
+      for (let i = first; i < segs.length; i++) if (!segs[i].replace(/[ .]+$/, '') || segs[i].includes(':')) first = i + 1;
       for (let k = first; k < segs.length; k++) {
-        const p = join(root, ...segs.slice(k));
-        if (exists(p)) return p;
+        const p = ops.join(root, ...segs.slice(k));
+        if (inside(p, root, ops) && exists(p)) return p;
       }
     }
   }
@@ -104,6 +126,12 @@ export function editorTemplate(editor: string | undefined, custom: string | unde
 
 /** A template is a URL ("scheme://…") rather than a command line. */
 export const isUrlTemplate = (t: string) => /^[A-Za-z][\w+.-]*:\/\//.test(t.trimStart());
+
+/**
+ * A URL template that would hand the file itself to the system (file://{path}): that opens a source file with its
+ * default program, which for a script runs it, so it is refused.
+ */
+export const isUnsafeUrlTemplate = (t: string) => /^file:/i.test(t.trimStart());
 
 const fill = (s: string, path: string, line: number, col: number) =>
   s.split('{path}').join(path).split('{line}').join(String(line)).split('{col}').join(String(Math.max(1, col)));

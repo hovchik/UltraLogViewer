@@ -28,6 +28,10 @@ public sealed partial class LogDocument : IDisposable
     private Merge? _merge;
     /// <summary>What the set changed since the last sync: 0 nothing, 1 data appended (verdicts truncated), 2 everything.</summary>
     private int _resync;
+    /// <summary>The set's version this document's merge and verdicts are from (see <see cref="SourceSet.Version"/>).</summary>
+    private int _seen;
+    /// <summary>Bumped whenever this document takes up a change of the files: cached results over the entries are stale then.</summary>
+    private int _dataEpoch;
     private int _disposed;
     private View? _view;
     private FilterSpec? _filter;
@@ -55,6 +59,8 @@ public sealed partial class LogDocument : IDisposable
         _set = set;
         Title = title;
         set.Attach(this);
+        // the version first: a change bumps it after setting the merge, so a merge older than the version is impossible
+        _seen = set.Version;
         _merge = set.Merged;
     }
 
@@ -240,9 +246,19 @@ public sealed partial class LogDocument : IDisposable
     public Task<bool> SyncAsync(CancellationToken ct = default) => Serial(async () =>
     {
         var r = _resync;
+        var version = _set.Version;
+        if (r == 0 && version != _seen)
+        {
+            // Attached while a change ran, so not told what it was: start over on the current files.
+            _verdict = [];
+            _repeatHash = [];
+            r = 2;
+        }
         if (r == 0) return false;
         _resync = 0;
+        _seen = version;
         _merge = _set.Merged;
+        Interlocked.Increment(ref _dataEpoch);
         if (_filter is not null) await ApplyNowAsync(_filter, r == 1, _filterGen, null, ct);
         return true;
     });

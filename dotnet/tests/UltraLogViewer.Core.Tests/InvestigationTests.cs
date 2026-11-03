@@ -103,6 +103,7 @@ public class InvestigationTests
             Path.Combine("/code/other", "app", "File.cs"),
             Path.Combine("/code/shop", "app", "File.cs"),
             "/abs/x.py",
+            "/abs/y.py",
         };
         bool Exists(string p) => files.Contains(p);
         string[] roots = ["/code/missing", "/code/shop/src/main/java", "/code/shop", "/code/other"];
@@ -110,8 +111,42 @@ public class InvestigationTests
         Assert.Equal(Path.Combine("/code/shop/src/main/java", "com", "acme", "Db.java"), SourceLinks.Resolve(new SourceRef(0, 0, "Db.java", 42, 0, "com.acme"), roots, Exists));
         // build-machine path: the longest tail that exists under the first root that has it
         Assert.Equal(Path.Combine("/code/shop", "app", "File.cs"), SourceLinks.Resolve(new SourceRef(0, 0, "D:\\agent\\_work\\1\\s\\app\\File.cs", 1), roots, Exists));
-        Assert.Equal("/abs/x.py", SourceLinks.Resolve(new SourceRef(0, 0, "/abs/x.py", 1), [], Exists));
+        Assert.Equal(Path.Combine("/code/shop", "app", "File.cs"), SourceLinks.Resolve(new SourceRef(0, 0, "/code/shop/app/File.cs", 1), roots, Exists)); // absolute, under a root
         Assert.Null(SourceLinks.Resolve(new SourceRef(0, 0, "Nope.java", 1), roots, Exists));
+    }
+
+    [Fact]
+    public void NeverResolvesALocationOutsideTheSourceRoots()
+    {
+        // The path comes from the log: an absolute path elsewhere, "..", a drive or a stream in the middle, or a file
+        // that is not source code must not reach the editor (or a command line).
+        var root = Path.Combine(Path.GetTempPath(), "ulv-roots", "shop");
+        var files = new HashSet<string>
+        {
+            "/abs/x.py",
+            "/abs/y.py",
+            Path.Combine(root, "x.py"),
+            Path.Combine(root, "run.sh"),
+            Path.Combine(root, "a", "b.cs"),
+            Path.Combine(root, "..", "evil.py"),
+            Path.Combine(root, "..", "..", "evil.py"),
+            Path.Combine(root, "x", "...", "..", "evil.py"),
+        };
+        bool Exists(string p) => files.Contains(p);
+        SourceRef R(string p) => new(0, 0, p, 1);
+        Assert.Null(SourceLinks.Resolve(R("/abs/x.py"), [], Exists));
+        Assert.Null(SourceLinks.Resolve(R("/abs/y.py"), [root], Exists));
+        Assert.Equal(Path.Combine(root, "x.py"), SourceLinks.Resolve(R("/abs/x.py"), [root], Exists)); // the tail that is under the root
+        Assert.Null(SourceLinks.Resolve(R("../evil.py"), [root], Exists));
+        Assert.Null(SourceLinks.Resolve(R("../../evil.py"), [root], Exists));
+        Assert.Null(SourceLinks.Resolve(R("x/.../../evil.py"), [root], Exists));
+        Assert.Null(SourceLinks.Resolve(R("run.sh"), [root], Exists));
+        // what follows the last unsafe segment still resolves inside the root
+        Assert.Equal(Path.Combine(root, "a", "b.cs"), SourceLinks.Resolve(R("../../a/b.cs"), [root], Exists));
+        Assert.Equal(Path.Combine(root, "a", "b.cs"), SourceLinks.Resolve(R("x/C:/a/b.cs"), [root], Exists));
+        Assert.Equal(Path.Combine(root, "x.py"), SourceLinks.Resolve(R(@"D:\build\x.py"), [root], Exists));
+        Assert.True(SourceLinks.IsUnsafeUrl(" FILE://{path}"));
+        Assert.False(SourceLinks.IsUnsafeUrl("vscode://file/{path}:{line}"));
     }
 
     [Fact]

@@ -29,7 +29,7 @@ public sealed partial class MainWindow
         if (SourceLinks.Resolve(r, _settings.SourceRoots) is not { } file)
         {
             Toast(_settings.SourceRoots.Count == 0
-                ? $"{name} is not on this computer as written. {SourceLinks.NoMatchHint}"
+                ? $"Source locations open only from your source roots. {SourceLinks.NoMatchHint}"
                 : $"{name} was not found under your source roots. {SourceLinks.NoMatchHint}", true);
             return;
         }
@@ -37,6 +37,11 @@ public sealed partial class MainWindow
         if (string.IsNullOrWhiteSpace(template))
         {
             Toast("Set the editor command under Edit › Editor and source roots…", true);
+            return;
+        }
+        if (SourceLinks.IsUnsafeUrl(template))
+        {
+            Toast("A file:// editor URL would run the file instead of opening it in an editor; set another one under Edit › Editor and source roots…", true);
             return;
         }
         try
@@ -126,7 +131,7 @@ public sealed partial class MainWindow
                 hint("Custom: a URL or a command line; {path}, {line} and {col} are filled in."),
                 command,
                 new TextBlock { Text = "Source roots", Margin = new Thickness(0, 8, 0, 0) },
-                hint("Relative paths in stack traces (and paths from the build machine) are looked up under these folders, in order; the first file that exists wins. For Java, add the folder that holds the packages (src/main/java)."),
+                hint("Paths in stack traces (also absolute ones, and paths from the build machine) are looked up under these folders, in order; the first file that exists wins, and nothing outside them opens. For Java, add the folder that holds the packages (src/main/java)."),
                 roots,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { add } },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0), Children = { ok, cancel } },
@@ -149,7 +154,7 @@ public sealed partial class MainWindow
         _settings.EditorCommand = command.Text?.Trim() ?? "";
         _settings.SourceRoots = (roots.Text ?? "").Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Distinct().ToList();
         _settings.Save();
-        Toast(_settings.SourceRoots.Count == 0 ? "Saved. Without source roots only absolute paths open." : $"Saved {_settings.SourceRoots.Count} source root(s)");
+        Toast(_settings.SourceRoots.Count == 0 ? "Saved. Without source roots no source location opens." : $"Saved {_settings.SourceRoots.Count} source root(s)");
     }
 
     internal IReadOnlyList<string> DetailLinksForTest => _detailLinks.IsVisible ? _detailLinks.Children.OfType<Button>().Select(b => ((TextBlock)b.Content!).Text ?? "").ToList() : [];

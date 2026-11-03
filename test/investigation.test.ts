@@ -11,7 +11,7 @@ import { fieldPicks, packagePrefixes, packageTree, pickClause, setFieldPicks } f
 import { GROUP_NONE, GROUP_OTHER, HistogramGroups, legendClause, SOURCE_FIELD } from '../src/core/histogramGroups';
 import { compileQuery, describeQuery, parseQueryExpr } from '../src/core/query';
 import { ScanPool } from '../src/core/scanPool';
-import { editorTemplate, expandCommand, expandUrl, findSourceRefs, isUrlTemplate, resolveSource } from '../src/core/sourceLinks';
+import { editorTemplate, expandCommand, expandUrl, findSourceRefs, isUnsafeUrlTemplate, isUrlTemplate, resolveSource } from '../src/core/sourceLinks';
 import { legendLabels } from '../src/renderer/histogram';
 import { highlightTerm, occurrences } from '../src/renderer/autoHighlight';
 import { parseWorkspace, resolveWorkspace, serializeWorkspace } from '../src/renderer/workspace';
@@ -108,14 +108,36 @@ describe('source links', () => {
   it('resolves against the source roots, first match wins', () => {
     const files = new Set(['/code/shop/src/main/java/com/acme/Db.java', '/code/other/app/File.cs', '/code/shop/app/File.cs', '/abs/x.py']);
     const exists = (p: string) => files.has(p);
-    const join = (...p: string[]) => path.posix.join(...p);
+    const join = path.posix;
     const roots = ['/code/missing', '/code/shop/src/main/java', '/code/shop', '/code/other'];
     const ref = (p: string, pkg?: string) => ({ start: 0, length: 0, path: p, line: 1, col: 0, pkg });
     expect(resolveSource(ref('Db.java', 'com.acme'), roots, exists, join)).toBe('/code/shop/src/main/java/com/acme/Db.java');
     // build-machine path: the longest tail that exists under the first root that has it
     expect(resolveSource(ref('D:\\agent\\_work\\1\\s\\app\\File.cs'), roots, exists, join)).toBe('/code/shop/app/File.cs');
-    expect(resolveSource(ref('/abs/x.py'), [], exists, join)).toBe('/abs/x.py');
+    expect(resolveSource(ref('/code/shop/app/File.cs'), roots, exists, join)).toBe('/code/shop/app/File.cs'); // absolute, under a root
     expect(resolveSource(ref('Nope.java'), roots, exists, join)).toBeNull();
+  });
+
+  it('never resolves a location outside the source roots', () => {
+    // The path comes from the log: an absolute path elsewhere, "..", a drive or a stream in the middle, or a file
+    // that is not source code must not reach the editor (or a command line).
+    const files = new Set(['/abs/x.py', '/code/shop/x.py', '/etc/evil.py', '/code/evil.py', '/code/shop/run.sh', '/code/shop/a/b.cs']);
+    const exists = (p: string) => files.has(p);
+    const ref = (p: string) => ({ start: 0, length: 0, path: p, line: 1, col: 0 });
+    const roots = ['/code/shop'];
+    expect(resolveSource(ref('/abs/x.py'), [], exists, path.posix)).toBeNull();
+    expect(resolveSource(ref('/etc/evil.py'), roots, exists, path.posix)).toBeNull();
+    expect(resolveSource(ref('../evil.py'), roots, exists, path.posix)).toBeNull();
+    expect(resolveSource(ref('../../etc/evil.py'), roots, exists, path.posix)).toBeNull();
+    expect(resolveSource(ref('x/.../../evil.py'), roots, exists, path.posix)).toBeNull();
+    expect(resolveSource(ref('run.sh'), roots, exists, path.posix)).toBeNull();
+    // what follows the last unsafe segment still resolves inside the root
+    expect(resolveSource(ref('../../a/b.cs'), roots, exists, path.posix)).toBe('/code/shop/a/b.cs');
+    expect(resolveSource(ref('x/C:/a/b.cs'), roots, exists, path.posix)).toBe('/code/shop/a/b.cs');
+    // Windows: a drive in the middle would make path.join drop the root
+    const win = new Set(['C:\\code\\shop\\x.py', 'D:\\evil.py']);
+    expect(resolveSource(ref('a\\D:\\evil.py'), ['C:\\code\\shop'], (p) => win.has(p), path.win32)).toBeNull();
+    expect(resolveSource(ref('D:\\build\\x.py'), ['C:\\code\\shop'], (p) => win.has(p), path.win32)).toBe('C:\\code\\shop\\x.py');
   });
 
   it('fills editor templates', () => {
@@ -129,6 +151,8 @@ describe('source links', () => {
     expect(c.args).toEqual(['--goto', '/a b/x.cs:9:1', '-n']);
     expect(isUrlTemplate('subl://open?url={path}')).toBe(true);
     expect(isUrlTemplate('code -g {path}:{line}')).toBe(false);
+    expect(isUnsafeUrlTemplate(' FILE://{path}')).toBe(true);
+    expect(isUnsafeUrlTemplate('vscode://file/{path}:{line}')).toBe(false);
   });
 });
 
