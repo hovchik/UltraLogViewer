@@ -11,7 +11,7 @@ namespace UltraLogViewer.Desktop;
 /// <summary>Small modal dialogs built in code.</summary>
 public static class Dialogs
 {
-    private static Window Shell(string title, Control content, double width = 420) => new()
+    internal static Window Shell(string title, Control content, double width = 420) => new()
     {
         Title = title,
         Width = width,
@@ -22,7 +22,7 @@ public static class Dialogs
         Content = new Border { Padding = new Thickness(18, 14), Child = content },
     };
 
-    private static StackPanel Buttons(params Button[] buttons)
+    internal static StackPanel Buttons(params Button[] buttons)
     {
         var sp = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 14, 0, 0) };
         foreach (var b in buttons) sp.Children.Add(b);
@@ -124,6 +124,9 @@ public static class Dialogs
         ("Ctrl+\\", "Split right / close split"),
         ("Timeline: click / drag", "Jump to time / filter to a time range"),
         ("Timeline: Group by", "Stack the bars by level, file or any field; click a legend item to filter to it"),
+        ("? question in the quick filter, Enter", "Ask AI for a filter; you review the query before it runs (AI › AI settings…)"),
+        ("Right-click a row › Extract fields…", "Propose a custom format for plain-text lines (AI, or a guess from the tokens when AI is off)"),
+        ("Right-click a row › Explain this entry", "Ask AI what an entry means; the answer appears in the details pane"),
     ];
 
     /// <summary>The quick-filter syntax, shown under the shortcuts in Help.</summary>
@@ -142,6 +145,7 @@ public static class Dialogs
         ("logger:com.acme.*, thread:worker-*", "Wildcard: the whole value matches; a.b.* also matches a.b itself"),
         ("exists(traceId), env?=prod", "The field is present / equals the value or is missing"),
         ("since:-3h, until:-10m", "Relative to now; also since:2024-05-01T10:00, since:today"),
+        ("? errors from the db logger in the last hour", "A leading ? asks AI to write the query (when AI is on); it is shown for review first"),
     ];
 
     public static Task Help(Window owner)
@@ -185,14 +189,17 @@ public static class Dialogs
     }
 
     /// <summary>Define a custom regex format with named groups. Returns null when cancelled.</summary>
-    public static async Task<CustomFormat?> CustomFormatEditor(Window owner, IReadOnlyList<string> sample)
+    /// <param name="name">Prefilled name, e.g. from "Extract fields…".</param>
+    /// <param name="initial">Prefilled pattern.</param>
+    public static async Task<CustomFormat?> CustomFormatEditor(Window owner, IReadOnlyList<string> sample, string? name = null, string? initial = null)
     {
-        var name = new TextBox { Watermark = "Name, e.g. My service" };
+        var nameBox = new TextBox { Watermark = "Name, e.g. My service", Text = name };
         var pattern = new TextBox
         {
             Watermark = @"^(?<time>\S+ \S+) \[(?<level>\w+)\] (?<message>.*)$",
             FontFamily = Fonts.Mono,
             AcceptsReturn = false,
+            Text = initial,
         };
         var preview = new TextBlock { FontFamily = Fonts.Mono, FontSize = 12, TextWrapping = TextWrapping.Wrap, Opacity = 0.85 };
         var lines = sample.Where(l => l.Trim().Length > 0).Take(5).ToList();
@@ -226,10 +233,10 @@ public static class Dialogs
             Classes = { "hint" },
             Text = "Use named groups. time, level and message are understood; any other group becomes a column. Lines that don't match continue the previous entry.",
         };
-        var w = Shell("Custom format", new StackPanel { Spacing = 8, Children = { name, pattern, hint, new Border { Classes = { "sec" }, Child = preview }, Buttons(ok, cancel) } }, 640);
+        var w = Shell("Custom format", new StackPanel { Spacing = 8, Children = { nameBox, pattern, hint, new Border { Classes = { "sec" }, Child = preview }, Buttons(ok, cancel) } }, 640);
         ok.Click += (_, _) =>
         {
-            var n = (name.Text ?? "").Trim();
+            var n = (nameBox.Text ?? "").Trim();
             var p = pattern.Text ?? "";
             if (n.Length == 0 || p.Length == 0 || Query.Validate(new TextPattern(p, true)) is not null) return;
             w.Close(new CustomFormat(n, p));

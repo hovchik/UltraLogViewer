@@ -111,7 +111,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             }
         };
 
-        _quick = new TextBox { Watermark = "Quick filter (Ctrl+L): words, -x, level:error, status>=500, since:-1h", MinWidth = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
+        _quick = new TextBox { Watermark = "Quick filter (Ctrl+L): words, -x, level:error, status>=500, since:-1h, ? ask AI", MinWidth = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
         _quickDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
         _quickDebounce.Tick += (_, _) =>
         {
@@ -270,6 +270,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Next tab", () => CycleTab(1), new KeyGesture(Key.Tab, KeyModifiers.Control)),
                     },
                 },
+                AiMenu(),
                 new MenuItem
                 {
                     Header = "_Help",
@@ -347,7 +348,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Content = new StackPanel { Children = { _detailFields, _detailLinks, _detail } },
+            Content = new StackPanel { Children = { AiPane(), _detailFields, _detailLinks, _detail } },
         };
         var detailPane = new DockPanel { Children = { detailHead, detailBody } };
         DockPanel.SetDock(detailHead, Dock.Top);
@@ -729,12 +730,15 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab is null) return;
         if (tab.SplitOf is { } owner)
         {
+            CancelAi(tab);
             CloseSplit(owner);
             return;
         }
         var i = _tabs.IndexOf(tab);
         if (i < 0) return;
         _tabs.RemoveAt(i);
+        CancelAi(tab);
+        if (tab.Split is { } split) CancelAi(split);
         var wasActive = OwnerOf(_active) == tab;
         tab.Dispose();
         if (wasActive) Activate(_tabs.Count == 0 ? null : _tabs[Math.Min(i, _tabs.Count - 1)]);
@@ -972,7 +976,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     {
         if (_active is not { } tab) return;
         var q = _quick.Text ?? "";
-        if (q == tab.Filter.Query) return;
+        if (q == tab.Filter.Query || IsAiQuestion(q)) return; // "? question" goes to the AI on Enter, never in as a filter
         // A bad query is reported and the view keeps the last good filter (level toggles etc. still apply).
         if (Query.ValidateQuery(q, tab.Filter.QueryCaseSensitive) is { } err)
         {

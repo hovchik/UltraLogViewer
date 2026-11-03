@@ -156,6 +156,8 @@ public sealed partial class MainWindow
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Copy pattern", () => Run(() => CopyText(p.Template))));
         menu.Items.Add(Item("Copy sample", () => Run(() => CopyText(p.Sample))));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item("Explain this pattern", () => Run(() => _active is { } t ? ExplainPattern(t, p) : Task.CompletedTask)));
         menu.Open(_patterns);
     }
 

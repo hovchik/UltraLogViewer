@@ -208,6 +208,9 @@ public sealed partial class MainWindow
         if (col is not null && col.Key != "__source" && CellValue(row, col.Key) is { Length: > 0 } cv)
             items.Add(Item("Copy value", () => Run(() => CopyText(cv, "Value copied"))));
         items.Add(Item("Copy entry", () => Run(() => CopyText(row.Text, "Entry copied"))));
+        items.Add(new Separator());
+        items.AddRange(AiRowItems(tab, row));
+        items.Add(new Separator());
         items.Add(new MenuItem { Header = "Toggle bookmark", InputGesture = new KeyGesture(Key.B, KeyModifiers.Control), Command = Cmd(() => ToggleBookmark(row)) });
         items.Add(new MenuItem { Header = IsPinned(row) ? "Unpin row" : "Pin row", InputGesture = new KeyGesture(Key.P, KeyModifiers.Control), Command = Cmd(() => TogglePin(row)) });
         var menu = new ContextMenu { Placement = PlacementMode.Pointer };
@@ -556,6 +559,11 @@ public sealed partial class MainWindow
                 break;
             case Key.Enter or Key.Tab when open && _quickList.SelectedIndex >= 0:
                 AcceptSuggestion(_quickSuggestions[_quickList.SelectedIndex]);
+                break;
+            case Key.Enter when IsAiQuestion(_quick.Text):
+                CloseSuggestions();
+                _quickDebounce.Stop();
+                Run(AskFilter);
                 break;
             case Key.Enter:
                 CloseSuggestions();

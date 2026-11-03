@@ -85,6 +85,8 @@ public sealed class AppSettings
     public string EditorCommand { get; set; } = "";
     /// <summary>Folders that relative source paths (and paths from the build machine) are looked up under, in order.</summary>
     public List<string> SourceRoots { get; set; } = [];
+    /// <summary>AI features (off by default). The API keys are not here: see <see cref="AiKeyStore"/>.</summary>
+    public AiSettings Ai { get; set; } = new();
 
     /// <summary>The index cache folder, next to the settings file.</summary>
     [JsonIgnore] public string IndexCacheDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "index-cache");
