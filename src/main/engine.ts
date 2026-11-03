@@ -1,8 +1,10 @@
 // The engine owns all open documents. It runs in a worker thread so indexing, filtering and
 // searching gigabytes never block the UI.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { LogDocument } from '../core/document';
+import { ScanPool } from '../core/scanPool';
 import { Encoding } from '../core/fileSource';
 import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
 
@@ -27,6 +29,8 @@ export class Engine {
   private patternsGen = new Map<number, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  /** Scans big files on all cores; absent when the worker script is not built next to this file (unit tests). */
+  private scanPool = fs.existsSync(path.join(__dirname, 'scanWorker.js')) ? new ScanPool(path.join(__dirname, 'scanWorker.js')) : undefined;
 
   constructor(private emit: (e: EngineEvent) => void) {
     this.timer = setInterval(() => void this.poll(), POLL_MS);
@@ -48,7 +52,7 @@ export class Engine {
       let last = 0;
       for (const p of paths) {
         try {
-          await doc.addSource(p, opts, (phase, fraction) => {
+          await doc.addSource(p, { ...opts, scanPool: this.scanPool }, (phase, fraction) => {
             this.emit({ type: 'progress', docId: id, phase, fraction });
             const now = Date.now();
             if (now - last > 250 && phase === 'index') {
@@ -166,6 +170,7 @@ export class Engine {
   dispose() {
     if (this.timer) clearInterval(this.timer);
     for (const id of [...this.docs.keys()]) this.close(id);
+    this.scanPool?.close();
   }
 }
 

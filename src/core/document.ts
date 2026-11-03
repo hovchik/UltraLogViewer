@@ -649,22 +649,16 @@ export class LogDocument {
 
   levelCounts(): number[] {
     const counts = new Array(LEVEL_COUNT).fill(0);
-    for (const s of this.sources) {
-      const lv = s.entryLevel.view();
-      for (let i = 0; i < lv.length; i++) counts[lv[i]]++;
-    }
+    for (const s of this.sources) s.stats().levelCounts.forEach((n, i) => (counts[i] += n));
     return counts;
   }
 
   timeRange(): [number, number] | null {
     let lo = Infinity, hi = -Infinity;
     for (const s of this.sources) {
-      const t = s.entryTime.view();
-      for (let i = 0; i < t.length; i++) {
-        const x = t[i];
-        if (x < lo) lo = x;
-        if (x > hi) hi = x;
-      }
+      const st = s.stats();
+      if (st.min < lo) lo = st.min;
+      if (st.max > hi) hi = st.max;
     }
     return lo <= hi ? [lo, hi] : null;
   }
