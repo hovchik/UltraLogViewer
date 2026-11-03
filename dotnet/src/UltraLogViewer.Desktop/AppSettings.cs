@@ -77,6 +77,14 @@ public sealed class AppSettings
     public bool IndexCache { get; set; } = true;
     /// <summary>Upper bound of the index cache folder; the least recently used indexes go first.</summary>
     public long IndexCacheMaxMb { get; set; } = 2048;
+    /// <summary>Pinned entries (the strip above the grid), as 1-based line numbers per file, like bookmarks.</summary>
+    public Dictionary<string, List<int>> Pins { get; set; } = [];
+    /// <summary>Where source locations in stack traces open: "vscode", "rider", "intellij" or "custom" (<see cref="EditorCommand"/>).</summary>
+    public string Editor { get; set; } = "vscode";
+    /// <summary>A URL template or command line with {path}, {line} and {col}, for the "custom" editor.</summary>
+    public string EditorCommand { get; set; } = "";
+    /// <summary>Folders that relative source paths (and paths from the build machine) are looked up under, in order.</summary>
+    public List<string> SourceRoots { get; set; } = [];
 
     /// <summary>The index cache folder, next to the settings file.</summary>
     [JsonIgnore] public string IndexCacheDir => Path.Combine(Path.GetDirectoryName(FilePath ?? DefaultPath)!, "index-cache");

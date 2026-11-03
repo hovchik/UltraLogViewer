@@ -237,6 +237,8 @@ public static partial class Query
             }
             if (value.Length == 0) return null; // "logger:" is still being typed
             var regex = !quoted && value.Length > 1 && value[0] == '/' && value[^1] == '/';
+            // An unquoted "*" makes the value a whole-value wildcard: logger:com.acme.* or thread:worker-*.
+            if (!regex && !quoted && value.Contains('*')) return new TextNode(f, new(GlobRegex(value), Regex: true, CaseSensitive: cs));
             return new TextNode(f, regex ? new(value[1..^1], Regex: true, CaseSensitive: cs) : new(value, CaseSensitive: cs));
         }
         // "a->b" and "x.>y" are text, not comparisons.
@@ -249,6 +251,17 @@ public static partial class Query
         var node = new CompareNode(f, op, value);
         CompileCompare(node, cs); // reports bad units and levels now
         return node;
+    }
+
+    /// <summary>
+    /// The regex of a <c>field:value</c> wildcard: "*" is any run of characters and the whole value must match. A
+    /// trailing ".*" is a package (logger hierarchy): <c>com.acme.*</c> matches com.acme itself and everything below it.
+    /// </summary>
+    public static string GlobRegex(string glob)
+    {
+        var pkg = glob.Length > 2 && glob.EndsWith(".*", StringComparison.Ordinal) && !glob[..^2].Contains('*');
+        if (pkg) return "^" + Regex.Escape(glob[..^2]) + @"(?:\..*)?$";
+        return "^" + string.Join(".*", glob.Split('*').Select(Regex.Escape)) + "$";
     }
 
     /// <summary>Reads "a, b, "c d")" after "in (". Values is null when the list is not closed yet.</summary>

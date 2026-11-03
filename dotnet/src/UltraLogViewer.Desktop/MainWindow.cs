@@ -235,6 +235,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         Item("Toggle _bookmark", ToggleBookmarkAtFocus, new KeyGesture(Key.B, KeyModifiers.Control)),
                         Item("Next bookmark", () => NextBookmark(1), new KeyGesture(Key.F2)),
                         Item("Previous bookmark", () => NextBookmark(-1), new KeyGesture(Key.F2, KeyModifiers.Shift)),
+                        Item("_Pin row", TogglePinAtFocus, new KeyGesture(Key.P, KeyModifiers.Control)),
+                        Item("Editor and source roots…", () => Run(EditSourceSettings)),
                         Item("Clear all filters", ClearFilters),
                         Item("C_lear (hide everything so far)", ClearSoFar, new KeyGesture(Key.K, KeyModifiers.Control)),
                     },
@@ -334,7 +336,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Content = new StackPanel { Children = { _detailFields, _detail } },
+            Content = new StackPanel { Children = { _detailFields, _detailLinks, _detail } },
         };
         var detailPane = new DockPanel { Children = { detailHead, detailBody } };
         DockPanel.SetDock(detailHead, Dock.Top);
@@ -354,9 +356,11 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _center.Children.Add(_histSplitter);
         _center.Children.Add(_work);
         _partialBanner = BuildPartialBanner();
-        var gridHost = new DockPanel { Children = { _partialBanner, _contextBanner, BuildGridArea() } };
+        var pinStrip = BuildPinStrip();
+        var gridHost = new DockPanel { Children = { _partialBanner, _contextBanner, pinStrip, BuildGridArea() } };
         DockPanel.SetDock(_partialBanner, Dock.Top);
         DockPanel.SetDock(_contextBanner, Dock.Top);
+        DockPanel.SetDock(pinStrip, Dock.Top);
         _work.Children.Add(gridHost);
         _work.Children.Add(_detailSplitter);
         _work.Children.Add(detailPane);
@@ -478,6 +482,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
             RebuildTabStrip();
             _sidebar.Render(_active);
         };
+        WireTimeline();
+        WireDetailLinks();
+        WireAutoHighlight();
         Activate(null);
     }
 
@@ -635,6 +642,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         RebuildTabStrip();
         _sidebar.Render(tab);
         _hist.Data = null;
+        _hist.Groups = null;
+        RenderPins();
         UpdateContextBanner();
         UpdatePartialBanner();
         UpdateSearchCount();
@@ -772,7 +781,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
         tab.BusyProgress = null;
         tab.BusyLabel = "";
         tab.Info = doc.Info();
-        if (!tab.IsPartial) RestoreBookmarks(tab); // line numbers of a partial view are not the file's
+        if (!tab.IsPartial)
+        {
+            // line numbers of a partial view are not the file's
+            RestoreBookmarks(tab);
+            RestorePins(tab);
+        }
         if (_active == tab) UpdatePartialBanner();
         if (!tab.Filter.IsTrivial || tab.Bookmarks.Count > 0 && tab.Filter.BookmarksOnly) await ApplyFilterAsync(tab);
         if (_active == tab)
@@ -1196,6 +1210,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
     private void UpdateBookmarkRows(DocumentTab tab)
     {
         foreach (var b in tab.Bookmarks.Values) b.Row = tab.Doc.RowForKey(b.Key);
+        UpdatePinRows(tab);
     }
 
     private void SaveBookmarks(DocumentTab tab)
@@ -1578,6 +1593,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab != _active) return;
         _hist.Data = h;
         UpdateViewport();
+        await RefreshGroupsAsync(tab, buckets);
     }
 
     private void UpdateViewport()
@@ -1675,6 +1691,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             case Key.Z when e.KeyModifiers == KeyModifiers.Alt: SetDisplay(() => _settings.Wrap = !_settings.Wrap); break;
             case Key.F1: OpenPalette(); break;
             case Key.P when ctrl && shift: OpenPalette(); break;
+            case Key.P when ctrl: TogglePinAtFocus(); break;
             case Key.A when ctrl && shift: TogglePatterns(); break;
             case Key.K when ctrl && !shift: ClearSoFar(); break;
             case Key.S when ctrl && e.KeyModifiers.HasFlag(KeyModifiers.Alt): Run(PickSaveWorkspace); break;
@@ -1701,12 +1718,17 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (!_settings.ShowDetail) return;
         var tab = _active;
         var gen = ++_detailGen;
-        if (UpdatePatternDetail()) return;
+        if (UpdatePatternDetail())
+        {
+            RenderDetailLinks("");
+            return;
+        }
         if (tab is null || tab.Info.ViewCount == 0)
         {
             _detail.Text = "";
             _detailBar.Text = "";
             _detailFields.Children.Clear();
+            RenderDetailLinks("");
             return;
         }
         Run(async () =>
@@ -1724,6 +1746,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             _detailBar.Text = string.Join("   ·   ", parts);
             RenderDetailFields(tab, row);
             _detail.Text = FoldDetail(tab, row, Pretty.Entry(row.Text));
+            RenderDetailLinks(_detail.Text);
         });
     }
 
