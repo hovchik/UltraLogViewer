@@ -94,7 +94,7 @@ public static class Dialogs
         ("Ctrl+O / Ctrl+Shift+O", "Open files / open and merge into one timeline"),
         ("Ctrl+F, /", "Find"),
         ("Enter, F3, n / Shift+Enter, Shift+F3, N", "Next / previous match"),
-        ("Ctrl+L", "Quick filter (words, a OR b, -word, level:error, logger:Db, \"phrase\", /regex/)"),
+        ("Ctrl+L", "Quick filter (syntax below)"),
         ("Right-click a cell", "Show only or exclude that value, highlight it, add a field as a column"),
         ("c / Esc", "Show the selected entry in context (filters ignored) / back to the filtered view"),
         ("Alt+Z", "Wrap long messages"),
@@ -119,28 +119,59 @@ public static class Dialogs
         ("Timeline: click / drag", "Jump to time / filter to a time range"),
     ];
 
+    /// <summary>The quick-filter syntax, shown under the shortcuts in Help.</summary>
+    public static readonly (string Example, string What)[] QuerySyntax =
+    [
+        ("error timeout", "Entries containing both words"),
+        ("a OR b, a | b", "Either; OR binds tighter than AND, so a b OR c means a and (b or c)"),
+        ("-word, NOT word", "Without the word"),
+        ("(a or b) and not c", "and / or / not in any case, with parentheses"),
+        ("\"exact phrase\", /regex/", "A phrase or a regular expression"),
+        ("logger:Db, level:error", "A parsed field contains the value (field:\"two words\", field:/re/)"),
+        ("status>=500, status!=200", "Compare a field: > >= < <= == != (numbers numerically, other values as text)"),
+        ("duration>2s", "Durations with ms, s, m or h; a bare number is read in the unit you typed"),
+        ("level>=warn", "Levels compare by severity"),
+        ("user in (alice,bob)", "The field equals one of the values"),
+        ("exists(traceId), env?=prod", "The field is present / equals the value or is missing"),
+        ("since:-3h, until:-10m", "Relative to now; also since:2024-05-01T10:00, since:today"),
+    ];
+
     public static Task Help(Window owner)
     {
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), RowSpacing = 6, ColumnSpacing = 14 };
-        for (var i = 0; i < Shortcuts.Length; i++)
+        static Grid Table((string Keys, string What)[] rows)
         {
-            grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
-            var k = new Border
+            var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), RowSpacing = 6, ColumnSpacing = 14 };
+            for (var i = 0; i < rows.Length; i++)
             {
-                Background = new SolidColorBrush(Color.Parse("#808080"), 0.15),
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(6, 2),
-                Child = new TextBlock { Text = Shortcuts[i].Keys, FontFamily = Fonts.Mono, FontSize = 12 },
-            };
-            var d = new TextBlock { Text = Shortcuts[i].What, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
-            Grid.SetRow(k, i);
-            Grid.SetRow(d, i);
-            Grid.SetColumn(d, 1);
-            grid.Children.Add(k);
-            grid.Children.Add(d);
+                grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
+                var k = new Border
+                {
+                    Background = new SolidColorBrush(Color.Parse("#808080"), 0.15),
+                    CornerRadius = new CornerRadius(4),
+                    Padding = new Thickness(6, 2),
+                    Child = new TextBlock { Text = rows[i].Keys, FontFamily = Fonts.Mono, FontSize = 12 },
+                };
+                var d = new TextBlock { Text = rows[i].What, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetRow(k, i);
+                Grid.SetRow(d, i);
+                Grid.SetColumn(d, 1);
+                grid.Children.Add(k);
+                grid.Children.Add(d);
+            }
+            return grid;
         }
         var ok = new Button { Content = "Close", IsDefault = true, IsCancel = true };
-        var w = Shell("Keyboard shortcuts", new StackPanel { Children = { grid, Buttons(ok) } }, 640);
+        var body = new StackPanel
+        {
+            Spacing = 8,
+            Children =
+            {
+                Table(Shortcuts),
+                new TextBlock { Text = "Quick filter", FontWeight = FontWeight.SemiBold, FontSize = 15, Margin = new Thickness(0, 10, 0, 0) },
+                Table(QuerySyntax),
+            },
+        };
+        var w = Shell("Keyboard shortcuts", new StackPanel { Children = { new ScrollViewer { Content = body, MaxHeight = 560 }, Buttons(ok) } }, 680);
         ok.Click += (_, _) => w.Close();
         return w.ShowDialog(owner);
     }

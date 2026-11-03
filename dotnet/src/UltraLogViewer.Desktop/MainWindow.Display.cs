@@ -71,5 +71,6 @@ public sealed partial class MainWindow
     internal void SetDisplayForTest(Action<AppSettings> change) => SetDisplay(() => change(_settings));
     internal void SetDetailDockForTest(bool right) => SetDetailDock(right);
     internal Controls.LogGrid GridForTest => _grid;
+    internal string? ToastForTest => _toast.IsVisible ? _toastText.Text : null;
     internal Controls.HistogramView HistogramForTest => _hist;
 }

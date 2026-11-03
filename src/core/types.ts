@@ -38,7 +38,7 @@ export interface FilterSpec {
   /** Indexed by Level; false hides that level. */
   levels: boolean[];
   rules: FilterRule[];
-  /** Quick-filter query (see parseQuery), AND-ed with everything else. */
+  /** Quick-filter query (see parseQueryExpr), AND-ed with everything else. */
   query?: string;
   queryCaseSensitive?: boolean;
   timeFrom?: number | null;

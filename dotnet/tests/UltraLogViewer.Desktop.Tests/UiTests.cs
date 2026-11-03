@@ -155,6 +155,50 @@ public sealed class UiTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task Typed_queries_report_errors_and_time_shortcuts_count_back_from_the_last_entry()
+    {
+        var (w, _) = NewWindow();
+        var tab = await Open(w, Sample("app.log", 600)); // one entry every 2 s, 20 minutes in all
+        var warns = tab.Doc.GetRows(0, 600).Count(r => r.Level == Level.Warn);
+        tab.Filter.Query = "level>=warn and not level:error";
+        await w.ApplyFilterAsync(tab);
+        Assert.Equal(warns, tab.Info.ViewCount);
+        tab.Filter.Query = "since:2024-03-01T10:19:00 (logger:Api or logger:Cache)";
+        await w.ApplyFilterAsync(tab);
+        Assert.Equal(27, tab.Info.ViewCount); // entries 570..599 without the three PaymentService errors
+
+        // A bad query is reported where quick-filter errors show, and the view keeps the last good filter.
+        var before = tab.Info.ViewCount;
+        tab.Filter.Query = "level>=loud";
+        await w.ApplyFilterAsync(tab);
+        Assert.Contains("\"loud\" is not a level", w.ToastForTest);
+        Assert.StartsWith("Quick filter: ", w.ToastForTest);
+        Assert.Equal(before, tab.Info.ViewCount);
+        tab.Filter.Query = "";
+        await w.ApplyFilterAsync(tab);
+
+        // Operators after a complete field name, and since: values.
+        Assert.Contains("level>=", w.Suggestions("level", 5).Select(s => s.Label));
+        Assert.Equal(["since:-15m", "since:-1h", "since:-24h", "since:today"], w.Suggestions("since:", 6).Select(s => s.Label));
+        Assert.Equal(["level>=error", "level>=warn"], w.Suggestions("level>=", 7).Select(s => s.Label).Where(l => l is "level>=error" or "level>=warn").Order());
+
+        // Time shortcuts: not live, so they count back from the last entry, not from the clock.
+        Button Shortcut(string label) => w.GetVisualDescendants().OfType<Button>().First(b => b.Content as string == label);
+        Assert.Contains("last entry", ToolTip.GetTip(Shortcut("-15m")) as string);
+        Shortcut("-15m").RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        await Until(() => tab.Info.ViewCount < 600 && tab.BusyProgress is null);
+        Assert.Equal(tab.Info.TimeMax - 15 * 60_000, tab.Filter.TimeFrom);
+        Assert.Null(tab.Filter.TimeTo);
+        Assert.Equal(451, tab.Info.ViewCount); // entries 149..599
+        Screenshot(w, "time-shortcuts.png");
+        Shortcut("Now").RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+        await Until(() => tab.Filter.TimeTo is not null && tab.BusyProgress is null);
+        Assert.Equal(tab.Info.TimeMax, tab.Filter.TimeTo);
+        Assert.Equal(451, tab.Info.ViewCount);
+        w.Close();
+    }
+
+    [AvaloniaFact]
     public async Task Keyboard_jumps_to_next_error_and_bookmarks_persist()
     {
         var (w, settings) = NewWindow();

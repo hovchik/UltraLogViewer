@@ -384,14 +384,19 @@ public sealed partial class MainWindow
         var (start, len) = Query.TokenAt(text, caret);
         var token = text.Substring(start, len);
         if (token.Length == 0 || tab is null) return list;
-        var (prefix, field, value) = Query.SplitToken(token);
+        var (prefix, field, op, value) = Query.SplitToken(token);
         string Replace(string with, out int newCaret)
         {
             var rest = text[(start + len)..];
             newCaret = start + with.Length;
             return text[..start] + with + rest;
         }
-        if (field is not null)
+        void Add(string label, string detail, string with, bool commit)
+        {
+            var t = Replace(with, out var c);
+            list.Add(new Suggestion(label, detail, t, c, commit));
+        }
+        if (field is not null && !(op == ":" && field.ToLowerInvariant() is "since" or "until"))
         {
             IEnumerable<(string Value, int Count)> values;
             if (field.Equals("level", StringComparison.OrdinalIgnoreCase))
@@ -403,9 +408,8 @@ public sealed partial class MainWindow
             {
                 if (value.Length > 0 && !v.Contains(value, StringComparison.OrdinalIgnoreCase)) continue;
                 if (v.Equals(value, StringComparison.OrdinalIgnoreCase) && value.Length > 0 && token.EndsWith(v, StringComparison.Ordinal)) continue;
-                var tok = prefix + Query.FieldToken(field, v);
-                var t = Replace(tok + (start + len < text.Length && text[start + len] == ' ' ? "" : " "), out var c);
-                list.Add(new Suggestion(tok, count.ToString("N0", System.Globalization.CultureInfo.CurrentCulture), t, c, true));
+                var tok = prefix + Query.FieldToken(field, v, op);
+                Add(tok, count.ToString("N0", System.Globalization.CultureInfo.CurrentCulture), tok + (start + len < text.Length && text[start + len] == ' ' ? "" : " "), true);
                 if (list.Count >= 10) break;
             }
             return list;
@@ -413,15 +417,49 @@ public sealed partial class MainWindow
         var keys = new List<string> { "level" };
         if (tab.FieldStats is { } fs) keys.AddRange(fs.Fields.Select(f => f.Key));
         keys.AddRange(Columns(tab).Select(c => c.Key).Where(k => k is not ("__source" or "message" or "time")));
-        foreach (var k in keys.Distinct(StringComparer.OrdinalIgnoreCase))
+        keys = keys.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        // since:/until: offer relative times; exists( offers field names.
+        if (field is not null)
+        {
+            foreach (var rel in new[] { "-15m", "-1h", "-24h", "today" })
+                if (rel.StartsWith(value, StringComparison.OrdinalIgnoreCase)) Add($"{prefix}{field}:{rel}", "time", $"{prefix}{field}:{rel} ", true);
+            return list;
+        }
+        if (value.StartsWith("exists(", StringComparison.OrdinalIgnoreCase))
+        {
+            var part = value[7..].TrimEnd(')');
+            foreach (var k in keys.Where(k => k.StartsWith(part, StringComparison.OrdinalIgnoreCase)).Take(10))
+                Add($"{prefix}exists({k})", "has field", $"{prefix}exists({k}) ", true);
+            return list;
+        }
+        var exact = keys.FirstOrDefault(k => k.Equals(value, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null)
+        {
+            // A complete field name: offer the operators.
+            foreach (var o in Query.Operators) Add(prefix + exact + o, OperatorHint(o), prefix + exact + o, false);
+            Add($"{prefix}exists({exact})", "has field", $"{prefix}exists({exact}) ", true);
+            return list;
+        }
+        foreach (var k in keys)
         {
             if (!k.StartsWith(value, StringComparison.OrdinalIgnoreCase)) continue;
-            var t = Replace(prefix + k + ":", out var c);
-            list.Add(new Suggestion(prefix + k + ":", "field", t, c, false));
+            Add(prefix + k + ":", "field", prefix + k + ":", false);
             if (list.Count >= 10) break;
         }
+        foreach (var kw in new[] { "since:", "until:", "exists(" })
+            if (value.Length > 0 && kw.StartsWith(value, StringComparison.OrdinalIgnoreCase) && list.Count < 10)
+                Add(prefix + kw, kw == "exists(" ? "has field" : "time", prefix + kw, false);
         return list;
     }
+
+    private static string OperatorHint(string op) => op switch
+    {
+        ":" => "contains",
+        "==" => "equals",
+        "!=" => "differs",
+        "?=" => "equals or missing",
+        _ => "compare",
+    };
 
     private void UpdateSuggestions()
     {

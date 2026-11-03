@@ -109,6 +109,36 @@ await step('searches with highlights and navigation', async () => {
   await shot('02-search');
 });
 
+await step('typed queries filter, bad ones are reported, time shortcuts set From', async () => {
+  await win.fill('#quick', 'level>=error and not level:fatal');
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  const levels = await win.locator('.grid-rows .r .lvtag').allInnerTexts();
+  assert.ok(levels.length > 0 && levels.every((l) => l === 'ERROR'), `levels: ${levels.slice(0, 5)}`);
+  const shown = (await status()).match(/[\d,]+ shown/)?.[0];
+  await win.fill('#quick', 'level>=loud');
+  await win.waitForSelector('#toast.err:not(.hidden)');
+  assert.match(await win.locator('#toast').innerText(), /^Quick filter: level>=loud: "loud" is not a level/);
+  assert.equal((await status()).match(/[\d,]+ shown/)?.[0], shown); // the last good filter stays
+  await win.fill('#quick', '');
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // Not following, so -15m counts back from the last entry (08:39:15.250 in the generated file), not from the clock.
+  const following = (await win.locator('#btn-follow.on').count()) > 0;
+  if (following) await win.click('#btn-follow');
+  const quarter = win.locator('#sidebar .shortcuts .mini', { hasText: '-15m' });
+  assert.match(await quarter.getAttribute('title'), /last entry in the file/);
+  await quarter.click();
+  await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  assert.equal(await win.locator('#sidebar input[type="datetime-local"]').first().inputValue(), '2024-05-01T08:24:15');
+  assert.notEqual((await status()).match(/([\d,]+) shown/)?.[1], '0');
+  await shot('11-time-shortcut');
+  await win.locator('#sidebar .sec', { hasText: 'Time range' }).locator('h3 .mini', { hasText: 'Clear' }).click();
+  await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
+  // Leave follow and the selection as they were: the focused row survives the filter change.
+  if ((await win.locator('#btn-follow.on').count() > 0) !== following) await win.click('#btn-follow');
+  await win.focus('#grid');
+  await win.keyboard.press('Home');
+});
+
 await step('quick filter narrows the view', async () => {
   await win.fill('#quick', 'level:error OR level:fatal');
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
