@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import type { AiSettings } from '../core/aiClient';
 import { registerAi } from './aiMain';
+import { decodeHandoff, encodeHandoff, HANDOFF_SWITCH, handleArgv, registerOpenRequests, rendererGone, startApiFromSettings, startupRequest, stopApi } from './openMain';
 import { editorTemplate, expandCommand, expandUrl, isUnsafeUrlTemplate, isUrlTemplate, resolveSource, SourceRef } from '../core/sourceLinks';
 import { captureStdin, StdinCapture } from '../core/stdinCapture';
 import { OpenWindow, parseCommandLine } from '../core/timeWindow';
@@ -157,6 +158,7 @@ function viewMenuState(s: Record<string, unknown>) {
     gaps: (typeof s.gapMs === 'number' ? s.gapMs : 10000) > 0,
     foldFrames: s.foldFrames !== false,
     indexCache: s.indexCache !== false,
+    localApi: (s.localApi as { enabled?: boolean } | undefined)?.enabled === true,
   };
 }
 let menuState = '';
@@ -251,6 +253,14 @@ function buildMenu() {
         { label: 'Export view…', accelerator: 'CmdOrCtrl+E', click: () => send('export') },
         { label: 'Use index cache', type: 'checkbox', checked: v.indexCache, click: () => send('toggle-index-cache') },
         { label: 'Clear index cache', click: () => send('clear-index-cache') },
+        {
+          label: 'Local API',
+          submenu: [
+            { id: 'local-api', label: 'Enable local HTTP API', type: 'checkbox', checked: v.localApi, click: () => send('toggle-local-api') },
+            { label: 'Copy API example', click: () => send('copy-api-example') },
+            { label: 'New API token', click: () => send('new-api-token') },
+          ],
+        },
         // The renderer handles Ctrl+Shift+T and Ctrl+\ itself (so they also work with the menu bar hidden).
         { label: 'Duplicate tab', accelerator: 'CmdOrCtrl+Shift+T', registerAccelerator: false, click: () => send('duplicate-tab') },
         { label: 'Close tab', accelerator: 'CmdOrCtrl+W', click: () => send('close-tab') },
@@ -267,6 +277,7 @@ function buildMenu() {
         { label: 'Find…', accelerator: 'CmdOrCtrl+F', click: () => send('find') },
         { label: 'Quick filter', accelerator: 'CmdOrCtrl+L', click: () => send('quick-filter') },
         { label: 'Go to line…', accelerator: 'CmdOrCtrl+G', click: () => send('goto-line') },
+        { label: 'Copy link to this view', click: () => send('copy-view-link') },
         { label: 'Toggle bookmark', accelerator: 'CmdOrCtrl+B', click: () => send('toggle-bookmark') },
         // The renderer handles Ctrl+P itself, like Ctrl+K.
         { label: 'Pin row', accelerator: 'CmdOrCtrl+P', registerAccelerator: false, click: () => send('toggle-pin') },
@@ -386,6 +397,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.on('closed', () => (win = null));
+  win.webContents.on('did-start-navigation', (_e, _url, _inPlace, isMainFrame) => isMainFrame && rendererGone());
 }
 
 const isFile = (a: string) => {
@@ -404,13 +416,19 @@ let stdin: Promise<StdinCapture | null> = Promise.resolve(null);
 
 let quitting = false;
 
+// Chromium reorders the argv the running instance gets (switches first), which would separate "--filter" from its
+// value, so the raw arguments also go along as one encoded switch. (Not as requestSingleInstanceLock's additionalData:
+// Electron 38 on Linux crashes the running instance on some argv with it.)
+app.commandLine.appendSwitch(HANDOFF_SWITCH, encodeHandoff(process.argv, process.cwd()));
 if (!app.requestSingleInstanceLock()) {
-  app.quit();
+  // handed over: leave at once (quit() before "ready" can hang on some Linux setups)
+  app.exit(0);
 } else {
-  app.on('second-instance', (_e, argv) => {
-    const window = parseArgv(argv).window;
-    if (window) send('open-window', filesFromArgv(argv), window);
-    else for (const f of filesFromArgv(argv)) send('open-path', f);
+  registerOpenRequests({ win: () => win, readSettings, writeSettings, buildMenu, isFile });
+  app.on('second-instance', (_e, argv, workingDirectory) => {
+    // the files, window, filter, search, "go to"… or an ultralogviewer:// link of a later launch
+    const h = decodeHandoff(argv) ?? { argv, cwd: workingDirectory };
+    handleArgv(h.argv.slice(app.isPackaged ? 1 : 2), h.cwd);
     if (win) {
       if (win.isMinimized()) win.restore();
       win.focus();
@@ -497,9 +515,14 @@ if (!app.requestSingleInstanceLock()) {
       const piped = await stdin;
       return [...filesFromArgv(process.argv), ...(piped ? [piped.path] : []), ...pendingOpen.splice(0)];
     });
+    ipcMain.handle('startup-request', async () => {
+      const piped = await stdin;
+      return { request: await startupRequest(process.argv.slice(app.isPackaged ? 1 : 2), piped?.path ?? null, pendingOpen.splice(0)), stdin: cli.stdin };
+    });
     ipcMain.handle('startup-options', (): { window: OpenWindow | null; errors: string[]; stdin: boolean } => ({ window: cli.window, errors: cli.errors, stdin: cli.stdin }));
     buildMenu();
     createWindow();
+    startApiFromSettings();
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
@@ -508,6 +531,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', () => {
     quitting = true;
     void stdin.then((s) => s?.dispose());
+    void stopApi();
     void worker?.terminate();
   });
   app.on('window-all-closed', () => {

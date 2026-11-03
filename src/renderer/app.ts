@@ -12,6 +12,7 @@ import { DetailView } from './detail';
 import { Grid } from './grid';
 import { HistogramView } from './histogram';
 import { openPalette } from './palette';
+import { applyOpenRequest, copyApiExample, copyViewLink, OpenRequestHost, serveApiCalls } from './openRequests';
 import { PatternsView } from './patternsView';
 import { Pins } from './pins';
 import { Sidebar } from './sidebar';
@@ -1338,6 +1339,7 @@ function rowMenu(e: MouseEvent, row: RowData, key: string | null) {
     'sep',
     { label: 'Copy value', disabled: !key, action: () => key && copyText(cellValue(t, row, key), 'Value') },
     { label: 'Copy entry', action: () => copyText(row.text, 'Entry') },
+    { label: 'Copy link to this view', action: () => void copyViewLink(openHost, row) },
     { label: 'Toggle bookmark', shortcut: 'B', action: () => void toggleBookmark(row) },
     { label: pins.has(t, row.key) ? 'Unpin row' : 'Pin row', shortcut: 'Ctrl+P', action: () => pins.toggle(row) },
     'sep',
@@ -2454,6 +2456,13 @@ window.ulv.onMenu((cmd, ...args) => {
       return active && clearView(active);
     case 'clear-filters':
       return active && clearAllFilters(active);
+    case 'copy-view-link':
+      return void copyViewLink(openHost);
+    case 'copy-api-example':
+      return void copyApiExample(openHost);
+    case 'toggle-local-api':
+    case 'new-api-token':
+      return void configureApi(cmd === 'new-api-token');
     case 'open-workspace':
       return void openWorkspace();
     case 'open-workspace-path':
@@ -2527,6 +2536,49 @@ window.addEventListener('drop', (e) => {
 
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 
+// ------------------------------------------- open requests and the local API
+
+/** Standard input's capture file (it cannot be linked). */
+let stdinPath: string | null = null;
+
+const openHost: OpenRequestHost = {
+  tabs: () => tabs,
+  active: () => active,
+  allTabs,
+  openTab: (paths, opts) => openTab(paths, opts),
+  activate,
+  addRecent: (paths) => {
+    void ulv().addRecent(paths);
+    settings.recent = [...paths, ...(settings.recent ?? []).filter((p) => !paths.includes(p))].slice(0, 15);
+  },
+  title: tabTitle,
+  applyFilter: async (t) => {
+    if (t === active) quickInput.value = t.filter.query ?? '';
+    await applyFilter(t);
+  },
+  validateQuery: (t, q) => validateQuery(q, !!t.filter.queryCaseSensitive),
+  search: async (t, text, jump) => {
+    searchInput.value = text;
+    for (const b of Object.values(toggles)) b.classList.remove('on');
+    await runSearch(t, jump);
+  },
+  select: (row) => grid.select(row, false, 'center'),
+  knownFormat: (id) => id in FORMAT_LABELS || (settings.customFormats ?? []).some((f) => `custom:${f.name}` === id),
+  focusedRow: async (t) => gridOf(t)?.getCached(t.focus) ?? (t.info.viewCount ? (await engine.rows(t.id, t.focus, 1))[0] ?? null : null),
+  copy: (text, what) => copyText(text, what),
+  stdinPath: () => stdinPath,
+};
+
+/** File › Local API: turn it on or off, or make a new token (main keeps the settings and the server). */
+async function configureApi(newToken: boolean) {
+  const r = newToken ? await ulv().apiNewToken() : await ulv().apiConfigure(!settings.localApi?.enabled);
+  settings.localApi = r.settings;
+  if (r.error) toast(`Local API: ${r.error}`, true);
+  else if (newToken) toast('New API token: scripts using the old one stop working');
+  else if (r.port) toast(`Local API on http://127.0.0.1:${r.port}${r.settings.port && r.port !== r.settings.port ? ` (port ${r.settings.port} was taken)` : ''}. File › Local API › Copy API example`);
+  else toast('Local API off');
+}
+
 async function init() {
   settings = (await ulv().getSettings()) as Settings;
   settings.highlights ??= DEFAULT_HIGHLIGHTS.map((r) => ({ ...r }));
@@ -2536,12 +2588,12 @@ async function init() {
   applyLayout();
   renderFormatOptions();
   activate(null);
-  const startup = await ulv().startupOptions();
-  if (startup.errors.length) toast(startup.errors.join('\n'), true);
-  const files = await ulv().startupFiles();
-  if (files.length) await openPaths(files, false, startup.window);
+  await serveApiCalls(openHost);
+  const startup = await ulv().startupRequest();
+  if (startup.stdin && startup.request?.paths.length) stdinPath = startup.request.paths[startup.request.paths.length - 1];
+  if (startup.request) await applyOpenRequest(openHost, startup.request);
   // Piped input is the last startup file: follow it like a tail.
-  if (startup.stdin && active && files.length) {
+  if (stdinPath && active?.paths[0] === stdinPath) {
     active.follow = true;
     renderToolbar();
   }
