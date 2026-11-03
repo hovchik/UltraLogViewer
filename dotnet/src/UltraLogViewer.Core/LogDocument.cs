@@ -244,12 +244,13 @@ public sealed class LogDocument : IDisposable
         var includes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Include).Select(Compile).ToArray();
         var excludes = spec.Rules.Where(r => r.Enabled && r.Text.Length > 0 && r.Mode == RuleMode.Exclude).Select(Compile).ToArray();
         var cleared = spec.ClearedBefore;
-        var query = string.IsNullOrWhiteSpace(spec.Query) ? null : Query.CompileQuery(spec.Query, spec.QueryCaseSensitive);
+        // The query's top-level since:/until: join the time range, which the index answers without reading entries.
+        var (query, qFrom, qTo) = string.IsNullOrWhiteSpace(spec.Query) ? (null, null, null) : Query.CompileQueryWithTimeRange(spec.Query, spec.QueryCaseSensitive);
         var needsText = includes.Length > 0 || excludes.Length > 0 || query is not null;
         var bookmarks = spec.BookmarksOnly ? spec.Bookmarks : null;
-        var from = spec.TimeFrom ?? long.MinValue;
-        var to = spec.TimeTo ?? long.MaxValue;
-        var hasTime = spec.TimeFrom is not null || spec.TimeTo is not null;
+        var from = Math.Max(spec.TimeFrom ?? long.MinValue, qFrom ?? long.MinValue);
+        var to = Math.Min(spec.TimeTo ?? long.MaxValue, qTo ?? long.MaxValue);
+        var hasTime = spec.TimeFrom is not null || spec.TimeTo is not null || qFrom is not null || qTo is not null;
         var total = _sources.Sum(s => (long)s.EntryCount);
         long done = 0;
 
@@ -300,6 +301,7 @@ public sealed class LogDocument : IDisposable
                         {
                             // The level is already indexed: answer without parsing the entry.
                             if (k == "level") return LevelNames.Match[(int)src.LevelOf(e)];
+                            if (k == Query.TimeField) return src.TimeOf(e) is var t && t != Timestamps.None ? t.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
                             parsed ??= fmt.Parse(text);
                             if (parsed.TryGetValue(k, out var val)) return val;
                             var alias = k == "timestamp" ? "time" : k;

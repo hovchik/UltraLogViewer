@@ -110,7 +110,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             }
         };
 
-        _quick = new TextBox { Watermark = "Quick filter (Ctrl+L): words, a OR b, -x, level:error, /re/", MinWidth = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
+        _quick = new TextBox { Watermark = "Quick filter (Ctrl+L): words, -x, level:error, status>=500, since:-1h", MinWidth = 160, FontFamily = Fonts.Mono, FontSize = 12.5, VerticalContentAlignment = VerticalAlignment.Center };
         _quickDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
         _quickDebounce.Tick += (_, _) =>
         {
@@ -869,6 +869,12 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (_active is not { } tab) return;
         var q = _quick.Text ?? "";
         if (q == tab.Filter.Query) return;
+        // A bad query is reported and the view keeps the last good filter (level toggles etc. still apply).
+        if (Query.ValidateQuery(q, tab.Filter.QueryCaseSensitive) is { } err)
+        {
+            Toast($"Quick filter: {err}", true);
+            return;
+        }
         tab.Filter.Query = q;
         ApplyFilter();
     }

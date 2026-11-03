@@ -1,5 +1,5 @@
 import { FORMAT_LABELS } from '../core/formats';
-import { fieldToken, splitToken, tokenAt, validatePattern } from '../core/query';
+import { fieldToken, OPERATORS, operatorHint, splitToken, tokenAt, validatePattern, validateQuery } from '../core/query';
 import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
@@ -952,6 +952,9 @@ $('#s-filter').onclick = () => {
 /** Applies the quick-filter box (no-op when unchanged). */
 function commitQuick() {
   if (!active || (active.filter.query ?? '') === quickInput.value) return;
+  // A bad query is reported and the view keeps the last good filter.
+  const err = validateQuery(quickInput.value, !!active.filter.queryCaseSensitive);
+  if (err) return toast(`Quick filter: ${err}`, true);
   active.filter.query = quickInput.value;
   void applyFilter(active);
 }
@@ -976,49 +979,63 @@ function quickSuggestions(): Suggestion[] {
   if (!text.trim()) return (settings.queryHistory ?? []).map((q) => ({ label: q, accept: () => pick(q) }));
   if (!t) return [];
   const [start, len] = tokenAt(text, quickInput.selectionStart ?? text.length);
-  const [prefix, field, value] = splitToken(text.slice(start, start + len));
+  const token = text.slice(start, start + len);
+  const [prefix, field, op, value] = splitToken(token);
   const replace = (with_: string) => {
     quickInput.value = text.slice(0, start) + with_ + text.slice(start + len);
     const caret = start + with_.length;
     quickInput.setSelectionRange(caret, caret);
   };
+  /** A suggestion that completes the token: `commit` applies the query, otherwise the list moves on. */
+  const item = (label: string, hint: string | undefined, with_: string, commit: boolean): Suggestion => ({
+    label,
+    hint,
+    accept: () => {
+      replace(with_);
+      if (!commit) return ac.update();
+      ac.close();
+      commitQuick();
+      saveHistory(quickInput.value);
+    },
+  });
   const stats = t.fieldStats?.fields ?? [];
-  if (field !== null) {
+  const isTime = op === ':' && (field?.toLowerCase() === 'since' || field?.toLowerCase() === 'until');
+  if (field !== null && !isTime) {
     const lk = field.toLowerCase();
     const values: [string, number][] =
       lk === 'level'
-        ? LEVEL_NAMES.map((n, i): [string, number] => [n, t.info.levelCounts[i] ?? 0]).filter(([, c], i) => i > 0 && c > 0)
+        ? LEVEL_NAMES.map((n, i): [string, number] => [n.toLowerCase(), t.info.levelCounts[i] ?? 0]).filter(([, c], i) => i > 0 && c > 0)
         : stats.find((f) => f.key.toLowerCase() === lk)?.top ?? [];
     const needle = value.toLowerCase();
     return values
       .filter(([v]) => v.toLowerCase().includes(needle))
       .slice(0, 10)
-      .map(([v, c]) => ({
-        label: v,
-        hint: fmtNum(c),
-        accept: () => {
-          replace(prefix + fieldToken(field, v) + ' ');
-          ac.close();
-          commitQuick();
-          saveHistory(quickInput.value);
-        },
-      }));
+      .map(([v, c]) => item(prefix + fieldToken(field, v, op), fmtNum(c), prefix + fieldToken(field, v, op) + ' ', true));
+  }
+  // since:/until: offer relative times.
+  if (field !== null) return ['-15m', '-1h', '-24h', 'today'].filter((r) => r.startsWith(value.toLowerCase())).map((r) => item(`${prefix}${field}:${r}`, 'time', `${prefix}${field}:${r} `, true));
+  const keys = [...new Map(['level', ...stats.map((f) => f.key)].map((k) => [k.toLowerCase(), k])).values()];
+  if (/^exists\(/i.test(value)) {
+    const part = value.slice(7).replace(/\)+$/, '').toLowerCase();
+    return keys
+      .filter((k) => k.toLowerCase().startsWith(part))
+      .slice(0, 10)
+      .map((k) => item(`${prefix}exists(${k})`, 'has field', `${prefix}exists(${k}) `, true));
   }
   if (!value) return [];
   const needle = value.toLowerCase();
-  const names = [...new Set([...stats.map((f) => f.key), 'level'])].filter((k) => k.toLowerCase().startsWith(needle));
-  return names.map((k) => ({
-    label: `${k}:`,
-    accept: () => {
-      replace(prefix + k + ':');
-      ac.update(); // straight on to the values
-    },
-  }));
+  const exact = keys.find((k) => k.toLowerCase() === needle);
+  // A complete field name: offer the operators.
+  if (exact) return [...OPERATORS.map((o) => item(prefix + exact + o, operatorHint(o), prefix + exact + o, false)), item(`${prefix}exists(${exact})`, 'has field', `${prefix}exists(${exact}) `, true)];
+  const out = keys.filter((k) => k.toLowerCase().startsWith(needle)).slice(0, 10).map((k) => item(`${prefix}${k}:`, 'field', `${prefix}${k}:`, false));
+  for (const kw of ['since:', 'until:', 'exists('])
+    if (kw.startsWith(needle) && out.length < 10) out.push(item(prefix + kw, kw === 'exists(' ? 'has field' : 'time', prefix + kw, false));
+  return out;
 }
 
 const ac = new Autocomplete($('#quick-ac'), quickSuggestions);
 
-// A bare `field:` still being typed filters nothing (see parseQuery), so committing as you type is safe.
+// A bare `field:` still being typed filters nothing (see parseQueryExpr), so committing as you type is safe.
 const quickSoon = debounce(() => commitQuick(), 300);
 quickInput.addEventListener('input', () => {
   quickSoon();
@@ -1517,7 +1534,8 @@ function applyTheme() {
 function renderFormatOptions() {
   formatSel.innerHTML = '';
   formatSel.append(h('option', { value: '' }, 'Format: auto'));
-  for (const id of ['timestamped', 'json', 'syslog', 'syslog5424', 'access', 'logcat', 'plain']) formatSel.append(h('option', { value: id }, FORMAT_LABELS[id]));
+  for (const id of ['timestamped', 'json', 'syslog', 'syslog5424', 'access', 'logcat', 'logfmt', 'postgres', 'mysql-error', 'mysql-general', 'mysql-slow', 'mongodb', 'rust', 'macos', 'laravel', 'plain'])
+    formatSel.append(h('option', { value: id }, FORMAT_LABELS[id]));
   for (const c of settings.customFormats ?? []) formatSel.append(h('option', { value: `custom:${c.name}` }, `Custom: ${c.name}`));
   formatSel.append(h('option', { value: '__new' }, '+ Custom format…'));
   formatSel.value = active?.formatId ?? '';
@@ -1700,7 +1718,7 @@ function showHelp() {
     ['Ctrl+O / Ctrl+Shift+O', 'Open files / open and merge into one timeline'],
     ['Ctrl+F, /', 'Find'],
     ['Enter, F3, n / Shift+Enter, Shift+F3, N', 'Next / previous match'],
-    ['Ctrl+L', 'Quick filter (words, a OR b, -word, level:error, logger:Db, "phrase", /regex/)'],
+    ['Ctrl+L', 'Quick filter (syntax below)'],
     ['e / E', 'Next / previous error'],
     ['w / W', 'Next / previous warning'],
     ['Ctrl+B, b, double-click', 'Toggle bookmark'],
@@ -1722,14 +1740,39 @@ function showHelp() {
     ['Ctrl+Alt+S', 'Save workspace'],
     ['Timeline: click / drag', 'Jump to time / filter to a time range'],
   ];
+  // The quick-filter syntax, shown under the shortcuts.
+  const syntax: [string, string][] = [
+    ['error timeout', 'Entries containing both words'],
+    ['a OR b, a | b', 'Either; OR binds tighter than AND, so a b OR c means a and (b or c)'],
+    ['-word, NOT word', 'Without the word'],
+    ['(a or b) and not c', 'and / or / not in any case, with parentheses'],
+    ['"exact phrase", /regex/', 'A phrase or a regular expression'],
+    ['logger:Db, level:error', 'A parsed field contains the value (field:"two words", field:/re/)'],
+    ['status>=500, status!=200', 'Compare a field: > >= < <= == != (numbers numerically, other values as text)'],
+    ['duration>2s', 'Durations with ms, s, m or h; a bare number is read in the unit you typed'],
+    ['level>=warn', 'Levels compare by severity'],
+    ['user in (alice,bob)', 'The field equals one of the values'],
+    ['exists(traceId), env?=prod', 'The field is present / equals the value or is missing'],
+    ['since:-3h, until:-10m', 'Relative to now; also since:2024-05-01T10:00, since:today'],
+  ];
   modal((box, close) => {
-    const table = h('table', { class: 'keys' });
-    for (const [k, d] of keys) {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td><kbd>${esc(k)}</kbd></td><td>${esc(d)}</td>`;
-      table.append(tr);
-    }
-    box.append(h('h2', {}, 'Keyboard shortcuts'), table, h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: close }, 'Close')));
+    const table = (rows: [string, string][]) => {
+      const t = h('table', { class: 'keys' });
+      for (const [k, d] of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><kbd>${esc(k)}</kbd></td><td>${esc(d)}</td>`;
+        t.append(tr);
+      }
+      return t;
+    };
+    box.classList.add('help');
+    box.append(
+      h('h2', {}, 'Keyboard shortcuts'),
+      table(keys),
+      h('h2', { class: 'sub' }, 'Quick filter'),
+      table(syntax),
+      h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: close }, 'Close')),
+    );
   });
 }
 

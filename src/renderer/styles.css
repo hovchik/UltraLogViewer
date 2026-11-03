@@ -388,6 +388,8 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .modal .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 .modal .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .modal .hint { font-size: 12px; color: var(--fg-2); margin: 6px 0; }
+.modal .box.help { width: min(680px, 92vw); max-height: 80vh; overflow: auto; }
+.modal h2.sub { margin-top: 16px; }
 .modal table.keys { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .modal table.keys td { padding: 3px 4px; border-bottom: 1px solid var(--border); }
 .modal table.keys td:first-child { white-space: nowrap; width: 40%; }

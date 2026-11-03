@@ -252,7 +252,7 @@ public sealed class JsonFormat : LogFormat
     private const int MaxExtraFields = 60;
 
     /// <summary>Adds the remaining properties as fields, nested objects flattened to dotted names (http.request.path).</summary>
-    private static void AddExtras(Dictionary<string, string> d, JsonElement o, string prefix, HashSet<string> skip, int depth)
+    internal static void AddExtras(Dictionary<string, string> d, JsonElement o, string prefix, HashSet<string> skip, int depth)
     {
         foreach (var p in o.EnumerateObject())
         {
@@ -269,7 +269,7 @@ public sealed class JsonFormat : LogFormat
         }
     }
 
-    private static string Str(JsonElement? v) => v is not JsonElement e ? "" : e.ValueKind switch
+    internal static string Str(JsonElement? v) => v is not JsonElement e ? "" : e.ValueKind switch
     {
         JsonValueKind.String => e.GetString() ?? "",
         JsonValueKind.Null or JsonValueKind.Undefined => "",
@@ -664,7 +664,10 @@ public static class FormatDetector
     public static readonly (string Id, string Label)[] BuiltIns =
     [
         ("timestamped", "Timestamped text"), ("json", "JSON lines"), ("syslog", "Syslog RFC 3164"), ("syslog5424", "Syslog RFC 5424"),
-        ("access", "Apache / Nginx"), ("logcat", "Android logcat"), ("plain", "Plain text"),
+        ("access", "Apache / Nginx"), ("logcat", "Android logcat"), ("logfmt", "logfmt"), ("postgres", "PostgreSQL"),
+        ("mysql-error", "MySQL error log"), ("mysql-general", "MySQL general log"), ("mysql-slow", "MySQL slow log"),
+        ("mongodb", "MongoDB JSON"), ("rust", "Rust tracing"), ("macos", "macOS unified log"), ("laravel", "Laravel"),
+        ("plain", "Plain text"),
     ];
 
     /// <summary>Short name for the format picker and the status bar.</summary>
@@ -698,11 +701,25 @@ public static class FormatDetector
         var w3c = lines.FirstOrDefault(l => l.StartsWith("#Fields:"));
         if (w3c is not null) candidates.Add((new W3cFormat(w3c[8..].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries)), 0, _ => true));
         var ts = new TimestampedFormat(year);
+        // Order matters: specific formats come before the general ones that would also accept their lines
+        // (MongoDB before JSON; the timestamp-first formats before "timestamped"). The slow query log is mostly SQL
+        // lines, so it is only picked when its "# Query_time:" lines are there (it can always be chosen by hand). Multi-line
+        // formats need fewer matching lines (stack traces, SQL), but their first line must match.
+        var slow = new MySqlSlowFormat();
+        candidates.Add((slow, lines.Any(l => l.StartsWith("# Query_time:", StringComparison.Ordinal)) ? 0 : 2, slow.IsEntryStart));
+        candidates.Add((new MongoFormat(), 0.6, l => MongoFormat.Head().IsMatch(l)));
         candidates.Add((new JsonFormat(), 0.6, l => JsonFormat.TryJson(l) is not null));
         candidates.Add((new AccessLogFormat(), 0.6, l => AccessLogFormat.Re().IsMatch(l)));
         candidates.Add((new Syslog5424Format(), 0.6, l => Syslog5424Format.Re().IsMatch(l)));
         candidates.Add((new LogcatFormat(year), 0.6, l => LogcatFormat.Re().IsMatch(l)));
         candidates.Add((new SyslogFormat(year), 0.5, l => SyslogFormat.Re().IsMatch(l)));
+        candidates.Add((new LogfmtFormat(), 0.6, LogfmtFormat.Test));
+        candidates.Add((new PostgresFormat(), 0.3, l => PostgresFormat.Re().IsMatch(l)));
+        candidates.Add((new MySqlErrorFormat(), 0.3, l => MySqlErrorFormat.Re().IsMatch(l)));
+        candidates.Add((new MySqlGeneralFormat(), 0.3, MySqlGeneralFormat.Test));
+        candidates.Add((new RustTracingFormat(), 0.3, l => RustTracingFormat.Re().IsMatch(l)));
+        candidates.Add((new MacUnifiedFormat(), 0.3, MacUnifiedFormat.Test));
+        candidates.Add((new LaravelFormat(), 0.3, l => LaravelFormat.Re().IsMatch(l)));
         candidates.Add((ts, 0.1, ts.IsEntryStart));
 
         if (!string.IsNullOrEmpty(force))

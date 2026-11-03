@@ -9,7 +9,7 @@
 import * as fs from 'node:fs';
 import { FileSource, SourceOptions } from './fileSource';
 import { GrowU32, GrowU8, lowerBound } from './grow';
-import { compileMatcher, compileQuery, Matcher, ruleMatcher } from './query';
+import { compileMatcher, compileQueryWithTimeRange, Matcher, ruleMatcher, TIME_FIELD } from './query';
 import { fnv1a64, messageOf, RepeatMode, repeatKey, template } from './patterns';
 import { CustomFormat, DocInfo, FieldStat, FieldStats, FilterSpec, Histogram, Level, LEVEL_COUNT, PatternsResult, PatternStat, RowData, rowKey, SearchResult, TextPattern } from './types';
 
@@ -261,12 +261,14 @@ export class LogDocument {
     const includes = compiled('include');
     const excludes = compiled('exclude');
     const cleared = spec.clearedBefore ?? null;
-    const query = spec.query?.trim() ? compileQuery(spec.query, !!spec.queryCaseSensitive) : null;
+    // The query's top-level since:/until: join the time range, which the index answers without reading entries.
+    const q = spec.query?.trim() ? compileQueryWithTimeRange(spec.query, !!spec.queryCaseSensitive) : { predicate: null, from: null, to: null };
+    const query = q.predicate;
     const needsText = includes.length > 0 || excludes.length > 0 || !!query;
     const bookmarks = spec.bookmarksOnly ? new Set(spec.bookmarks ?? []) : null;
-    const from = spec.timeFrom ?? -Infinity;
-    const to = spec.timeTo ?? Infinity;
-    const hasTime = spec.timeFrom != null || spec.timeTo != null;
+    const from = Math.max(spec.timeFrom ?? -Infinity, q.from ?? -Infinity);
+    const to = Math.min(spec.timeTo ?? Infinity, q.to ?? Infinity);
+    const hasTime = spec.timeFrom != null || spec.timeTo != null || q.from !== null || q.to !== null;
 
     const total = this.sources.reduce((n, s) => n + s.entryCount, 0);
     let done = 0;
@@ -305,6 +307,10 @@ export class LogDocument {
             const field = (k: string): string => {
               // The level is already indexed: answer without parsing the entry.
               if (k === 'level') return LEVEL_MATCH_NAMES[src.level(e)];
+              if (k === TIME_FIELD) {
+                const t = src.time(e);
+                return Number.isNaN(t) ? '' : String(t);
+              }
               const f = (parsed ??= fmt.parse(text));
               if (k in f) return f[k];
               const lk = k.toLowerCase();

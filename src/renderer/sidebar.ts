@@ -1,6 +1,6 @@
 // Left panel: levels, field values, filter rules, time range, highlight rules and bookmarks.
 
-import { validatePattern } from '../core/query';
+import { SHORTCUT_TIP, shortcutReference, TIME_SHORTCUTS, validatePattern } from '../core/query';
 import { ColumnDef, FilterRule, Level, LEVEL_NAMES } from '../core/types';
 import { formatTime } from '../core/timestamp';
 import type { Bookmark, HighlightRule, Settings, Tab } from './state';
@@ -292,12 +292,33 @@ export class Sidebar {
       return h('div', { class: 'sec' }, h('h3', {}, 'Time range'), h('div', { class: 'empty-hint' }, 'No timestamps in this file, so entries stay in file order and time filters don’t apply.'));
     }
     const span = info.timeMin != null && info.timeMax != null ? `${formatTime(info.timeMin)} → ${formatTime(info.timeMax)}` : 'No timestamps detected';
+    // Now / -15m / -1h / -24h: count back from the last entry, or from the clock while following a live file.
+    const shortcuts = h(
+      'div',
+      { class: 'row shortcuts' },
+      ...TIME_SHORTCUTS.map(([label, ms]) =>
+        h(
+          'button',
+          {
+            class: 'mini',
+            title: `${ms === 0 ? 'Set To to now' : `Show the last ${label.slice(1)}`}. ${SHORTCUT_TIP}`,
+            onclick: () => {
+              const at = shortcutReference(tab.info.timeMax, tab.follow, Date.now());
+              if (ms === 0) f.timeTo = at;
+              else [f.timeFrom, f.timeTo] = [at - ms, null];
+              this.host.applyFilter();
+            },
+          },
+          label,
+        ),
+      ),
+    );
     return h(
       'div',
       { class: 'sec' },
       h('h3', {}, 'Time range', h('button', { class: 'mini', onclick: () => { f.timeFrom = f.timeTo = null; this.host.applyFilter(); } }, 'Clear')),
       h('div', { class: 'empty-hint' }, span),
-      h('div', { class: 'form' }, h('div', { class: 'row' }, h('span', { style: 'width:34px' }, 'From'), from), h('div', { class: 'row' }, h('span', { style: 'width:34px' }, 'To'), to)),
+      h('div', { class: 'form' }, shortcuts, h('div', { class: 'row' }, h('span', { style: 'width:34px' }, 'From'), from), h('div', { class: 'row' }, h('span', { style: 'width:34px' }, 'To'), to)),
       h('div', { class: 'empty-hint' }, 'Tip: drag across the timeline to select a range.'),
     );
   }
