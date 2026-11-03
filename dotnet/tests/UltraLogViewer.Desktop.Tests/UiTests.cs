@@ -712,6 +712,115 @@ public sealed class UiTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task Duplicated_tabs_share_the_file_and_keep_their_own_filters()
+    {
+        var (w, _) = NewWindow();
+        var path = Sample("dup.log", 260);
+        var tab = await Open(w, path);
+        tab.Filter.Query = "level:warn";
+        await w.ApplyFilterAsync(tab);
+        var warns = tab.Info.ViewCount;
+
+        var dup = (await w.DuplicateTab(tab))!;
+        Assert.Same(dup, w.ActiveTab);
+        Assert.Equal([tab, dup], w.Tabs);
+        Assert.Equal("dup.log (2)", dup.Title);
+        Assert.Same(tab.Doc.Sources[0], dup.Doc.Sources[0]); // no reindexing
+        Assert.Equal(warns, dup.Info.ViewCount); // starts with the same filter
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Duplicate tab"));
+
+        w.SetQuickFilterText("level:error");
+        dup.Filter.Query = "level:error";
+        await w.ApplyFilterAsync(dup);
+        Assert.Equal(260 / 13, dup.Info.ViewCount);
+        Assert.Equal(warns, tab.Info.ViewCount);
+
+        // Columns are the tab's own: hiding one in the duplicate leaves the original alone.
+        w.RemoveColumn("thread");
+        Assert.True(w.IsColumnHidden(dup, "thread"));
+        Assert.False(w.IsColumnHidden(tab, "thread"));
+
+        // Live tail: the file is read once and both tabs show the new entries.
+        File.AppendAllText(path, "2024-03-01 11:00:00.000 [main] ERROR com.shop.Api - Late failure\n2024-03-01 11:00:01.000 [main] WARN  com.shop.Api - Late warning\n");
+        await Until(() => dup.Info.Total == 262 && tab.Info.Total == 262 && dup.BusyProgress is null && tab.BusyProgress is null);
+        Assert.Equal(260 / 13 + 1, dup.Info.ViewCount);
+        Assert.Equal(warns + 1, tab.Info.ViewCount);
+
+        // Closing one tab keeps the other's file open.
+        w.CloseTab(tab);
+        Assert.False(dup.Doc.Sources[0].Closed);
+        Assert.Equal(1, dup.Doc.Set.RefCount);
+        Assert.Equal("Late failure", dup.Doc.GetRows(dup.Info.ViewCount - 1, 1)[0].Field("message"));
+        var src = dup.Doc.Sources[0];
+        w.CloseTab(dup);
+        Assert.True(src.Closed);
+        w.Close();
+    }
+
+    [AvaloniaFact]
+    public async Task Split_view_filters_each_pane_and_syncs_the_selection()
+    {
+        var (w, _) = NewWindow();
+        var tab = await Open(w, Sample("split.log", 260));
+        var pane = (await w.SplitRight(tab))!;
+        Assert.True(w.SplitShownForTest);
+        Assert.Same(pane, w.ActiveTab);
+        Assert.Same(tab, pane.SplitOf);
+        Assert.Equal([tab], w.Tabs); // a pane, not a tab
+        Assert.Same(tab.Doc.Sources[0], pane.Doc.Sources[0]);
+        Assert.Same(pane, w.SplitGridForTest.Tab);
+        Assert.Same(tab, w.MainGridForTest.Tab);
+
+        // Each pane has its own quick filter.
+        w.SetPaneQuickForTest(right: false, "level:error");
+        await Until(() => tab.Info.ViewCount == 260 / 13 && tab.BusyProgress is null);
+        Assert.Same(tab, w.ActiveTab); // typing in a pane's box makes it the active one
+        w.SetPaneQuickForTest(right: true, "logger:Cache");
+        await Until(() => pane.Info.ViewCount < 260 && pane.BusyProgress is null);
+        var warns = pane.Info.ViewCount;
+        Assert.Equal(260 / 13, tab.Info.ViewCount);
+        Assert.Equal($"{260 / 13} of 260", w.PaneCountForTest(right: false));
+        Assert.Equal($"{warns} of 260", w.PaneCountForTest(right: true));
+
+        // Selecting in the left pane moves the right one to the nearest entry by time (errors are not Cache entries).
+        w.FocusPaneForTest(right: false);
+        w.MainGridForTest.Select(3);
+        await Until(() => pane.Focus > 0);
+        var picked = tab.Doc.GetRows(3, 1)[0];
+        var near = pane.Doc.GetRows(pane.Focus, 1)[0];
+        Assert.True(near.Time >= picked.Time && (pane.Focus == 0 || pane.Doc.GetRows(pane.Focus - 1, 1)[0].Time < picked.Time));
+        Assert.Same(tab, w.ActiveTab); // the other pane follows without taking the focus
+
+        // The same entry, when the other pane shows it.
+        w.SetPaneQuickForTest(right: true, "");
+        await Until(() => pane.Info.ViewCount == 260 && pane.BusyProgress is null);
+        w.FocusPaneForTest(right: false);
+        w.MainGridForTest.Select(5);
+        await Until(() => pane.Focus == pane.Doc.RowForKey(tab.Doc.GetRows(5, 1)[0].Key));
+        // The details pane follows the focused pane.
+        w.FocusPaneForTest(right: true);
+        Assert.Same(pane, w.ActiveTab);
+        Screenshot(w, "split-view.png");
+
+        // Sync off: the other pane stays where it is.
+        w.SetSyncForTest(false);
+        var before = tab.Focus;
+        w.SplitGridForTest.Select(200);
+        await Task.Delay(50);
+        Dispatcher.UIThread.RunJobs();
+        Assert.Equal(before, tab.Focus);
+
+        Assert.Contains(w.PaletteActions(), a => a.Label.Contains("Split right"));
+        w.CloseSplit(tab);
+        Assert.False(w.SplitShownForTest);
+        Assert.Same(tab, w.ActiveTab);
+        Assert.Null(tab.Split);
+        Assert.False(tab.Doc.Sources[0].Closed);
+        Assert.Equal(1, tab.Doc.Set.RefCount);
+        w.Close();
+    }
+
+    [AvaloniaFact]
     public void Sources_list_shows_per_file_progress()
     {
         var s = new SourceInfo(0, "/x/a.log", "a.log", 2048, 10, 9, "Timestamped text", "utf-8", false, true, Indexing: true, Progress: 0.42);

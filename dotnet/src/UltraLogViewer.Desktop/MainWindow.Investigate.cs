@@ -24,11 +24,41 @@ public sealed partial class MainWindow
     /// <summary>Key under which column choices are remembered: the format name of the first file.</summary>
     private static string FormatKey(DocumentTab tab) => tab.Info.Sources.Count > 0 ? tab.Info.Sources[0].Format : "";
 
+    // A duplicated tab or split pane has column choices of its own (copied when it was made, not saved); other tabs
+    // use the per-format ones in the settings.
+    private List<string>? ExtraColumnsOf(DocumentTab tab, bool create = false)
+    {
+        if (tab.OwnColumns is { } own) return own.Extra;
+        var fk = FormatKey(tab);
+        if (_settings.ExtraColumns.TryGetValue(fk, out var list)) return list;
+        return create ? _settings.ExtraColumns[fk] = [] : null;
+    }
+
+    private List<string>? ColumnOrderOf(DocumentTab tab) => tab.OwnColumns?.Order ?? _settings.ColumnOrder.GetValueOrDefault(FormatKey(tab));
+
+    private void SetColumnOrder(DocumentTab tab, List<string>? keys)
+    {
+        if (tab.OwnColumns is { } own)
+        {
+            own.Order.Clear();
+            own.Order.AddRange(keys ?? []);
+        }
+        else if (keys is null) _settings.ColumnOrder.Remove(FormatKey(tab));
+        else _settings.ColumnOrder[FormatKey(tab)] = keys;
+    }
+
+    private List<string> HiddenColumnsOf(DocumentTab? tab) => tab?.OwnColumns?.Hidden ?? _settings.HiddenColumns;
+
+    internal bool IsColumnHidden(DocumentTab? tab, string key) => HiddenColumnsOf(tab).Contains(key);
+
+    /// <summary>A copy of a tab's column choices, for a duplicate or split pane of it.</summary>
+    private TabColumns CopyColumns(DocumentTab tab) =>
+        new() { Extra = [.. ExtraColumnsOf(tab) ?? []], Order = [.. ColumnOrderOf(tab) ?? []], Hidden = [.. HiddenColumnsOf(tab)] };
+
     public IReadOnlyList<ColumnDef> Columns(DocumentTab tab)
     {
         var cols = tab.Info.Columns.ToList();
-        var key = FormatKey(tab);
-        if (_settings.ExtraColumns.TryGetValue(key, out var extras))
+        if (ExtraColumnsOf(tab) is { } extras)
         {
             var at = cols.FindIndex(c => c.Width == 0);
             if (at < 0) at = cols.Count;
@@ -38,7 +68,7 @@ public sealed partial class MainWindow
                 cols.Insert(at++, new ColumnDef(k, k, 140));
             }
         }
-        if (_settings.ColumnOrder.TryGetValue(key, out var order) && order.Count > 0)
+        if (ColumnOrderOf(tab) is { Count: > 0 } order)
         {
             var ordered = order.Select(k => cols.FirstOrDefault(c => c.Key == k)).OfType<ColumnDef>().ToList();
             cols = ordered.Concat(cols.Where(c => !ordered.Contains(c))).ToList();
@@ -54,11 +84,10 @@ public sealed partial class MainWindow
     public void AddColumn(string key)
     {
         if (_active is not { } tab) return;
-        _settings.HiddenColumns.Remove(key);
+        HiddenColumnsOf(tab).Remove(key);
         if (!tab.Info.Columns.Any(c => c.Key.Equals(key, StringComparison.OrdinalIgnoreCase)))
         {
-            var fk = FormatKey(tab);
-            if (!_settings.ExtraColumns.TryGetValue(fk, out var list)) _settings.ExtraColumns[fk] = list = [];
+            var list = ExtraColumnsOf(tab, create: true)!;
             if (!list.Contains(key)) list.Add(key);
         }
         ColumnsChanged(tab);
@@ -68,8 +97,8 @@ public sealed partial class MainWindow
     public void RemoveColumn(string key)
     {
         if (_active is not { } tab) return;
-        if (_settings.ExtraColumns.TryGetValue(FormatKey(tab), out var list) && list.Remove(key)) { }
-        else if (!_settings.HiddenColumns.Contains(key)) _settings.HiddenColumns.Add(key);
+        if (ExtraColumnsOf(tab) is { } list && list.Remove(key)) { }
+        else if (!HiddenColumnsOf(tab).Contains(key)) HiddenColumnsOf(tab).Add(key);
         ColumnsChanged(tab);
     }
 
@@ -80,7 +109,7 @@ public sealed partial class MainWindow
         var j = i + dir;
         if (i < 0 || j < 0 || j >= keys.Count) return;
         (keys[i], keys[j]) = (keys[j], keys[i]);
-        _settings.ColumnOrder[FormatKey(tab)] = keys;
+        SetColumnOrder(tab, keys);
         ColumnsChanged(tab);
     }
 
@@ -108,7 +137,7 @@ public sealed partial class MainWindow
             menu.Items.Add(new MenuItem { Header = $"Move “{col.Title}” right", IsEnabled = i >= 0 && i < cols.Count - 1, Command = Cmd(() => MoveColumn(tab, col.Key, 1)) });
             menu.Items.Add(new Separator());
         }
-        var extras = _settings.ExtraColumns.GetValueOrDefault(FormatKey(tab)) ?? [];
+        var extras = ExtraColumnsOf(tab) ?? [];
         foreach (var c in cols)
         {
             var item = new MenuItem { Header = c.Title, ToggleType = MenuItemToggleType.CheckBox, IsChecked = !IsColumnHidden(c.Key) };
@@ -129,7 +158,7 @@ public sealed partial class MainWindow
         }));
         menu.Items.Add(Item("Reset column order", () =>
         {
-            _settings.ColumnOrder.Remove(FormatKey(tab));
+            SetColumnOrder(tab, null);
             ColumnsChanged(tab);
         }));
         menu.Open(anchor);
@@ -349,7 +378,7 @@ public sealed partial class MainWindow
 
     public async Task RefreshFieldStatsAsync(DocumentTab tab)
     {
-        if (!tab.Ready || !_tabs.Contains(tab)) return;
+        if (!tab.Ready || !IsOpen(tab)) return;
         _statsCts?.Cancel();
         var cts = _statsCts = new CancellationTokenSource();
         tab.StatsTime = DateTime.UtcNow;

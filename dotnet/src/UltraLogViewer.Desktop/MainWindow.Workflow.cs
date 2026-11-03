@@ -86,9 +86,11 @@ public sealed partial class MainWindow
     private void ShowPatterns(bool on)
     {
         if (_active is not { } tab) on = false;
+        // The patterns view takes the place of the main pane, so in a split it is about the left pane's entries.
+        else if (on && _grid != _gridMain) Activate(OwnerOf(tab));
         _patternsShown = on;
         _patternsPane.IsVisible = on;
-        _grid.IsVisible = !on;
+        _gridMain.IsVisible = !on;
         RefreshChecks();
         if (on)
         {
@@ -232,7 +234,7 @@ public sealed partial class MainWindow
         var tab = _active;
         if (tab is not null && (tab.Follow || tab.TopRow + _grid.VisibleRows >= tab.Info.ViewCount)) tab.NewRows = 0;
         var n = tab?.NewRows ?? 0;
-        _newPill.IsVisible = n > 0 && !_patternsShown;
+        _newPill.IsVisible = n > 0 && !_patternsShown && _grid == _gridMain; // the pill sits over the main pane
         _newPill.Content = $"↓ {n:N0} new";
     }
 
@@ -406,7 +408,7 @@ public sealed partial class MainWindow
     internal WorkspaceFile BuildWorkspace(string file)
     {
         var dir = Path.GetDirectoryName(Path.GetFullPath(file)) ?? "";
-        var w = new WorkspaceFile { Active = Math.Max(0, _active is null ? 0 : _tabs.IndexOf(_active)), Highlights = _settings.Highlights.ToList() };
+        var w = new WorkspaceFile { Active = Math.Max(0, OwnerOf(_active) is { } a ? _tabs.IndexOf(a) : 0), Highlights = _settings.Highlights.ToList() };
         foreach (var t in _tabs)
         {
             var filter = t.Filter.Clone();
@@ -424,9 +426,9 @@ public sealed partial class MainWindow
                 Search = new WorkspaceSearch { Text = t.SearchPattern.Text, Regex = t.SearchPattern.Regex, CaseSensitive = t.SearchPattern.CaseSensitive, WholeWord = t.SearchPattern.WholeWord },
                 Bookmarks = t.Bookmarks.Values.Where(b => b.Source < t.Info.Sources.Count)
                     .Select(b => new WorkspaceBookmark { Path = t.Info.Sources[b.Source].Path, Line = b.Line, Note = b.Note }).ToList(),
-                ExtraColumns = [.. _settings.ExtraColumns.GetValueOrDefault(fk) ?? []],
-                ColumnOrder = [.. _settings.ColumnOrder.GetValueOrDefault(fk) ?? []],
-                HiddenColumns = [.. _settings.HiddenColumns],
+                ExtraColumns = [.. ExtraColumnsOf(t) ?? []],
+                ColumnOrder = [.. ColumnOrderOf(t) ?? []],
+                HiddenColumns = [.. HiddenColumnsOf(t)],
             });
         }
         return w;

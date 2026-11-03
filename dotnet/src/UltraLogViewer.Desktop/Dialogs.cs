@@ -116,6 +116,8 @@ public static class Dialogs
         ("Ctrl+C", "Copy selected entries"),
         ("Ctrl+E", "Export the current view (.log, .csv, .jsonl)"),
         ("Ctrl+W, Ctrl+Tab", "Close tab, next tab"),
+        ("Ctrl+Shift+T", "Duplicate tab (same file, no reindexing)"),
+        ("Ctrl+\\", "Split right / close split"),
         ("Timeline: click / drag", "Jump to time / filter to a time range"),
     ];
 
