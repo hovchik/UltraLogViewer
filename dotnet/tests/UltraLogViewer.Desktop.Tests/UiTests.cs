@@ -856,4 +856,61 @@ public sealed class UiTests : IDisposable
         Assert.DoesNotContain("Indexing", Sidebar.SourceText(s with { Indexing = false, Progress = 1 }));
         Assert.Contains("bzip2", Sidebar.SourceText(s with { Compression = "bzip2", Compressed = true, Live = false }));
     }
+    [AvaloniaFact]
+    public async Task Analytics_analyses_the_whole_log_in_the_background_and_filters_from_the_charts()
+    {
+        var (w, _) = NewWindow();
+        var tab = await Open(w, Sample("analytics.log", 3000));
+        // started on its own once the file was loaded
+        Assert.NotNull(tab.Analytics);
+        await Until(() => tab.AnalyticsResult?.State == AnalyticsState.Done, 30_000);
+        var r = tab.AnalyticsResult!;
+        Assert.Equal(3000, r.Scanned);
+        Assert.Equal(1, r.Progress);
+        var errors = r.Levels[(int)Level.Error];
+        Assert.True(errors > 0);
+        Assert.Contains(r.ErrorPatterns, p => p.Template.StartsWith("Payment <num> failed", StringComparison.Ordinal));
+        Assert.Equal("java.net.SocketTimeoutException", r.Exceptions[0].Name);
+        Assert.Contains(r.Fields, f => f.Key == "thread");
+
+        w.ToggleAnalyticsForTest();
+        Assert.True(w.AnalyticsShownForTest);
+        await Until(() => w.AnalyticsForTest.TipsForTest.Count > 0);
+        var tips = w.AnalyticsForTest.TipsForTest;
+        Assert.Contains(tips, t => t.Contains("entries") && t.Contains("Click: show this bucket"));
+        Assert.Contains(tips, t => t.StartsWith("ERROR:", StringComparison.Ordinal));
+        Screenshot(w, "analytics.png");
+        w.AnalyticsScrollForTest.Offset = new Vector(0, 700);
+        Screenshot(w, "analytics-more.png");
+        Avalonia.Application.Current!.RequestedThemeVariant = ThemeVariant.Dark;
+        w.AnalyticsScrollForTest.Offset = new Vector(0, 0);
+        Screenshot(w, "analytics-dark.png");
+        Avalonia.Application.Current!.RequestedThemeVariant = ThemeVariant.Light;
+
+        // a click on the Error bar: only errors (not fatals: one level row is one level), back in the log
+        Assert.True(w.AnalyticsForTest.ClickForTest("ERROR:"));
+        Assert.False(w.AnalyticsShownForTest);
+        await Until(() => tab.Info.ViewCount == errors && tab.BusyProgress is null);
+        Assert.False(tab.Filter.Levels[(int)Level.Info]);
+        Assert.False(tab.Filter.Levels[(int)Level.Fatal]);
+        for (var i = 0; i < tab.Filter.Levels.Length; i++) tab.Filter.Levels[i] = true;
+        await w.ApplyFilterAsync(tab);
+
+        // a pattern row: a pattern rule
+        w.ToggleAnalyticsForTest();
+        await Until(() => w.AnalyticsForTest.TipsForTest.Count > 0);
+        var sample = r.ErrorPatterns[0].Sample;
+        Assert.True(w.AnalyticsForTest.ClickForTest(sample));
+        await Until(() => tab.Info.ViewCount == r.ErrorPatterns[0].Count && tab.BusyProgress is null);
+        Assert.True(tab.Filter.Rules.Single().PatternMatch);
+
+        // Analytics and Patterns take the same place: opening one closes the other
+        w.ToggleAnalyticsForTest();
+        Assert.True(w.AnalyticsShownForTest);
+        w.TogglePatternsForTest();
+        Assert.True(w.PatternsShownForTest);
+        Assert.False(w.AnalyticsShownForTest);
+        w.ToggleAnalyticsForTest();
+        Assert.False(w.PatternsShownForTest);
+    }
 }

@@ -199,3 +199,118 @@ export interface Histogram {
 }
 
 export const rowKey = (source: number, entry: number) => `${source}:${entry}`;
+
+// ---------------------------------------------------------------- analytics
+
+/** State of a document's background analysis (see analytics.ts). */
+export type AnalyticsState = 'waiting' | 'running' | 'paused' | 'done' | 'cancelled' | 'error';
+
+/** [value, count], most common first. */
+export type ValueCount = [string, number];
+
+export interface AnalyticsPattern {
+  template: string;
+  sample: string;
+  count: number;
+  /** Indexed by Level. */
+  levels: number[];
+  /** First and last entry time (null when the entries have none). */
+  first: number | null;
+  last: number | null;
+  /** Counts over `AnalyticsResult.spark` buckets. */
+  spark: number[];
+  /** Durations ("took 120 ms") found in these messages, in ms. */
+  durCount: number;
+  durAvg: number;
+  durMax: number;
+}
+
+export interface AnalyticsNumeric {
+  count: number;
+  min: number;
+  max: number;
+  avg: number;
+  p50: number;
+  p90: number;
+  p99: number;
+  /** Equal-width buckets from `start`, `width` wide. */
+  hist: { start: number; width: number; counts: number[] };
+}
+
+export interface AnalyticsField {
+  key: string;
+  present: number;
+  distinct: number;
+  distinctCapped: boolean;
+  top: ValueCount[];
+  /** Set when (nearly) every value is a number. */
+  numeric?: AnalyticsNumeric;
+}
+
+export interface AnalyticsBurst {
+  from: number;
+  to: number;
+  errors: number;
+  total: number;
+  /** errors / the typical errors per bucket. */
+  factor: number;
+}
+
+export interface AnalyticsResult {
+  state: AnalyticsState;
+  error?: string;
+  /** 0..1 over the whole run (index pass, then the entry texts). */
+  progress: number;
+  /** Entry texts read so far, of `total` entries. */
+  scanned: number;
+  total: number;
+  elapsedMs: number;
+  /** Bumped whenever the analysis starts over (the data was replaced). */
+  run: number;
+  summary: {
+    entries: number;
+    sources: number;
+    bytes: number;
+    timed: number;
+    timeMin: number | null;
+    timeMax: number | null;
+    /** Entries per minute over the span, and the busiest timeline bucket per minute. */
+    ratePerMin: number;
+    peakPerMin: number;
+    peakAt: number | null;
+    multiline: number;
+    avgLength: number;
+    maxLength: number;
+    patterns: number;
+    exceptions: number;
+  };
+  levels: number[];
+  /** counts[bucket][level]. */
+  timeline: { start: number; bucketMs: number; counts: number[][] } | null;
+  /** Pattern sparklines: `buckets` equal parts of [start, end] (by time), or of the entry order when the log has no times. */
+  spark: { start: number; end: number; buckets: number; byTime: boolean };
+  /** Entries per local hour of day: [all, warnings, errors]. */
+  hours: [number, number, number][];
+  /** Entries per weekday, Sunday first. */
+  weekdays: number[];
+  bursts: AnalyticsBurst[];
+  /** Longest silences between consecutive entries. */
+  gaps: { from: number; to: number; ms: number }[];
+  sources: { name: string; entries: number; levels: number[]; timeMin: number | null; timeMax: number | null }[];
+  /** Most common templates. */
+  patterns: AnalyticsPattern[];
+  /** Templates with the most errors (and fatals). */
+  errorPatterns: AnalyticsPattern[];
+  /** Templates first seen in the last quarter of the time span. */
+  newPatterns: AnalyticsPattern[];
+  /** Templates that stopped in the first half of the span after being common. */
+  stoppedPatterns: AnalyticsPattern[];
+  /** Templates with the longest average duration. */
+  slowPatterns: AnalyticsPattern[];
+  exceptions: { name: string; count: number; first: number | null; last: number | null; levels: number[] }[];
+  fields: AnalyticsField[];
+  durations: AnalyticsNumeric | null;
+  ips: ValueCount[];
+  urls: ValueCount[];
+  methods: ValueCount[];
+}

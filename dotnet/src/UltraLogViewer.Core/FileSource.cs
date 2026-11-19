@@ -167,6 +167,7 @@ public sealed class FileSource : IDisposable
     /// </summary>
     public async Task OpenAsync(IProgress<double>? progress = null, CancellationToken ct = default)
     {
+        using var foreground = Activity.Foreground();
         Indexing = true;
         try
         {

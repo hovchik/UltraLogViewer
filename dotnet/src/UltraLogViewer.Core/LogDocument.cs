@@ -270,7 +270,7 @@ public sealed partial class LogDocument : IDisposable
     public Task<bool> ApplyFilterAsync(FilterSpec? spec, IProgress<double>? progress = null, CancellationToken ct = default)
     {
         var gen = Interlocked.Increment(ref _filterGen);
-        return Serial(() => ApplyNowAsync(spec?.Clone(), false, gen, progress, ct));
+        return Activity.Run(() => Serial(() => ApplyNowAsync(spec?.Clone(), false, gen, progress, ct)));
     }
 
     private Task<bool> ApplyNowAsync(FilterSpec? spec, bool incremental, int gen, IProgress<double>? progress, CancellationToken ct) => Task.Run(() =>
@@ -642,6 +642,7 @@ public sealed partial class LogDocument : IDisposable
     /// </summary>
     public Task<FieldStats> FieldStatsAsync(int maxRows = 100_000, int top = 10, CancellationToken ct = default) => Task.Run(() =>
     {
+        using var foreground = Activity.Foreground();
         const int DistinctCap = 5000;
         var n = ViewCount;
         var counts = new Dictionary<string, (Dictionary<string, int> Values, int Present, bool Capped)>(StringComparer.OrdinalIgnoreCase);
@@ -741,6 +742,7 @@ public sealed partial class LogDocument : IDisposable
     /// </summary>
     public Task<PatternStats> PatternsAsync(int maxRows = 200_000, int top = 300, CancellationToken ct = default) => Task.Run(() =>
     {
+        using var foreground = Activity.Foreground();
         const int Cap = 20_000;
         const string Other = "(other)";
         var n = ViewCount;
@@ -786,6 +788,7 @@ public sealed partial class LogDocument : IDisposable
     /// <summary>Finds all view rows whose entry text matches.</summary>
     public Task<SearchResult> SearchAsync(TextPattern p, IProgress<double>? progress = null, CancellationToken ct = default) => Task.Run(() =>
     {
+        using var foreground = Activity.Foreground();
         if (string.IsNullOrEmpty(p.Text)) return SearchResult.Empty;
         var match = Query.Matcher(p);
         var m = _merge;
@@ -1008,6 +1011,7 @@ public sealed partial class LogDocument : IDisposable
     /// <summary>Writes the current view to a file as "text", "csv" or "jsonl". Returns the number of entries.</summary>
     public Task<int> ExportAsync(string file, string format, IProgress<double>? progress = null) => Task.Run(() =>
     {
+        using var foreground = Activity.Foreground();
         var n = ViewCount;
         var cols = Info().Columns.Where(c => c.Key != "__source").ToList();
         using var w = new StreamWriter(file, false, new UTF8Encoding(false));

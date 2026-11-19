@@ -24,12 +24,24 @@ public static class Patterns
 
     public static string Template(string message)
     {
+        var s = TemplateInput(message);
+        return TemplateFromTokens(s, Tokenizer.Tokenize(s, 1000));
+    }
+
+    /// <summary>The first line of a message as <see cref="Template"/> reads it (at most 500 characters).</summary>
+    public static string TemplateInput(string message)
+    {
         var nl = message.IndexOf('\n');
         var s = nl >= 0 ? message[..nl] : message;
-        if (s.Length > 500) s = s[..500];
+        return s.Length > 500 ? s[..500] : s;
+    }
+
+    /// <summary>The template of a <see cref="TemplateInput"/> line given its tokens: what <see cref="Template"/> returns.</summary>
+    public static string TemplateFromTokens(string s, IReadOnlyList<Token> tokens)
+    {
         var sb = new StringBuilder(s.Length);
         var pos = 0;
-        foreach (var t in Tokenizer.Tokenize(s, 1000))
+        foreach (var t in tokens)
         {
             var ph = t.Kind switch
             {

@@ -12,6 +12,7 @@ public sealed partial class LogDocument
     /// </summary>
     public Task<GroupedHistogram?> HistogramByAsync(string field, int buckets, CancellationToken ct = default) => Task.Run(() =>
     {
+        using var foreground = Activity.Foreground();
         var key = $"{_viewEpoch}:{_dataEpoch}:{ViewCount}:{IgnoreFilter}:{BaseCount}:{field}:{buckets}";
         if (_groupCache is { } c && c.Key == key) return c.Result;
         var epoch = _viewEpoch;
