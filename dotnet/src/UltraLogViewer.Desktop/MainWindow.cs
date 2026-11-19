@@ -176,6 +176,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         var leftTools = new StackPanel
         {
             Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Top,
             Spacing = 6,
             Children =
             {
@@ -185,15 +186,26 @@ public sealed partial class MainWindow : Window, ILogGridHost
             },
         };
         var clearBtn = ToolButton("Clear", "Hide everything so far (Ctrl+K)", ClearSoFar);
-        var patternsBtn = ToolButton("Patterns", "Group messages by pattern (Ctrl+Shift+A)", TogglePatterns);
-        var analyticsBtn = ToolButton("Analytics", "Charts and insights over the whole log, worked out in the background (Ctrl+Shift+Y)", ToggleAnalytics);
-        var rightTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { patternsBtn, analyticsBtn, clearBtn, _followBtn, _histBtn, _detailBtn, _format, theme, help } };
+        // Patterns and Analytics are views of the log: tabs at the right end of the tab bar (see BuildTabBar)
+        var rightTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { clearBtn, _followBtn, _histBtn, _detailBtn, _format, theme, help } };
         DockPanel.SetDock(leftTools, Dock.Left);
         DockPanel.SetDock(rightTools, Dock.Right);
-        toolbar.Children.Add(leftTools);
+        // the right-hand tools first: on a narrow window they take the whole width of a second row
         toolbar.Children.Add(rightTools);
+        toolbar.Children.Add(leftTools);
         _quick.Margin = new Thickness(0, 0, 8, 0);
         toolbar.Children.Add(new Panel { Children = { _quick, _quickPopup } });
+        // a narrow window: the right-hand tools go under the quick filter instead of over it
+        toolbar.SizeChanged += (_, e) =>
+        {
+            leftTools.Measure(Size.Infinity);
+            rightTools.Measure(Size.Infinity);
+            var narrow = leftTools.DesiredSize.Width + rightTools.DesiredSize.Width + 220 > e.NewSize.Width;
+            if (narrow == (DockPanel.GetDock(rightTools) == Dock.Bottom)) return;
+            DockPanel.SetDock(rightTools, narrow ? Dock.Bottom : Dock.Right);
+            rightTools.HorizontalAlignment = narrow ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+            rightTools.Margin = narrow ? new Thickness(0, 4, 0, 0) : default;
+        };
 
         // --------------------------------------------------------------- menu
         _recentMenu = new MenuItem { Header = "Open _recent" };
@@ -300,7 +312,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         {
             BorderThickness = new Thickness(0, 1, 0, 1),
             BorderBrush = new SolidColorBrush(Color.Parse("#808080"), 0.25),
-            Child = new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = _tabStrip },
+            Child = BuildTabBar(new ScrollViewer { HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = _tabStrip }),
             MinHeight = 32,
         };
 
@@ -659,6 +671,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab is null) RebuildRecent();
         UpdateTitle();
         if (_patternsShown) ShowPatterns(false);
+        UpdateViewTabs();
         if (_analyticsShown)
         {
             if (tab is null) ShowAnalytics(false);

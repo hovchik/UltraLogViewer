@@ -119,6 +119,10 @@ select.btn { padding: 0 6px; max-width: 170px; }
 .tab .x:hover { background: var(--bg-3); color: var(--fg); }
 .tab .dot { width: 6px; height: 6px; border-radius: 50%; background: #2fb36b; }
 .tab .dot.off { background: var(--fg-3); }
+.view-tabs { display: flex; margin-left: auto; position: sticky; right: 0; background: var(--bg-2); border-left: 1px solid var(--border); }
+.view-tab { padding: 5px 14px; cursor: pointer; white-space: nowrap; font-size: 12px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.view-tab:hover { color: var(--fg); background: var(--bg-3); }
+.view-tab.on { background: var(--bg); color: var(--fg); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
 
 /* layout */
 .main { display: flex; min-height: 0; }

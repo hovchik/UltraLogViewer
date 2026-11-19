@@ -873,8 +873,11 @@ public sealed class UiTests : IDisposable
         Assert.Equal("java.net.SocketTimeoutException", r.Exceptions[0].Name);
         Assert.Contains(r.Fields, f => f.Key == "thread");
 
-        w.ToggleAnalyticsForTest();
+        // the views of the log are tabs at the right end of the tab bar
+        Assert.Equal(["Log *", "Patterns", "Analytics"], w.ViewTabsForTest);
+        w.ClickViewTabForTest("Analytics");
         Assert.True(w.AnalyticsShownForTest);
+        Assert.Equal(["Log", "Patterns", "Analytics *"], w.ViewTabsForTest);
         await Until(() => w.AnalyticsForTest.TipsForTest.Count > 0);
         var tips = w.AnalyticsForTest.TipsForTest;
         Assert.Contains(tips, t => t.Contains("entries") && t.Contains("Click: show this bucket"));
@@ -910,7 +913,16 @@ public sealed class UiTests : IDisposable
         w.TogglePatternsForTest();
         Assert.True(w.PatternsShownForTest);
         Assert.False(w.AnalyticsShownForTest);
+        Assert.Equal(["Log", "Patterns *", "Analytics"], w.ViewTabsForTest);
         w.ToggleAnalyticsForTest();
         Assert.False(w.PatternsShownForTest);
+        w.ClickViewTabForTest("Log");
+        Assert.False(w.AnalyticsShownForTest);
+        Assert.Equal(["Log *", "Patterns", "Analytics"], w.ViewTabsForTest);
+
+        // a narrow window: the tabs stay in view
+        w.Width = 1024;
+        w.ClickViewTabForTest("Analytics");
+        Screenshot(w, "analytics-narrow.png");
     }
 }

@@ -16,8 +16,12 @@ namespace UltraLogViewer.Core;
 public static class Activity
 {
     private static int _foreground;
+    private static long _lastEnd = long.MinValue / 2;
 
     public static bool Busy => Volatile.Read(ref _foreground) > 0;
+
+    /// <summary>A foreground scan runs, or one ended less than <paramref name="quietMs"/> ago (the user is likely to start the next).</summary>
+    public static bool BusyWithin(int quietMs) => Busy || Environment.TickCount64 - Volatile.Read(ref _lastEnd) < quietMs;
 
     /// <summary>Marks a foreground scan until the returned object is disposed.</summary>
     public static IDisposable Foreground()
@@ -31,7 +35,9 @@ public static class Activity
         private int _done;
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _done, 1) == 0) Interlocked.Decrement(ref _foreground);
+            if (Interlocked.Exchange(ref _done, 1) != 0) return;
+            Volatile.Write(ref _lastEnd, Environment.TickCount64);
+            Interlocked.Decrement(ref _foreground);
         }
     }
 
@@ -130,17 +136,28 @@ public static class AnalyticsRows
         string ip = "", url = "", method = "";
         foreach (var tk in tokens)
         {
-            var v = line.Substring(tk.Start, tk.Length);
-            if (tk.Kind == TokenKind.Duration && double.IsNaN(dur)) dur = DurationMs(v);
+            // only the tokens that are kept become strings: this runs on every entry of the log
+            if (tk.Kind == TokenKind.Duration && double.IsNaN(dur)) dur = DurationMs(line.Substring(tk.Start, tk.Length));
             else if (tk.Kind == TokenKind.Number && double.IsNaN(dur))
             {
-                var after = line.Substring(tk.Start + tk.Length, Math.Min(9, line.Length - tk.Start - tk.Length));
-                var u = UnitAfter.Match(after);
-                if (u.Success && double.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x)) dur = x * UnitMs[u.Groups[1].Value];
+                var end = tk.Start + tk.Length;
+                if (end + 1 >= line.Length || line[end] != ' ' || !char.IsLetter(line[end + 1])) continue;
+                var u = UnitAfter.Match(line.Substring(end, Math.Min(9, line.Length - end)));
+                if (u.Success && double.TryParse(line.AsSpan(tk.Start, tk.Length), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x)) dur = x * UnitMs[u.Groups[1].Value];
             }
-            else if (tk.Kind == TokenKind.Ip && ip.Length == 0) ip = Regex.Replace(v, @":[0-9]+$", "");
-            else if (tk.Kind == TokenKind.Url && url.Length == 0) url = Regex.Replace(v, @"[?#].*$", "");
-            else if (tk.Kind == TokenKind.Method && method.Length == 0) method = v;
+            else if (tk.Kind == TokenKind.Ip && ip.Length == 0)
+            {
+                var v = line.AsSpan(tk.Start, tk.Length);
+                var colon = v.IndexOf(':');
+                ip = (colon >= 0 ? v[..colon] : v).ToString();
+            }
+            else if (tk.Kind == TokenKind.Url && url.Length == 0)
+            {
+                var v = line.AsSpan(tk.Start, tk.Length);
+                var q = v.IndexOfAny('?', '#');
+                url = (q >= 0 ? v[..q] : v).ToString();
+            }
+            else if (tk.Kind == TokenKind.Method && method.Length == 0) method = line.Substring(tk.Start, tk.Length);
         }
         Dictionary<string, string>? fields = null;
         foreach (var (k, raw) in parsed)
@@ -150,7 +167,8 @@ public static class AnalyticsRows
             if (v.Length == 0 || v.Length > 200 || v.Contains('\n')) continue;
             (fields ??= new())[k] = v;
         }
-        var em = Exc.Match(text.Length > 8000 ? text[..8000] : text);
+        var head = text.Length > 8000 ? text[..8000] : text;
+        var em = head.Contains("Exception", StringComparison.Ordinal) || head.Contains("Error", StringComparison.Ordinal) || head.Contains("Fault", StringComparison.Ordinal) ? Exc.Match(head) : Match.Empty;
         var lines = 1;
         foreach (var c in text) if (c == '\n') lines++;
         return new AnalyticsRow(tpl, sample, fields, em.Success ? em.Value : "", dur, msg.Length, lines, ip, url, method);
@@ -506,9 +524,15 @@ public sealed class AnalyticsJob : IDisposable
     private bool _looping;
     private volatile AnalyticsResult? _latest;
 
-    /// <summary>Entry batches read at once (default: half the cores).</summary>
-    public int Concurrency { get; init; } = Math.Max(1, Environment.ProcessorCount / 2);
-    public int Batch { get; init; } = 4000;
+    /// <summary>Entry batches read at once (at most two: the counting is serial, and more only makes more garbage).</summary>
+    public int Concurrency { get; init; } = Math.Clamp(Environment.ProcessorCount / 2, 1, 2);
+    /// <summary>
+    /// Entries per batch. Kept small: a batch's rows live until they are counted, and with large batches they
+    /// survive into the older GC generations, whose collections pause every thread (loading and the UI too).
+    /// </summary>
+    public int Batch { get; init; } = 500;
+    /// <summary>How long the analysis keeps waiting after the last load, filter or search ended.</summary>
+    public const int QuietMs = 1000;
     public int EmitMs { get; init; } = 400;
     public int Slice { get; init; } = 200_000;
 
@@ -518,7 +542,7 @@ public sealed class AnalyticsJob : IDisposable
     public AnalyticsJob(LogDocument doc, Func<bool>? busy = null)
     {
         _doc = doc;
-        _busy = busy ?? (() => Activity.Busy);
+        _busy = busy ?? (() => Activity.BusyWithin(QuietMs));
         doc.IndexChanged += OnIndexChanged;
     }
 

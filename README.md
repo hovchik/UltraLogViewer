@@ -31,13 +31,13 @@ BareTail, LogExpert, Tailviewer, SnakeTail, Log4View): see [docs/market-research
 - Multi-line entries: stack traces stay attached to their entry (`+4` in the line gutter).
 - Column view with resizable columns (right-click the header to show/hide columns) and per-level colouring.
 
-**Analytics** (`Ctrl+Shift+Y`)
+**Analytics** (the Analytics tab at the right end of the tab bar, or `Ctrl+Shift+Y`)
 - Once a file is loaded, the whole log is analysed in the background: levels over time, error bursts, silences,
   the most common message patterns (and the error-heavy, new, gone-quiet and slowest ones), exceptions (stack
   traces included), every field's value distribution (numbers get a histogram and percentiles), durations found
   in messages, IPs, URLs and HTTP methods, plus a short list of insights.
 - It never slows loading or the UI: it waits while files are indexed and while a filter, search or SQL query runs,
-  reads entries on half the cores, and follows the tail by reading only new entries. A progress bar shows how far
+  waits a second more after each of them, reads entries on at most two cores, and follows the tail by reading only new entries. A progress bar shows how far
   it is (also in the status bar); results fill in as it runs, and it can be paused or re-run.
 - Every bar, segment and row has a tooltip and filters the log on click (Shift+click hides it instead); drag
   across the timeline to filter to a time range.
