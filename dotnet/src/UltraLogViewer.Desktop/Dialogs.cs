@@ -189,6 +189,55 @@ public static class Dialogs
         return w.ShowDialog(owner);
     }
 
+    /// <summary>Help › About: name, version, what the app is, copyright and build date.</summary>
+    public static Task About(Window owner, Action<string>? openUrl = null)
+    {
+        var close = new Button { Content = "Close", IsDefault = true, IsCancel = true };
+        var site = new Button { Content = "Project on GitHub" };
+        Image? logo = null;
+        try
+        {
+            logo = new Image { Width = 56, Height = 56, Source = new Avalonia.Media.Imaging.Bitmap(Avalonia.Platform.AssetLoader.Open(new Uri("avares://UltraLogViewer/Assets/app.png"))) };
+        }
+        catch (Exception)
+        {
+            // no asset loader (tests without the app's resources): the dialog works without the logo
+        }
+        var muted = new SolidColorBrush(Color.Parse("#808080"));
+        var heading = new StackPanel
+        {
+            Spacing = 2,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                new TextBlock { Text = AppInfo.Product, FontSize = 20, FontWeight = FontWeight.SemiBold },
+                new SelectableTextBlock { Text = $"Version {AppInfo.Version}", Foreground = muted },
+            },
+        };
+        var top = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14 };
+        if (logo is not null) top.Children.Add(logo);
+        top.Children.Add(heading);
+        var details = new StackPanel { Spacing = 2 };
+        details.Children.Add(new SelectableTextBlock { Text = AppInfo.Copyright });
+        if (AppInfo.BuildDate is { } built) details.Children.Add(new SelectableTextBlock { Text = $"Built {built}", Foreground = muted, FontSize = 12 });
+        details.Children.Add(new SelectableTextBlock { Text = $".NET {Environment.Version} · Avalonia {typeof(Application).Assembly.GetName().Version?.ToString(3)}", Foreground = muted, FontSize = 12 });
+        var body = new StackPanel
+        {
+            Spacing = 12,
+            Children =
+            {
+                top,
+                new TextBlock { Text = AppInfo.Description, TextWrapping = TextWrapping.Wrap },
+                details,
+                Buttons(site, close),
+            },
+        };
+        var w = Shell($"About {AppInfo.Product}", body, 440);
+        site.Click += (_, _) => openUrl?.Invoke(AppInfo.Homepage);
+        close.Click += (_, _) => w.Close();
+        return w.ShowDialog(owner);
+    }
+
     /// <summary>Define a custom regex format with named groups. Returns null when cancelled.</summary>
     /// <param name="name">Prefilled name, e.g. from "Extract fields…".</param>
     /// <param name="initial">Prefilled pattern.</param>

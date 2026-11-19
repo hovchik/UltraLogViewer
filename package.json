@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "description": "Fast desktop log viewer: huge files, live tail, auto-detected formats, filters, highlighting, bookmarks, merged timelines.",
   "license": "MIT",
+  "author": "Hovhannes Stepanyan",
+  "homepage": "https://github.com/hovchik/UltraLogViewer",
   "main": "dist/main/main.js",
   "scripts": {
     "postinstall": "node scripts/ensure-electron.mjs",
@@ -28,6 +30,7 @@
   },
   "build": {
     "appId": "com.ultralogviewer.app",
+    "copyright": "Copyright © 2026 Hovhannes Stepanyan",
     "directories": { "output": "release" },
     "files": ["dist/**/*", "package.json"],
     "fileAssociations": [{ "ext": ["log", "txt", "gz"], "name": "Log file", "role": "Viewer" }],

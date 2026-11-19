@@ -401,6 +401,14 @@ body.dragging .center::after { content: 'Drop to open (several files = merged ti
 .modal .hint { font-size: 12px; color: var(--fg-2); margin: 6px 0; }
 .modal .box.help { width: min(680px, 92vw); max-height: 80vh; overflow: auto; }
 .modal h2.sub { margin-top: 16px; }
+.modal .box.about { width: min(440px, 92vw); }
+.about .top { display: flex; align-items: center; gap: 14px; margin-bottom: 12px; }
+.about .top img { width: 56px; height: 56px; }
+.about .top h2 { margin: 0; font-size: 20px; }
+.about .ver, .about .meta { color: var(--fg-2); }
+.about .meta { font-size: 12px; }
+.about p { margin: 0 0 12px; line-height: 1.45; }
+.about .copy { user-select: text; }
 .modal table.keys { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 .modal table.keys td { padding: 3px 4px; border-bottom: 1px solid var(--border); }
 .modal table.keys td:first-child { white-space: nowrap; width: 40%; }
