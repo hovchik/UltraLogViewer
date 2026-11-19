@@ -8,6 +8,7 @@ import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
 import { AiFeatures, aiSettingsDialog, isAiQuestion } from './ai';
 import { AutoHighlight } from './autoHighlight';
+import { showAbout } from './about';
 import { DetailView } from './detail';
 import { Grid } from './grid';
 import { HistogramView } from './histogram';
@@ -2536,6 +2537,8 @@ window.ulv.onMenu((cmd, ...args) => {
       return setView('gapMs', viewSettings(settings).gapMs > 0 ? 0 : 10000);
     case 'help':
       return showHelp();
+    case 'about':
+      return void showAbout();
     case 'palette':
       return void openCommandPalette();
     case 'toggle-patterns':

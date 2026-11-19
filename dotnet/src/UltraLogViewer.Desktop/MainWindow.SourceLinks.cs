@@ -23,6 +23,24 @@ public sealed partial class MainWindow
     /// <summary>Test hook: receives what would be launched (a URL, or a program and its arguments) instead of launching it.</summary>
     internal Action<string, IReadOnlyList<string>>? LaunchForTest { get; set; }
 
+    /// <summary>Opens a web page in the default browser (Help › About's project link).</summary>
+    internal void OpenUrl(string url)
+    {
+        if (LaunchForTest is { } hook)
+        {
+            hook(url, []);
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            Toast($"Could not open {url}: {e.Message}", true);
+        }
+    }
+
     public void OpenSource(SourceRef r)
     {
         var name = $"{Path.GetFileName(r.Path.Replace('\\', '/'))}:{r.Line}";

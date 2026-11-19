@@ -59,6 +59,10 @@ const api = {
   captureStatus: (ids: number[]): Promise<Record<number, { status: string; running: boolean }>> => ipcRenderer.invoke('capture:status', ids),
   captureStop: (id: number, forget = false): Promise<void> => ipcRenderer.invoke('capture:stop', id, forget),
   receiversDir: (): Promise<string> => ipcRenderer.invoke('receivers:dir'),
+  /** Help › About: name, version, copyright, description and build date from package.json / the build. */
+  appInfo: (): Promise<{ name: string; version: string; copyright: string; description: string; homepage: string; buildDate: string; electron: string }> =>
+    ipcRenderer.invoke('app:info'),
+  openHomepage: () => ipcRenderer.invoke('app:open-homepage'),
   platform: process.platform,
 };
 

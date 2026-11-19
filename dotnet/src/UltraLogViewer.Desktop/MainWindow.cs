@@ -285,8 +285,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                     {
                         Item("_Command palette", OpenPalette, new KeyGesture(Key.P, KeyModifiers.Control | KeyModifiers.Shift)),
                         Item("_Keyboard shortcuts", () => Run(() => Dialogs.Help(this))),
-                        Item("_About", () => Run(() => Dialogs.Message(this, "About UltraLogViewer",
-                            $"UltraLogViewer {typeof(MainWindow).Assembly.GetName().Version?.ToString(3)}\nA fast viewer for large log files, built with Avalonia and .NET {Environment.Version}."))),
+                        Item("_About UltraLogViewer", () => Run(() => Dialogs.About(this, OpenUrl))),
                     },
                 },
             },

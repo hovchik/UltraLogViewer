@@ -175,6 +175,30 @@ async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unkn
 
 // ---------------------------------------------------------------------- menu
 
+/** Set by scripts/build.mjs to the build date (yyyy-mm-dd). */
+declare const __BUILD_DATE__: string;
+/** Set by scripts/build.mjs from package.json build.copyright (that key is not in the packaged package.json). */
+declare const __COPYRIGHT__: string;
+
+/** Name, version, copyright and description for Help › About, read from package.json rather than repeated here. */
+function appInfo() {
+  let pkg: { productName?: string; description?: string; homepage?: string } = {};
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf-8'));
+  } catch {
+    // keep the defaults below
+  }
+  return {
+    name: pkg.productName ?? app.getName(),
+    version: app.getVersion(),
+    copyright: typeof __COPYRIGHT__ === 'string' ? __COPYRIGHT__ : '',
+    description: pkg.description ?? '',
+    homepage: pkg.homepage ?? 'https://github.com/hovchik/UltraLogViewer',
+    buildDate: typeof __BUILD_DATE__ === 'string' ? __BUILD_DATE__ : '',
+    electron: process.versions.electron ?? '',
+  };
+}
+
 const send = (cmd: string, ...args: unknown[]) => win?.webContents.send('menu', cmd, ...args);
 
 /** The settings the View menu shows as check / radio items. */
@@ -386,6 +410,8 @@ function buildMenu() {
         // F1 opens the command palette (handled by the renderer)
         { label: 'Keyboard shortcuts', click: () => send('help') },
         { label: 'Project on GitHub', click: () => shell.openExternal('https://github.com/hovchik/UltraLogViewer') },
+        { type: 'separator' },
+        { label: 'About UltraLogViewer', click: () => send('about') },
       ],
     },
   ];
@@ -483,6 +509,8 @@ if (!app.requestSingleInstanceLock()) {
     startWorker();
     ipcMain.handle('engine', (_e, method: string, args: unknown[]) => callEngine(method, engineArgs(method, Array.isArray(args) ? args : [])));
     ipcMain.handle('settings:get', () => readSettings());
+    ipcMain.handle('app:info', () => appInfo());
+    ipcMain.handle('app:open-homepage', () => shell.openExternal(appInfo().homepage));
     ipcMain.handle('settings:set', (_e, s: Record<string, unknown>) => {
       if (!s || typeof s !== 'object') return;
       // the ssh program is only ever set by editing the settings file: the page cannot name a program to start

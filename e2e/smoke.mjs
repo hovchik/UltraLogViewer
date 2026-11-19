@@ -319,6 +319,26 @@ await step('opens the command palette and runs a menu action', async () => {
   await win.waitForSelector('#modal.hidden', { state: 'attached' });
 });
 
+await step('shows Help › About with version, copyright and description', async () => {
+  const pkg = JSON.parse(fs.readFileSync(path.resolve('package.json'), 'utf-8'));
+  await win.focus('#grid');
+  await win.keyboard.press('F1');
+  await win.waitForSelector('.modal .palette');
+  await win.keyboard.type('about ultralogviewer');
+  await win.waitForFunction(() => document.querySelectorAll('.palette .pal-item').length === 1);
+  await win.keyboard.press('Enter');
+  await win.waitForSelector('.modal .about');
+  const text = await win.locator('.modal .about').innerText();
+  assert.match(text, new RegExp(`Version ${pkg.version.replace(/\./g, '\\.')}`));
+  assert.match(text, /Copyright © 2026 Hovhannes Stepanyan/);
+  assert.ok(text.includes(pkg.description), text);
+  assert.match(text, /Built \d{4}-\d{2}-\d{2}/);
+  assert.ok(await win.locator('.modal .about img').evaluate((img) => img.naturalWidth > 0), 'logo loads');
+  await shot('23-about');
+  await win.keyboard.press('Enter');
+  await win.waitForSelector('#modal.hidden', { state: 'attached' });
+});
+
 await step('groups repeated entries with a ×N badge', async () => {
   await win.waitForFunction(() => /grouped/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   const badge = win.locator('.grid-rows .r .c.msg .rep').first();
