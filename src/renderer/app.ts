@@ -3,7 +3,7 @@ import type { SourceRef } from '../core/sourceLinks';
 import { fieldPicks, isDottedName, packagePrefixes, setFieldPicks } from '../core/fieldPicks';
 import { legendClause, SOURCE_FIELD } from '../core/histogramGroups';
 import { fieldToken, OPERATORS, operatorHint, splitToken, tokenAt, validatePattern, validateQuery } from '../core/query';
-import { ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
+import { AnalyticsResult, ColumnDef, CustomFormat, DocInfo, FilterRule, FilterSpec, Level, LEVEL_NAMES, PatternStat, RowData, TextPattern } from '../core/types';
 import { engine, EngineEvent, ulv } from './api';
 import { Autocomplete, Suggestion } from './autocomplete';
 import { AiFeatures, aiSettingsDialog, isAiQuestion } from './ai';
@@ -14,6 +14,7 @@ import { HistogramView } from './histogram';
 import { openPalette } from './palette';
 import { applyOpenRequest, copyApiExample, copyViewLink, OpenRequestHost, serveApiCalls } from './openRequests';
 import { PatternsView } from './patternsView';
+import { AnalyticsView, analyticsStatus } from './analyticsView';
 import { Pins } from './pins';
 import { Receivers } from './receivers';
 import { Sidebar } from './sidebar';
@@ -196,6 +197,60 @@ const patternsView = new PatternsView($('#patterns'), {
   },
 });
 
+const analyticsView = new AnalyticsView($('#analytics'), {
+  filterLevel: (l, only) => {
+    const t = analyticsTarget();
+    if (!t) return;
+    if (only) t.filter.levels = t.filter.levels.map((_, i) => (l === Level.Error ? i >= Level.Error : l === Level.Debug ? i <= Level.Debug : i === l));
+    else if (l === Level.Error) t.filter.levels[Level.Error] = t.filter.levels[Level.Fatal] = false;
+    else if (l === Level.Debug) t.filter.levels[Level.Debug] = t.filter.levels[Level.Trace] = t.filter.levels[Level.None] = false;
+    else t.filter.levels[l] = false;
+    void applyFilter(t);
+  },
+  filterTime: (from, to) => {
+    const t = analyticsTarget();
+    if (!t) return;
+    t.filter.timeFrom = from;
+    t.filter.timeTo = to;
+    void applyFilter(t);
+  },
+  filterPattern: (tpl, mode) => {
+    const t = analyticsTarget();
+    if (!t) return;
+    t.filter.rules.push({ id: uid(), text: tpl, mode, patternMatch: true, regex: false, caseSensitive: true, wholeWord: false, enabled: true });
+    void applyFilter(t);
+  },
+  filterField: (key, value, mode) => {
+    const t = analyticsTarget();
+    if (t) filterByValue(t, key, value, mode);
+  },
+  filterText: (text, mode) => {
+    const t = analyticsTarget();
+    if (!t) return;
+    t.filter.rules.push({ id: uid(), text, mode, regex: false, caseSensitive: true, wholeWord: false, enabled: true });
+    void applyFilter(t);
+  },
+  jumpToTime: async (time) => {
+    const t = analyticsTarget();
+    if (!t) return;
+    grid.select(await engine.rowForTime(t.id, time), false, 'center');
+  },
+  start: () => active && void startAnalytics(active),
+  pause: () => {
+    const t = ownerOf(active);
+    if (t) void engine.analyticsPause(t.id).then((r) => r && showAnalyticsResult(t, r)).catch(() => undefined);
+  },
+  restart: () => {
+    const t = ownerOf(active);
+    if (t) void engine.analyticsRestart(t.id).then((r) => showAnalyticsResult(t, r)).catch(() => undefined);
+  },
+  close: () => {
+    if (!active) return;
+    setAnalyticsShown(active, false);
+    grid.root.focus();
+  },
+});
+
 const histogram = new HistogramView($('#histogram'), {
   jumpToTime: async (t) => {
     if (!active) return;
@@ -309,6 +364,7 @@ function activate(tab: Tab | null) {
   sidebar.render(tab);
   $('#empty').classList.toggle('hidden', !!tab);
   applyPatternsLayout();
+  applyAnalyticsLayout();
   renderPill();
   syncMenu();
   renderBanner();
@@ -658,6 +714,10 @@ window.ulv.onEvent((raw) => {
     showPartialView(tab, ev);
     return;
   }
+  if (ev.type === 'analytics') {
+    showAnalyticsResult(tab, ev.result);
+    return;
+  }
   if (ev.type === 'doc-error') {
     tab.error = ev.message;
     toast(ev.message, true);
@@ -757,6 +817,8 @@ async function settle(tab: Tab) {
   if (!isDefaultFilter(tab)) await applyFilter(tab);
   if (tab.search.pattern.text) void runSearch(tab, false, tab.search.pattern);
   refreshFieldsSoon(tab);
+  // The whole log is analysed in the background; the engine keeps it out of the way of loading and filtering.
+  if (!tab.splitOf) void startAnalytics(tab);
   if (tab === active) {
     sidebar.render(tab);
     void updateDetail();
@@ -797,7 +859,7 @@ function setGroupRepeats(t: Tab, mode: NonNullable<FilterSpec['groupRepeats']>) 
 
 /** Tells main what the menu should show for the active tab (Group repeats, Patterns). */
 function syncMenu() {
-  void ulv().setMenuState({ groupRepeats: active?.filter.groupRepeats ?? 'off', patterns: !!active?.showPatterns, sql: sqlPanel.shown });
+  void ulv().setMenuState({ groupRepeats: active?.filter.groupRepeats ?? 'off', patterns: !!active?.showPatterns, sql: sqlPanel.shown, analytics: !!active?.showAnalytics });
 }
 
 async function applyFilter(tab: Tab) {
@@ -892,6 +954,7 @@ function setPatternsShown(t: Tab, on: boolean) {
     t = t.splitOf;
   }
   if (!!t.showPatterns === on) return;
+  if (on && t.showAnalytics) setAnalyticsShown(t, false);
   t.showPatterns = on;
   if (on) {
     t.patterns = null;
@@ -924,6 +987,66 @@ function addPatternRule(t: Tab, p: PatternStat, mode: FilterRule['mode']) {
   if (mode === 'include') setPatternsShown(t, false);
   void applyFilter(t);
   if (mode === 'include') grid.root.focus();
+}
+
+// --------------------------------------------------------------- analytics
+
+/** The tab the analytics dashboard filters: it leaves the dashboard so the filtered log shows. */
+function analyticsTarget(): Tab | null {
+  const t = ownerOf(active);
+  if (!t) return null;
+  setAnalyticsShown(t, false);
+  grid.root.focus();
+  return t;
+}
+
+async function startAnalytics(t: Tab) {
+  if (t.splitOf) t = t.splitOf;
+  try {
+    showAnalyticsResult(t, await engine.analyticsStart(t.id));
+  } catch {
+    // closed
+  }
+}
+
+function showAnalyticsResult(t: Tab, r: AnalyticsResult) {
+  if (!tabs.includes(t)) return;
+  const before = analyticsStatus(t.analytics);
+  t.analytics = r;
+  if (t !== ownerOf(active)) return;
+  if (t.showAnalytics) analyticsView.render(t, r.state !== 'running' && r.state !== 'waiting');
+  const now = analyticsStatus(r);
+  // the status bar shows the analysis while it runs (only redrawn when its text or bar would change)
+  if (now || before) renderStatus();
+}
+
+function setAnalyticsShown(t: Tab, on: boolean) {
+  // The dashboard is about the whole log of the tab, so in a split it belongs to the left pane's tab.
+  if (t.splitOf) {
+    if (on) activate(t.splitOf);
+    t = t.splitOf;
+  }
+  if (!!t.showAnalytics === on) return;
+  if (on && t.showPatterns) setPatternsShown(t, false);
+  t.showAnalytics = on;
+  if (on && !t.analytics) void startAnalytics(t);
+  if (t !== ownerOf(active)) return;
+  applyAnalyticsLayout();
+  syncMenu();
+  renderToolbar();
+}
+
+function applyAnalyticsLayout() {
+  const t = ownerOf(active);
+  const on = !!t?.showAnalytics;
+  $('#analytics').classList.toggle('hidden', !on);
+  $('#work').classList.toggle('hidden', on);
+  if (on) {
+    analyticsView.render(t, true);
+    $('#analytics').focus();
+  } else if (active) {
+    grid.invalidate(true);
+  }
 }
 
 // --------------------------------------------------------------- live tail
@@ -2034,11 +2157,14 @@ function renderStatus() {
     const label = { index: 'Indexing', filter: 'Filtering', search: 'Searching', export: 'Exporting' }[busy.phase] ?? busy.phase;
     parts.push(`<span>${label} ${Math.round(busy.fraction * 100)}%</span><span class="prog"><i style="width:${(busy.fraction * 100).toFixed(1)}%"></i></span>`);
   } else if (t.scanCost) parts.push(`<span class="scan-cost muted">${esc(t.scanCost)}</span>`);
+  const an = analyticsStatus(ownerOf(t)?.analytics);
+  if (an && !busy) parts.push(`<a class="an-status" title="Background analysis of the whole log: open Analytics (Ctrl+Shift+Y)">${an.label} ${Math.floor(an.fraction * 100)}%<span class="prog"><i style="width:${(an.fraction * 100).toFixed(1)}%"></i></span></a>`);
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
   renderPaneHeads();
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);
   el.querySelector('.fmt')?.addEventListener('click', openFormatPicker);
+  el.querySelector('.an-status')?.addEventListener('click', () => active && setAnalyticsShown(active, true));
   syncAutoFormatOption();
   syncTimeless();
   el.querySelector('.show-cleared')?.addEventListener('click', () => {
@@ -2053,6 +2179,7 @@ function renderToolbar() {
   $('#btn-hist').classList.toggle('on', settings.showHistogram !== false);
   $('#btn-detail').classList.toggle('on', settings.showDetail !== false);
   $('#btn-patterns').classList.toggle('on', !!active?.showPatterns);
+  $('#btn-analytics').classList.toggle('on', !!ownerOf(active)?.showAnalytics);
 }
 
 // -------------------------------------------------------------------- layout
@@ -2426,6 +2553,7 @@ $('#btn-hist').onclick = () => toggleLayout('showHistogram');
 $('#btn-detail').onclick = () => toggleLayout('showDetail');
 $('#btn-help').onclick = showHelp;
 $('#btn-patterns').onclick = () => active && setPatternsShown(active, !active.showPatterns);
+$('#btn-analytics').onclick = () => active && setAnalyticsShown(active, !ownerOf(active)?.showAnalytics);
 $('#btn-clear').onclick = () => active && clearView(active);
 $('#btn-theme').onclick = () => {
   settings.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
@@ -2540,6 +2668,8 @@ window.ulv.onMenu((cmd, ...args) => {
       return void openCommandPalette();
     case 'toggle-patterns':
       return active && setPatternsShown(active, !active.showPatterns);
+    case 'toggle-analytics':
+      return active && setAnalyticsShown(active, !ownerOf(active)?.showAnalytics);
     case 'toggle-sql':
       return sqlPanel.toggle();
     case 'group-repeats':
@@ -2585,6 +2715,13 @@ document.addEventListener('keydown', (e) => {
   } else if (e.code === 'Backslash' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     toggleSplit();
+  } else if (e.code === 'KeyY' && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey) {
+    e.preventDefault();
+    if (active) setAnalyticsShown(active, !ownerOf(active)?.showAnalytics);
+  } else if (e.key === 'Escape' && ownerOf(active)?.showAnalytics && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)) {
+    e.preventDefault();
+    setAnalyticsShown(active!, false);
+    grid.root.focus();
   } else if (e.key === 'Escape' && active?.showPatterns && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement)) {
     e.preventDefault();
     setPatternsShown(active, false);

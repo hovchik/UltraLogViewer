@@ -2,7 +2,7 @@ import type { AiSettings } from '../core/aiClient';
 import type { TimeMode } from '../core/timestamp';
 import type { OpenWindow } from '../core/timeWindow';
 import { DEFAULT_FRAMEWORK_PACKAGES } from '../core/folding';
-import type { CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, PatternsResult, SearchResult, TextPattern } from '../core/types';
+import type { AnalyticsResult, CustomFormat, DocInfo, FieldStats, FilterRule, FilterSpec, PatternsResult, SearchResult, TextPattern } from '../core/types';
 
 export interface HighlightRule extends TextPattern {
   id: string;
@@ -187,6 +187,10 @@ export interface Tab {
   patternsBusy?: boolean;
   /** When the last patterns run started (ms). */
   patternsAt?: number;
+  /** Analytics dashboard shown instead of the log (see analyticsView.ts). */
+  showAnalytics?: boolean;
+  /** The latest snapshot of the background analysis of the whole log. */
+  analytics?: AnalyticsResult | null;
   /** Pinned rows, by entry key (see pins.ts). */
   pins?: Map<string, Pin>;
   /** The field the timeline is stacked by ('level' when unset). */

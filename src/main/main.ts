@@ -195,7 +195,7 @@ function viewMenuState(s: Record<string, unknown>) {
 }
 let menuState = '';
 /** Per-tab state the menu shows (sent by the renderer when the active tab or its filter changes). */
-let tabMenu: { groupRepeats: string; patterns: boolean; sql: boolean } = { groupRepeats: 'off', patterns: false, sql: false };
+let tabMenu: { groupRepeats: string; patterns: boolean; sql: boolean; analytics: boolean } = { groupRepeats: 'off', patterns: false, sql: false, analytics: false };
 const menuKey = (s: Record<string, unknown>) => JSON.stringify([viewMenuState(s), tabMenu]);
 
 /** Gives every leaf item an id, so the command palette can list and run it. */
@@ -337,6 +337,7 @@ function buildMenu() {
         { label: 'Split right', accelerator: 'CmdOrCtrl+\\', registerAccelerator: false, click: () => send('split-right') },
         { label: 'Close split', click: () => send('close-split') },
         { label: 'Patterns', type: 'checkbox', checked: tabMenu.patterns, accelerator: 'CmdOrCtrl+Shift+A', registerAccelerator: false, click: () => send('toggle-patterns') },
+        { label: 'Analytics', type: 'checkbox', checked: tabMenu.analytics, accelerator: 'CmdOrCtrl+Shift+Y', registerAccelerator: false, click: () => send('toggle-analytics') },
         { label: 'SQL', type: 'checkbox', checked: tabMenu.sql, accelerator: 'CmdOrCtrl+Shift+Q', registerAccelerator: false, click: () => send('toggle-sql') },
         {
           label: 'Group repeats',
@@ -492,8 +493,8 @@ if (!app.requestSingleInstanceLock()) {
       // keep the View menu's check marks in sync with the renderer
       if (menuKey(s) !== menuState) buildMenu();
     });
-    ipcMain.handle('menu:state', (_e, st: { groupRepeats: string; patterns: boolean; sql?: boolean }) => {
-      tabMenu = { groupRepeats: String(st?.groupRepeats ?? 'off'), patterns: !!st?.patterns, sql: !!st?.sql };
+    ipcMain.handle('menu:state', (_e, st: { groupRepeats: string; patterns: boolean; sql?: boolean; analytics?: boolean }) => {
+      tabMenu = { groupRepeats: String(st?.groupRepeats ?? 'off'), patterns: !!st?.patterns, sql: !!st?.sql, analytics: !!st?.analytics };
       if (menuKey(readSettings()) !== menuState) buildMenu();
     });
     ipcMain.handle('menu:items', () => menuItems());

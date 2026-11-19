@@ -5,6 +5,7 @@
 import type { LogFormat } from './formats';
 import { compileMatcher, compileQuery, Matcher, ruleMatcher, TIME_FIELD } from './query';
 import { fieldValue, groupValue } from './histogramGroups';
+import { analyticsEvaluator, AnalyticsRows } from './analytics';
 import { fnv1a64, messageOf, repeatKey, template } from './patterns';
 import { FilterSpec, Level, TextPattern } from './types';
 import { SqlColumn, sqlRowValues } from './sqlSchema';
@@ -120,10 +121,12 @@ export type RowsOp =
   | { kind: 'fields' }
   /** One field's value per row, as the grouped timeline counts it. */
   | { kind: 'field'; key: string }
-  | { kind: 'export'; format: 'text' | 'csv' | 'jsonl'; columns: string[]; source: string | null };
+  | { kind: 'export'; format: 'text' | 'csv' | 'jsonl'; columns: string[]; source: string | null }
+  /** Everything the analytics view counts per entry (see analytics.ts). */
+  | { kind: 'analytics' };
 
 /** patterns: template and sample of each row. fields: parsed fields. field: the value. export: one output line per row (with "\n"). */
-export type RowsResult = { templates: string[]; samples: string[] } | Record<string, string>[] | string[];
+export type RowsResult = { templates: string[]; samples: string[] } | AnalyticsRows | Record<string, string>[] | string[];
 
 /** First line of a message, at most 300 characters: what the patterns view shows for a template. */
 export function patternSample(msg: string): string {
@@ -150,6 +153,8 @@ export function rowsEvaluator(op: RowsOp, fmt: LogFormat): (texts: string[], lin
       };
     case 'fields':
       return (texts) => texts.map((t) => fmt.parse(t));
+    case 'analytics':
+      return analyticsEvaluator(fmt);
     case 'field': {
       const key = op.key;
       return (texts) => texts.map((t) => groupValue(fieldValue(fmt.parse(t), key)));

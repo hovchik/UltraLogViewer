@@ -250,6 +250,11 @@ export class LogDocument implements SetMember {
     return m ? [m.src.get(base), m.ent.get(base)] : [0, base];
   }
 
+  /** Base position -> [source, entry], for the analytics pass over the whole log. */
+  entryAt(base: number): [number, number] {
+    return this.ref(base);
+  }
+
   private baseOf(row: number): number {
     const v = this.curView;
     return v ? v[row] : row;
@@ -620,7 +625,7 @@ export class LogDocument implements SetMember {
   ): Promise<void> {
     const tick = () => new Promise<void>((res) => setImmediate(res));
     const perRow = (r: RowsResult): unknown[] =>
-      Array.isArray(r) ? r : r.templates.map((t, i) => [t, r.samples[i]]);
+      Array.isArray(r) ? r : 'templates' in r ? r.templates.map((t, i) => [t, r.samples[i]]) : r.tpl.map((t, i) => [t, r.sample[i]]);
     const start = (from: number, count: number) => {
       const end = Math.min(this.viewCount(), from + count);
       const refs: [number, number][] = [];

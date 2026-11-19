@@ -14,7 +14,8 @@ import { SqlColumn, SqlResult } from '../core/sqlSchema';
 import { Encoding } from '../core/fileSource';
 import { closeAllRemote, findRemote, pruneRemote } from '../core/remote';
 import { listRemoteFolder, localCopies, remoteCacheDir } from './engineRemote';
-import { CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
+import { AnalyticsJob } from '../core/analytics';
+import { AnalyticsResult, CustomFormat, DocInfo, FieldStats, FilterSpec, Level, PatternsResult, RowData, SearchResult, TextPattern } from '../core/types';
 
 export interface OpenOptions {
   encoding?: Encoding;
@@ -32,7 +33,9 @@ export type EngineEvent =
   | { type: 'doc-error'; docId: number; message: string }
   | { type: 'progress'; docId: number; phase: string; fraction: number }
   /** Rows a running filter has found so far (`seq` as passed to setFilter); see LogDocument.viewEpoch. */
-  | { type: 'view-partial'; docId: number; info: DocInfo; epoch: number; seq: number };
+  | { type: 'view-partial'; docId: number; info: DocInfo; epoch: number; seq: number }
+  /** A snapshot of the document's background analysis (while it runs, a few times a second, and when it is done). */
+  | { type: 'analytics'; docId: number; result: AnalyticsResult };
 
 const POLL_MS = 500;
 const PROGRESS_MS = 50;
@@ -44,6 +47,10 @@ export class Engine {
   private statsGen = new Map<number, number>();
   private patternsGen = new Map<number, number>();
   private groupsGen = new Map<number, number>();
+  /** Background analyses, by document. */
+  private analytics = new Map<number, AnalyticsJob>();
+  /** Scans the user waits for (filter, search, stats…) running now: background analysis pauses meanwhile. */
+  private interactive = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private progressAt = new Map<string, number>();
@@ -173,6 +180,8 @@ export class Engine {
   }
 
   close(docId: number) {
+    this.analytics.get(docId)?.cancel();
+    this.analytics.delete(docId);
     this.sql.get(docId)?.close();
     this.sql.delete(docId);
     this.docs.get(docId)?.close();
@@ -181,6 +190,62 @@ export class Engine {
     this.docPaths.delete(docId);
     for (const k of this.progressAt.keys()) if (k.startsWith(`${docId}:`)) this.progressAt.delete(k);
     this.pruneRemote();
+  }
+
+  /** Runs something the user waits for: background analysis stays out of its way until it is done. */
+  private async foreground<T>(run: () => Promise<T>): Promise<T> {
+    this.interactive++;
+    try {
+      return await run();
+    } finally {
+      this.interactive--;
+    }
+  }
+
+  /** True while a file is being indexed or a scan the user waits for runs. */
+  private busy(): boolean {
+    if (this.interactive > 0) return true;
+    for (const d of this.docs.values()) if (d.indexing) return true;
+    return false;
+  }
+
+  private analyticsJob(docId: number): AnalyticsJob {
+    let job = this.analytics.get(docId);
+    if (!job) {
+      const doc = this.doc(docId);
+      const threads = this.scanPool?.usable ? this.scanPool.size : 2;
+      job = new AnalyticsJob(doc, {
+        busy: () => this.busy(),
+        emit: (result) => this.docs.has(docId) && this.emit({ type: 'analytics', docId, result }),
+        concurrency: Math.max(1, Math.floor(threads / 2)),
+      });
+      this.analytics.set(docId, job);
+    }
+    return job;
+  }
+
+  /**
+   * Starts (or continues) the background analysis of a document's whole log; snapshots arrive as `analytics` events.
+   * Returns the current snapshot.
+   */
+  analyticsStart(docId: number): AnalyticsResult {
+    const job = this.analyticsJob(docId);
+    job.start();
+    return job.snapshot();
+  }
+  analyticsPause(docId: number): AnalyticsResult | null {
+    const job = this.analytics.get(docId);
+    job?.pause();
+    return job?.snapshot() ?? null;
+  }
+  analyticsRestart(docId: number): AnalyticsResult {
+    const job = this.analyticsJob(docId);
+    job.restart();
+    return job.snapshot();
+  }
+  /** The latest snapshot, null when the analysis never started. */
+  analyticsSnapshot(docId: number): AnalyticsResult | null {
+    return this.analytics.get(docId)?.snapshot() ?? null;
   }
 
   info(docId: number): DocInfo {
@@ -196,24 +261,25 @@ export class Engine {
     const d = this.doc(docId);
     let epoch = d.viewEpoch;
     let count = d.viewCount();
-    const ok = await d.applyFilter(spec, false, (phase, fraction) => {
+    const ok = await this.foreground(() => d.applyFilter(spec, false, (phase, fraction) => {
       this.progress(docId, phase, fraction);
       if (d.viewEpoch === epoch && d.viewCount() === count) return;
       epoch = d.viewEpoch;
       count = d.viewCount();
       this.emit({ type: 'view-partial', docId, info: d.info(), epoch, seq });
-    });
+    }));
     return ok ? d.info() : null;
   }
 
   async search(docId: number, pattern: TextPattern): Promise<SearchResult> {
     const gen = (this.searchGen.get(docId) ?? 0) + 1;
     this.searchGen.set(docId, gen);
-    return this.doc(docId).search(
+    const d = this.doc(docId);
+    return this.foreground(() => d.search(
       pattern,
       (phase, fraction) => this.progress(docId, phase, fraction),
       () => this.searchGen.get(docId) !== gen,
-    );
+    ));
   }
 
   rowForLine(docId: number, source: number, line: number) {
@@ -235,13 +301,15 @@ export class Engine {
   async fieldStats(docId: number, maxRows?: number, top?: number): Promise<FieldStats> {
     const gen = (this.statsGen.get(docId) ?? 0) + 1;
     this.statsGen.set(docId, gen);
-    return this.doc(docId).fieldStats(maxRows, top, () => this.statsGen.get(docId) !== gen || !this.docs.has(docId));
+    const d = this.doc(docId);
+    return this.foreground(() => d.fieldStats(maxRows, top, () => this.statsGen.get(docId) !== gen || !this.docs.has(docId)));
   }
   /** Message templates over the view; a newer call for the same document cancels the previous one. */
   async patterns(docId: number, maxRows?: number, top?: number): Promise<PatternsResult> {
     const gen = (this.patternsGen.get(docId) ?? 0) + 1;
     this.patternsGen.set(docId, gen);
-    return this.doc(docId).patterns(maxRows, top, () => this.patternsGen.get(docId) !== gen || !this.docs.has(docId));
+    const d = this.doc(docId);
+    return this.foreground(() => d.patterns(maxRows, top, () => this.patternsGen.get(docId) !== gen || !this.docs.has(docId)));
   }
   keyForLine(docId: number, source: number, line: number) {
     return this.doc(docId).keyForLine(source, line);
@@ -256,13 +324,15 @@ export class Engine {
   async histogramBy(docId: number, field: string, buckets: number) {
     const gen = (this.groupsGen.get(docId) ?? 0) + 1;
     this.groupsGen.set(docId, gen);
-    return this.doc(docId).histogramBy(field, buckets, () => this.groupsGen.get(docId) !== gen || !this.docs.has(docId));
+    const d = this.doc(docId);
+    return this.foreground(() => d.histogramBy(field, buckets, () => this.groupsGen.get(docId) !== gen || !this.docs.has(docId)));
   }
   overview(docId: number, buckets: number) {
     return this.doc(docId).overview(buckets);
   }
   async exportView(docId: number, file: string, format: 'text' | 'csv' | 'jsonl') {
-    return this.doc(docId).export(file, format, (phase, fraction) => this.progress(docId, phase, fraction));
+    const d = this.doc(docId);
+    return this.foreground(() => d.export(file, format, (phase, fraction) => this.progress(docId, phase, fraction)));
   }
   async reformat(docId: number, formatId: string | undefined, customFormats?: CustomFormat[]) {
     const d = this.doc(docId);
@@ -295,7 +365,7 @@ export class Engine {
     const s = this.sqlFor(docId);
     s.cancel();
     if (cap !== undefined) s.cap = cap;
-    return s.query(sql, (f) => this.progress(docId, 'sql', f), maxRows).finally(() => this.progress(docId, 'sql', 1));
+    return this.foreground(() => s.query(sql, (f) => this.progress(docId, 'sql', f), maxRows)).finally(() => this.progress(docId, 'sql', 1));
   }
   sqlCancel(docId: number) {
     this.sql.get(docId)?.cancel();
@@ -345,6 +415,7 @@ export class Engine {
 
   dispose() {
     if (this.timer) clearInterval(this.timer);
+    for (const job of this.analytics.values()) job.cancel();
     for (const id of [...this.docs.keys()]) this.close(id);
     this.scanPool?.close();
     closeAllRemote();

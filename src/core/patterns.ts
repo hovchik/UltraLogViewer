@@ -3,7 +3,7 @@
 // "group repeats".
 
 import { matchTimestamp } from './timestamp';
-import { tokenize, TokenKind } from './tokenizer';
+import { Token, tokenize, TokenKind } from './tokenizer';
 import type { Level } from './types';
 
 export type RepeatMode = 'off' | 'exact' | 'pattern';
@@ -37,13 +37,17 @@ export function messageOf(text: string, fields: Record<string, string> | null | 
   return text.slice(ts.length).replace(LEAD_SEP, '');
 }
 
-/** The template of a message: first line, variable parts (numbers, ids, times, strings, urls, hex ids) replaced. */
-export function template(message: string): string {
-  let s = firstLineOf(message);
-  if (s.length > MAX_TEMPLATE_INPUT) s = s.slice(0, MAX_TEMPLATE_INPUT);
+/** The first line of a message as template() reads it (at most MAX_TEMPLATE_INPUT characters). */
+export function templateInput(message: string): string {
+  const s = firstLineOf(message);
+  return s.length > MAX_TEMPLATE_INPUT ? s.slice(0, MAX_TEMPLATE_INPUT) : s;
+}
+
+/** The template of a template input line given its tokens (see templateInput): what template() returns. */
+export function templateFromTokens(s: string, tokens: readonly Token[]): string {
   let out = '';
   let at = 0;
-  for (const tk of tokenize(s)) {
+  for (const tk of tokens) {
     const ph = PLACEHOLDERS[tk.kind];
     if (!ph) continue;
     out += s.slice(at, tk.start) + ph;
@@ -51,6 +55,12 @@ export function template(message: string): string {
   }
   out += s.slice(at);
   return out.replace(HEX_RE, '<hex>').replace(/\s+/g, ' ').trim();
+}
+
+/** The template of a message: first line, variable parts (numbers, ids, times, strings, urls, hex ids) replaced. */
+export function template(message: string): string {
+  const s = templateInput(message);
+  return templateFromTokens(s, tokenize(s));
 }
 
 /** The key consecutive entries must share to be grouped as repeats. */
