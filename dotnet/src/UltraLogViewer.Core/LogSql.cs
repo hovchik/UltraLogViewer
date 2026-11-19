@@ -162,6 +162,7 @@ public sealed class LogSql : IDisposable
     /// </summary>
     public async Task<SqlResult> QueryAsync(string sql, IProgress<double>? progress = null, CancellationToken ct = default, int maxRows = 5000)
     {
+        using var foreground = Activity.Foreground();
         if (!SkipGuard && SqlSchema.Guard(sql) is { } denied) return SqlResult.Fail(denied) with { Loaded = _loaded, Total = Total };
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _life.Token);
         ct = linked.Token;

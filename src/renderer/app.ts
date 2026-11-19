@@ -2491,6 +2491,7 @@ function showHelp() {
     ['→ / ←', 'Expand / collapse a multi-line entry'],
     ['Ctrl+Shift+P, F1', 'Command palette'],
     ['Ctrl+Shift+A', 'Patterns view'],
+    ['Ctrl+Shift+Y', 'Analytics: charts and insights over the whole log'],
     ['Ctrl+Shift+Q', 'SQL panel (Ctrl+Enter runs the query)'],
     ['Ctrl+K', 'Clear (hide everything so far)'],
     ['Ctrl+click a token', 'Search for it'],

@@ -16,6 +16,9 @@ public sealed partial class LogDocument
 
     internal bool MergedNow => _merge is not null;
 
+    /// <summary>Base position → (source, entry) in the merge this document is synced to (the analytics pass over the whole log).</summary>
+    internal (int Src, int Entry) EntryAt(int baseRow) => Ref(baseRow, _merge);
+
     /// <summary>Base position of an entry in the merge this document is synced to.</summary>
     internal int BaseOfEntry(int src, int entry) => BaseForEntry(src, entry, _merge);
 

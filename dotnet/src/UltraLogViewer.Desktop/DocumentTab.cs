@@ -89,6 +89,9 @@ public sealed class DocumentTab : IDisposable
     public int FlashFrom { get; set; } = int.MaxValue;
     public DateTime FlashStart { get; set; }
     public PatternStats? Patterns { get; set; }
+    /// <summary>The background analysis of the whole log (Analytics tab), and its latest snapshot.</summary>
+    public AnalyticsJob? Analytics { get; set; }
+    public AnalyticsResult? AnalyticsResult { get; set; }
     public DateTime PatternsTime { get; set; }
 
     /// <summary>The right-hand pane of a split view (a document over the same files), or null.</summary>
@@ -135,6 +138,8 @@ public sealed class DocumentTab : IDisposable
         Split?.Dispose();
         Split = null;
         Capture?.Dispose();
+        Analytics?.Dispose();
+        Analytics = null;
         Doc.Dispose();
     }
 }

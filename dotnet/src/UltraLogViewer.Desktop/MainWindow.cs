@@ -162,7 +162,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _detailBtn = Toggle("Details", "Details pane (Ctrl+Shift+D)");
         _detailBtn.IsChecked = _settings.ShowDetail;
         _detailBtn.Click += (_, _) => ToggleDetail(_detailBtn.IsChecked == true);
-        _format = new ComboBox { Width = 150, FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center };
+        _format = new ComboBox { Width = 132, FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center };
         ToolTip.SetTip(_format, "Log format");
         _format.SelectionChanged += (_, _) =>
         {
@@ -186,7 +186,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
         };
         var clearBtn = ToolButton("Clear", "Hide everything so far (Ctrl+K)", ClearSoFar);
         var patternsBtn = ToolButton("Patterns", "Group messages by pattern (Ctrl+Shift+A)", TogglePatterns);
-        var rightTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { patternsBtn, clearBtn, _followBtn, _histBtn, _detailBtn, _format, theme, help } };
+        var analyticsBtn = ToolButton("Analytics", "Charts and insights over the whole log, worked out in the background (Ctrl+Shift+Y)", ToggleAnalytics);
+        var rightTools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Children = { patternsBtn, analyticsBtn, clearBtn, _followBtn, _histBtn, _detailBtn, _format, theme, help } };
         DockPanel.SetDock(leftTools, Dock.Left);
         DockPanel.SetDock(rightTools, Dock.Right);
         toolbar.Children.Add(leftTools);
@@ -268,6 +269,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
                         TimeMenu(new MenuItem { Header = "Time _column" }),
                         new Separator(),
                         Check("_Patterns", () => _patternsShown, TogglePatterns, new KeyGesture(Key.A, KeyModifiers.Control | KeyModifiers.Shift)),
+                        Check("_Analytics", () => _analyticsShown, ToggleAnalytics, new KeyGesture(Key.Y, KeyModifiers.Control | KeyModifiers.Shift)),
                         Check("S_QL", () => _sqlShown, ToggleSql, new KeyGesture(Key.Q, KeyModifiers.Control | KeyModifiers.Shift)),
                         GroupMenu(),
                         Check("Fold framework frames", () => _settings.FoldFrames, () => { SetDisplay(() => _settings.FoldFrames = !_settings.FoldFrames); UpdateDetail(); }),
@@ -374,6 +376,9 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _center.Children.Add(_hist);
         _center.Children.Add(_histSplitter);
         _center.Children.Add(_work);
+        var analyticsPane = BuildAnalyticsPane();
+        Grid.SetRow(analyticsPane, 2);
+        _center.Children.Add(analyticsPane);
         _partialBanner = BuildPartialBanner();
         var pinStrip = BuildPinStrip();
         var gridHost = new DockPanel { Children = { _partialBanner, _contextBanner, pinStrip, BuildPanes(BuildGridArea()) } };
@@ -441,7 +446,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _statusCleared.Click += (_, _) => Unclear();
         ToolTip.SetTip(_statusCleared, "Show the entries hidden by Clear");
         var sl = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16, Children = { _statusLeft, _statusCleared, _statusSel } };
-        var sr = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, Children = { _statusBusy, _progress, _statusFormat, _statusEnc, _statusLive } };
+        var sr = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, Children = { _statusAnalytics, _statusAnalyticsBar, _statusBusy, _progress, _statusFormat, _statusEnc, _statusLive } };
         DockPanel.SetDock(sl, Dock.Left);
         DockPanel.SetDock(sr, Dock.Right);
         status.Children.Add(sl);
@@ -655,6 +660,16 @@ public sealed partial class MainWindow : Window, ILogGridHost
         if (tab is null) RebuildRecent();
         UpdateTitle();
         if (_patternsShown) ShowPatterns(false);
+        if (_analyticsShown)
+        {
+            if (tab is null) ShowAnalytics(false);
+            else
+            {
+                var owner = OwnerOf(tab)!;
+                if (owner.Analytics is null) StartAnalytics(owner);
+                RenderAnalytics(owner);
+            }
+        }
         SqlTabChanged();
         _search.Text = tab?.SearchPattern.Text ?? "";
         if (tab is not null)
@@ -858,6 +873,8 @@ public sealed partial class MainWindow : Window, ILogGridHost
             await RefreshHistogramAsync();
         }
         ScheduleFieldStats(tab);
+        // The whole log is analysed in the background; the job keeps out of the way of loading and filtering.
+        StartAnalytics(tab);
         return tab;
     }
 
@@ -1806,6 +1823,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             case Key.P when ctrl && shift: OpenPalette(); break;
             case Key.P when ctrl: TogglePinAtFocus(); break;
             case Key.A when ctrl && shift: TogglePatterns(); break;
+            case Key.Y when ctrl && shift: ToggleAnalytics(); break;
             case Key.Q when ctrl && shift: ToggleSql(); break;
             case Key.K when ctrl && !shift: ClearSoFar(); break;
             case Key.S when ctrl && e.KeyModifiers.HasFlag(KeyModifiers.Alt): Run(PickSaveWorkspace); break;
@@ -1876,6 +1894,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
             SyncTimeless();
             _progress.IsVisible = false;
             UpdateClearedStatus(null);
+            UpdateAnalyticsStatus();
             return;
         }
         var i = tab.Info;
@@ -1899,6 +1918,7 @@ public sealed partial class MainWindow : Window, ILogGridHost
         _progress.IsVisible = tab.BusyProgress is not null;
         _progress.Value = tab.BusyProgress ?? 0;
         _statusBusy.Text = tab.BusyProgress is double p ? $"{tab.BusyLabel} {p:P0}" : tab.ScanCost;
+        UpdateAnalyticsStatus();
         UpdatePaneHeaders();
     }
 
