@@ -887,11 +887,12 @@ public sealed class UiTests : IDisposable
         Screenshot(w, "analytics-dark.png");
         Avalonia.Application.Current!.RequestedThemeVariant = ThemeVariant.Light;
 
-        // a click on the Error bar: only errors (and fatals), back in the log
+        // a click on the Error bar: only errors (not fatals: one level row is one level), back in the log
         Assert.True(w.AnalyticsForTest.ClickForTest("ERROR:"));
         Assert.False(w.AnalyticsShownForTest);
         await Until(() => tab.Info.ViewCount == errors && tab.BusyProgress is null);
         Assert.False(tab.Filter.Levels[(int)Level.Info]);
+        Assert.False(tab.Filter.Levels[(int)Level.Fatal]);
         for (var i = 0; i < tab.Filter.Levels.Length; i++) tab.Filter.Levels[i] = true;
         await w.ApplyFilterAsync(tab);
 
@@ -902,5 +903,14 @@ public sealed class UiTests : IDisposable
         Assert.True(w.AnalyticsForTest.ClickForTest(sample));
         await Until(() => tab.Info.ViewCount == r.ErrorPatterns[0].Count && tab.BusyProgress is null);
         Assert.True(tab.Filter.Rules.Single().PatternMatch);
+
+        // Analytics and Patterns take the same place: opening one closes the other
+        w.ToggleAnalyticsForTest();
+        Assert.True(w.AnalyticsShownForTest);
+        w.TogglePatternsForTest();
+        Assert.True(w.PatternsShownForTest);
+        Assert.False(w.AnalyticsShownForTest);
+        w.ToggleAnalyticsForTest();
+        Assert.False(w.PatternsShownForTest);
     }
 }

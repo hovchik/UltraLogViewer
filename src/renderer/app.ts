@@ -198,13 +198,13 @@ const patternsView = new PatternsView($('#patterns'), {
 });
 
 const analyticsView = new AnalyticsView($('#analytics'), {
-  filterLevel: (l, only) => {
+  filterLevel: (l, only, group) => {
     const t = analyticsTarget();
     if (!t) return;
-    if (only) t.filter.levels = t.filter.levels.map((_, i) => (l === Level.Error ? i >= Level.Error : l === Level.Debug ? i <= Level.Debug : i === l));
-    else if (l === Level.Error) t.filter.levels[Level.Error] = t.filter.levels[Level.Fatal] = false;
-    else if (l === Level.Debug) t.filter.levels[Level.Debug] = t.filter.levels[Level.Trace] = t.filter.levels[Level.None] = false;
-    else t.filter.levels[l] = false;
+    // grouped: the Errors summary means errors and fatals, the Debug & trace series means debug, trace and no level
+    const inGroup = (i: number) => (group && l === Level.Error ? i >= Level.Error : group && l === Level.Debug ? i <= Level.Debug : i === l);
+    if (only) t.filter.levels = t.filter.levels.map((_, i) => inGroup(i));
+    else t.filter.levels = t.filter.levels.map((on, i) => on && !inGroup(i));
     void applyFilter(t);
   },
   filterTime: (from, to) => {

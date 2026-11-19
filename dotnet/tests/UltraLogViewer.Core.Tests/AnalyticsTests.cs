@@ -143,4 +143,19 @@ public class AnalyticsTests
         Assert.Equal("boom <num>", r.ErrorPatterns[0].Template);
         Assert.Equal(1, r.Run);
     }
+
+    [Fact]
+    public void RemovedValueLeavesThePercentileSample()
+    {
+        var n = new Numbers();
+        n.Add(1);
+        n.Add(100);
+        n.Remove(100); // the last entry grew: take it out and read it again
+        n.Add(1);
+        var r = n.Result()!;
+        Assert.Equal(2, r.Count);
+        Assert.Equal(1, r.Avg);
+        Assert.Equal(1, r.P50);
+        Assert.Equal(1, r.P99);
+    }
 }

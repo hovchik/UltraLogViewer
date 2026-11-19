@@ -88,6 +88,7 @@ public sealed partial class MainWindow
         if (_active is not { } tab) on = false;
         // The patterns view takes the place of the main pane, so in a split it is about the left pane's entries.
         else if (on && _grid != _gridMain) Activate(OwnerOf(tab));
+        if (on && _analyticsShown) ShowAnalytics(false);
         _patternsShown = on;
         _patternsPane.IsVisible = on;
         _gridMain.IsVisible = !on;

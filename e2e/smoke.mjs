@@ -377,7 +377,7 @@ await step('analyses the whole log in the background and filters from the charts
   await win.waitForSelector('#analytics.hidden', { state: 'attached' });
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   const levels = await win.locator('.grid-rows .r .c[data-col="level"]').allInnerTexts();
-  assert.ok(levels.length > 0 && levels.every((l) => /ERROR|FATAL/.test(l)), `levels: ${levels.slice(0, 5)}`);
+  assert.ok(levels.length > 0 && levels.every((l) => /ERROR/.test(l)), `levels: ${levels.slice(0, 5)}`);
   // show every level again
   while ((await win.locator('#sidebar .lvl.off').count()) > 0) {
     await win.locator('#sidebar .lvl.off').first().click();

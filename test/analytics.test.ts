@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import { LogDocument } from '../src/core/document';
-import { AnalyticsJob, durationMs, findBursts } from '../src/core/analytics';
+import { AnalyticsJob, durationMs, findBursts, Numbers } from '../src/core/analytics';
 import { template } from '../src/core/patterns';
 import { AnalyticsResult, Level, LEVEL_COUNT } from '../src/core/types';
 import { tmpFile } from './helpers';
@@ -162,5 +162,20 @@ describe('analytics job', () => {
     expect(r.run).toBe(1); // no restart
     job.cancel();
     d.close();
+  });
+});
+
+describe('Numbers', () => {
+  it('takes a removed value out of the percentile sample (tail re-read)', () => {
+    const n = new Numbers();
+    n.add(1);
+    n.add(100);
+    n.remove(100); // the last entry grew: take it out and read it again
+    n.add(1);
+    const r = n.result()!;
+    expect(r.count).toBe(2);
+    expect(r.avg).toBe(1);
+    expect(r.p50).toBe(1);
+    expect(r.p99).toBe(1);
   });
 });

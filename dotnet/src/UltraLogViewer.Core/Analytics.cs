@@ -213,10 +213,16 @@ internal sealed class Numbers
         }
     }
 
+    /// <summary>Takes a value out again (a tail re-read of the last entry). Min and max keep it; the sample drops it.</summary>
     public void Remove(double x)
     {
         Count--;
         Sum -= x;
+        _seen = Math.Max(0, _seen - 1);
+        var i = _sample.LastIndexOf(x);
+        if (i < 0) return;
+        _sample[i] = _sample[^1];
+        _sample.RemoveAt(_sample.Count - 1);
     }
 
     public AnalyticsNumeric? Result()

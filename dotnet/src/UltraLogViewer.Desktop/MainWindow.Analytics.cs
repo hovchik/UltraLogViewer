@@ -56,7 +56,7 @@ public sealed partial class MainWindow
             e.Handled = true;
             ShowAnalytics(false);
         };
-        _analytics.FilterLevel += (l, only) => FilterFromAnalytics(t => SetLevels(t, l, only));
+        _analytics.FilterLevel += (l, only, group) => FilterFromAnalytics(t => SetLevels(t, l, only, group));
         _analytics.FilterTime += (from, to) => FilterFromAnalytics(t =>
         {
             t.Filter.TimeFrom = from;
@@ -176,10 +176,10 @@ public sealed partial class MainWindow
         ApplyFilter();
     }
 
-    /// <summary>Only (or hide) a level from the dashboard: "errors" are errors and fatals, "debug" is debug, trace and no level.</summary>
-    private static void SetLevels(DocumentTab t, Level l, bool only)
+    /// <summary>Only (or hide) a level from the dashboard. Grouped (the summary and the timeline series): "errors" are errors and fatals, "debug" is debug, trace and no level.</summary>
+    internal static void SetLevels(DocumentTab t, Level l, bool only, bool grouped)
     {
-        Level[] group = l switch
+        Level[] group = !grouped ? [l] : l switch
         {
             Level.Error => [Level.Error, Level.Fatal],
             Level.Debug => [Level.Debug, Level.Trace, Level.None],

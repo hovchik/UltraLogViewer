@@ -9,7 +9,8 @@ import { esc, fmtBytes, fmtNum, h } from './util';
 
 export interface AnalyticsHost {
   /** Show only this level (`only`), or hide it. */
-  filterLevel(level: Level, only: boolean): void;
+  /** `group`: Error also takes fatals, Debug also takes trace and entries with no level (the summary tiles and timeline series). */
+  filterLevel(level: Level, only: boolean, group?: boolean): void;
   filterTime(from: number, to: number): void;
   filterPattern(template: string, mode: 'include' | 'exclude'): void;
   filterField(key: string, value: string, mode: 'include' | 'exclude'): void;
@@ -216,7 +217,7 @@ export class AnalyticsView {
     const errs = errorsOf(r.levels);
     if (s.entries) {
       const rate = fmtPct(errs, s.entries);
-      add(errs ? `<b>${fmtNum(errs)}</b> errors (${rate} of all entries), <b>${fmtNum(r.levels[Level.Warn])}</b> warnings.` : 'No errors in the whole log.', errs ? () => this.host.filterLevel(Level.Error, true) : undefined);
+      add(errs ? `<b>${fmtNum(errs)}</b> errors (${rate} of all entries), <b>${fmtNum(r.levels[Level.Warn])}</b> warnings.` : 'No errors in the whole log.', errs ? () => this.host.filterLevel(Level.Error, true, true) : undefined);
     }
     const burst = r.bursts[0];
     if (burst) add(`Error burst at <b>${esc(fmtTime(burst.from))}</b>: ${fmtNum(burst.errors)} errors in ${esc(fmtSpan(burst.to - burst.from))}, ${burst.factor.toFixed(0)}× the usual rate.`, () => this.host.filterTime(burst.from, burst.to));
@@ -245,7 +246,7 @@ export class AnalyticsView {
       tile('Entries', fmtCompact(s.entries), `${fmtBytes(s.bytes)} · ${s.sources} ${s.sources === 1 ? 'file' : 'files'}`, `${fmtNum(s.entries)} entries`),
       tile('Time span', span ? fmtSpan(span) : '–', s.timeMin != null ? `${fmtTime(s.timeMin)} → ${fmtTime(s.timeMax, false)}` : 'no timestamps'),
       tile('Rate', s.ratePerMin ? `${fmtCompact(s.ratePerMin)}/min` : '–', s.peakPerMin ? `peak ${fmtCompact(s.peakPerMin)}/min` : ''),
-      tile('Errors', fmtCompact(errs), fmtPct(errs, s.entries), `${fmtNum(errs)} errors and fatals\n${HINT}`, (sh) => this.host.filterLevel(Level.Error, !sh)),
+      tile('Errors', fmtCompact(errs), fmtPct(errs, s.entries), `${fmtNum(errs)} errors and fatals\n${HINT}`, (sh) => this.host.filterLevel(Level.Error, !sh, true)),
       tile('Warnings', fmtCompact(r.levels[Level.Warn]), fmtPct(r.levels[Level.Warn], s.entries), `${fmtNum(r.levels[Level.Warn])} warnings\n${HINT}`, (sh) => this.host.filterLevel(Level.Warn, !sh)),
       tile('Patterns', fmtCompact(s.patterns), 'distinct templates'),
       tile('Exceptions', fmtCompact(s.exceptions), 'distinct types'),
@@ -284,7 +285,7 @@ export class AnalyticsView {
     });
     const end = tl.start + n * tl.bucketMs;
     const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => `<span style="left:${f * 100}%">${esc(fmtTime(tl.start + f * (end - tl.start), f === 0 || end - tl.start > 864e5))}</span>`).join('');
-    const legend = SERIES.map((s) => `<span${this.mark(`${s.name}\n${HINT}`, (sh) => this.host.filterLevel(s.filter, !sh))}><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
+    const legend = SERIES.map((s) => `<span${this.mark(`${s.name}\n${HINT}`, (sh) => this.host.filterLevel(s.filter, !sh, true))}><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join('');
     const body = `<div class="an-legend">${legend}<span class="muted">${esc(fmtSpan(tl.bucketMs))} per bar · peak ${fmtNum(max)}</span></div>
       <svg class="an-timeline" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" data-start="${tl.start}" data-end="${end}">${marks}<rect class="sel hidden" x="0" y="0" width="0" height="${H}"/></svg>
       <div class="an-ticks">${ticks}</div>`;

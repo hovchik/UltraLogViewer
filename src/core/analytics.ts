@@ -177,7 +177,7 @@ function topEntries(m: Map<string, number>, n: number): ValueCount[] {
 }
 
 /** Number statistics with a uniform sample for percentiles (deterministic, so tests are stable). */
-class Numbers {
+export class Numbers {
   count = 0;
   sum = 0;
   min = Infinity;
@@ -199,10 +199,16 @@ class Numbers {
       if (j < RESERVOIR) this.sample[j] = x;
     }
   }
+  /** Takes a value out again (a tail re-read of the last entry). Min and max keep it; the sample drops it. */
   remove(x: number) {
-    // min, max and the sample keep it: a tail re-read of one entry
     this.count--;
     this.sum -= x;
+    this.seen = Math.max(0, this.seen - 1);
+    const i = this.sample.lastIndexOf(x);
+    if (i >= 0) {
+      this.sample[i] = this.sample[this.sample.length - 1];
+      this.sample.pop();
+    }
   }
   result(): AnalyticsNumeric | null {
     if (this.count <= 0 || !this.sample.length) return null;

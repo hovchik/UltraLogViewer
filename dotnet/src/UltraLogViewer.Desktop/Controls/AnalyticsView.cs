@@ -43,7 +43,8 @@ public sealed class AnalyticsView : Control
         ActualThemeVariantChanged += (_, _) => InvalidateVisual();
     }
 
-    public event Action<Level, bool>? FilterLevel;
+    /// <summary>Level, only (else hide), grouped (Error also takes fatals, Debug also takes trace and no level).</summary>
+    public event Action<Level, bool, bool>? FilterLevel;
     public event Action<long, long>? FilterTime;
     public event Action<string, bool>? FilterPattern;
     public event Action<string, string, bool>? FilterField;
@@ -260,7 +261,7 @@ public sealed class AnalyticsView : Control
         var errs = r.Levels[(int)Level.Error] + r.Levels[(int)Level.Fatal];
         if (s.Entries > 0)
             items.Add((errs > 0 ? $"{errs:N0} errors ({Fmt.Pct(errs, s.Entries)} of all entries), {r.Levels[(int)Level.Warn]:N0} warnings." : "No errors in the whole log.", null,
-                "Click to filter the log to this", errs > 0 ? _ => FilterLevel?.Invoke(Level.Error, true) : null));
+                "Click to filter the log to this", errs > 0 ? _ => FilterLevel?.Invoke(Level.Error, true, true) : null));
         if (r.Bursts.FirstOrDefault() is { } b)
             items.Add(($"Error burst at {Fmt.Time(b.From)}: {b.Errors:N0} errors in {Fmt.Span(b.To - b.From)}, {b.Factor:0}× the usual rate.", null, "Click to filter the log to this", _ => FilterTime?.Invoke(b.From, b.To)));
         if (r.ErrorPatterns.FirstOrDefault() is { } ep)
@@ -297,8 +298,8 @@ public sealed class AnalyticsView : Control
             ("Entries", Fmt.Compact(s.Entries), $"{Fmt.Bytes(s.Bytes)} · {s.Sources} {(s.Sources == 1 ? "file" : "files")}", $"{s.Entries:N0} entries", null),
             ("Time span", span > 0 ? Fmt.Span(span) : "–", s.TimeMin is not null ? $"{Fmt.Time(s.TimeMin)} → {Fmt.Time(s.TimeMax, false)}" : "no timestamps", "Time span", null),
             ("Rate", s.RatePerMin > 0 ? $"{Fmt.Compact(s.RatePerMin)}/min" : "–", s.PeakPerMin > 0 ? $"peak {Fmt.Compact(s.PeakPerMin)}/min" : "", "Entries per minute", null),
-            ("Errors", Fmt.Compact(errs), Fmt.Pct(errs, s.Entries), $"{errs:N0} errors and fatals\n{Hint}", sh => FilterLevel?.Invoke(Level.Error, !sh)),
-            ("Warnings", Fmt.Compact(r.Levels[(int)Level.Warn]), Fmt.Pct(r.Levels[(int)Level.Warn], s.Entries), $"{r.Levels[(int)Level.Warn]:N0} warnings\n{Hint}", sh => FilterLevel?.Invoke(Level.Warn, !sh)),
+            ("Errors", Fmt.Compact(errs), Fmt.Pct(errs, s.Entries), $"{errs:N0} errors and fatals\n{Hint}", sh => FilterLevel?.Invoke(Level.Error, !sh, true)),
+            ("Warnings", Fmt.Compact(r.Levels[(int)Level.Warn]), Fmt.Pct(r.Levels[(int)Level.Warn], s.Entries), $"{r.Levels[(int)Level.Warn]:N0} warnings\n{Hint}", sh => FilterLevel?.Invoke(Level.Warn, !sh, false)),
             ("Patterns", Fmt.Compact(s.Patterns), "distinct templates", "Distinct message templates", null),
             ("Exceptions", Fmt.Compact(s.Exceptions), "distinct types", "Distinct exception types", null),
             ("Multi-line", Fmt.Compact(s.Multiline), r.Scanned > 0 ? $"{Fmt.Pct(s.Multiline, r.Scanned)} · avg {s.AvgLength:0} chars" : "", "Entries with more than one line", null),
@@ -345,7 +346,7 @@ public sealed class AnalyticsView : Control
             ctx.DrawRectangle(s.Color(p), null, new Rect(lx, a.Y + 4, 10, 10), 2, 2);
             var w = Text(ctx, s.Name, lx + 15, a.Y, p.Fg2, 12);
             var f = s.Filter;
-            AddHit(new Rect(lx - 2, a.Y - 2, w + 20, 20), $"{s.Name}\n{Hint}", sh => FilterLevel?.Invoke(f, !sh));
+            AddHit(new Rect(lx - 2, a.Y - 2, w + 20, 20), $"{s.Name}\n{Hint}", sh => FilterLevel?.Invoke(f, !sh, true));
             lx += w + 32;
         }
         Text(ctx, $"{Fmt.Span(tl.BucketMs)} per bar · peak {max:N0}", a.Right, a.Y, p.Fg3, 11.5, right: true);
@@ -432,7 +433,7 @@ public sealed class AnalyticsView : Control
     {
         var total = r.Levels.Sum();
         var rows = LevelOrder.Where(l => r.Levels[(int)l] > 0).Select(l => new BarRow(LevelLabel[(int)l], r.Levels[(int)l],
-            $"{LevelNames.Labels[(int)l]}: {r.Levels[(int)l]:N0} ({Fmt.Pct(r.Levels[(int)l], total)})\n{Hint}", sh => FilterLevel?.Invoke(l, !sh), LevelBrush(p, l))).ToList();
+            $"{LevelNames.Labels[(int)l]}: {r.Levels[(int)l]:N0} ({Fmt.Pct(r.Levels[(int)l], total)})\n{Hint}", sh => FilterLevel?.Invoke(l, !sh, false), LevelBrush(p, l))).ToList();
         return Bars(ctx, p, a, rows, total);
     }
 
