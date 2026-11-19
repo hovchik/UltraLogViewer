@@ -358,7 +358,7 @@ await step('groups repeated entries with a ×N badge', async () => {
 });
 
 await step('lists patterns and filters to one with a double-click', async () => {
-  await win.click('#btn-patterns');
+  await win.click('.view-tab[data-view="patterns"]');
   await win.waitForSelector('#patterns:not(.hidden) .pt-row', { timeout: 20000 });
   assert.ok(await win.locator('#grid').evaluate((e) => e.classList.contains('hidden')));
   assert.match(await win.locator('#patterns .pt-sum').innerText(), /^[\d,]+ patterns in [\d,]+ of [\d,]+ entries/);
@@ -381,6 +381,14 @@ await step('analyses the whole log in the background and filters from the charts
   await win.keyboard.press('Control+Shift+Y');
   await win.waitForSelector('#analytics:not(.hidden) .an-card', { timeout: 20000 });
   assert.ok(await win.locator('#work').evaluate((e) => e.classList.contains('hidden')));
+  // the views are tabs at the right end of the tab bar
+  assert.deepEqual(await win.locator('.view-tab').allInnerTexts().then((t) => t.map((x) => x.replace(/ \d+%$/, ''))), ['Log', 'Patterns', 'Analytics']);
+  assert.equal(await win.locator('.view-tab.on').getAttribute('data-view'), 'analytics');
+  await win.click('.view-tab[data-view="log"]');
+  await win.waitForSelector('#analytics.hidden', { state: 'attached' });
+  assert.equal(await win.locator('.view-tab.on').getAttribute('data-view'), 'log');
+  await win.click('.view-tab[data-view="analytics"]');
+  await win.waitForSelector('#analytics:not(.hidden) .an-card', { timeout: 20000 });
   await win.waitForFunction(() => /^Analysed [\d,]+ entries/.test(document.querySelector('#analytics .an-state')?.textContent ?? ''), null, { timeout: 60000 });
   assert.equal(await win.locator('#analytics .an-prog').getAttribute('aria-valuenow'), '100');
   for (const title of ['Insights', 'Levels over time', 'Levels', 'Top message patterns', 'Fields']) assert.ok((await win.locator('#analytics .an-card h3', { hasText: title }).count()) > 0, title);
@@ -405,7 +413,7 @@ await step('analyses the whole log in the background and filters from the charts
   }
   await win.waitForFunction(() => !/shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });
   // a pattern row filters to the pattern
-  await win.click('#btn-analytics');
+  await win.click('.view-tab[data-view="analytics"]');
   await win.locator('#analytics .an-card', { hasText: 'Top message patterns' }).locator('.an-pt').first().click();
   await win.waitForSelector('#analytics.hidden', { state: 'attached' });
   await win.waitForFunction(() => /shown/.test(document.querySelector('#status')?.textContent ?? ''), null, { timeout: 20000 });

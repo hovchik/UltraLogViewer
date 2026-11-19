@@ -441,6 +441,44 @@ function renderTabs() {
     });
     el.append(tabEl);
   }
+  if (tabs.length) el.append(viewTabs);
+  renderViewTabs();
+}
+
+// The views of the active tab (the log, its patterns, its analytics) sit at the right end of the tab bar, so they
+// are always one click away and never pushed off a narrow toolbar.
+const viewTabs = h('div', { class: 'view-tabs' });
+const VIEWS = [
+  { id: 'log', title: 'Log', tip: 'The log entries (Esc)' },
+  { id: 'patterns', title: 'Patterns', tip: 'Messages grouped by template (Ctrl+Shift+A)' },
+  { id: 'analytics', title: 'Analytics', tip: 'Charts and insights over the whole log, worked out in the background (Ctrl+Shift+Y)' },
+] as const;
+for (const v of VIEWS)
+  viewTabs.append(
+    h('div', {
+      class: 'view-tab', 'data-view': v.id, title: v.tip,
+      onclick: () => {
+        if (!active) return;
+        if (v.id === 'patterns') setPatternsShown(active, true);
+        else if (v.id === 'analytics') setAnalyticsShown(active, true);
+        else {
+          const owner = ownerOf(active);
+          if (active.showPatterns) setPatternsShown(active, false);
+          if (owner?.showPatterns) setPatternsShown(owner, false);
+          setAnalyticsShown(active, false);
+        }
+      },
+    }, v.title),
+  );
+
+function renderViewTabs() {
+  const owner = ownerOf(active);
+  const view = owner?.showAnalytics ? 'analytics' : (active?.showPatterns || owner?.showPatterns) ? 'patterns' : 'log';
+  const an = analyticsStatus(owner?.analytics);
+  for (const el of viewTabs.children as HTMLCollectionOf<HTMLElement>) {
+    el.classList.toggle('on', el.dataset.view === view);
+    if (el.dataset.view === 'analytics') el.textContent = an && an.label !== 'Analysis paused' ? `Analytics ${Math.floor(an.fraction * 100)}%` : 'Analytics';
+  }
 }
 
 function renderRecent() {
@@ -2163,6 +2201,7 @@ function renderStatus() {
   if (i.sources.some((s) => s.live)) parts.push(`<span class="live">● live${t.follow ? ' · following' : ''}</span>`);
   el.innerHTML = parts.join('');
   renderPaneHeads();
+  renderViewTabs();
   el.querySelector('.enc')?.addEventListener('click', chooseEncoding);
   el.querySelector('.fmt')?.addEventListener('click', openFormatPicker);
   el.querySelector('.an-status')?.addEventListener('click', () => active && setAnalyticsShown(active, true));
@@ -2179,8 +2218,7 @@ function renderToolbar() {
   $('#btn-follow').classList.toggle('on', !!active?.follow);
   $('#btn-hist').classList.toggle('on', settings.showHistogram !== false);
   $('#btn-detail').classList.toggle('on', settings.showDetail !== false);
-  $('#btn-patterns').classList.toggle('on', !!active?.showPatterns);
-  $('#btn-analytics').classList.toggle('on', !!ownerOf(active)?.showAnalytics);
+  renderViewTabs();
 }
 
 // -------------------------------------------------------------------- layout
@@ -2554,8 +2592,6 @@ $('#btn-follow').onclick = toggleFollow;
 $('#btn-hist').onclick = () => toggleLayout('showHistogram');
 $('#btn-detail').onclick = () => toggleLayout('showDetail');
 $('#btn-help').onclick = showHelp;
-$('#btn-patterns').onclick = () => active && setPatternsShown(active, !active.showPatterns);
-$('#btn-analytics').onclick = () => active && setAnalyticsShown(active, !ownerOf(active)?.showAnalytics);
 $('#btn-clear').onclick = () => active && clearView(active);
 $('#btn-theme').onclick = () => {
   settings.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';

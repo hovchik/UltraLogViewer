@@ -29,6 +29,7 @@ public sealed partial class MainWindow
     private void RefreshChecks()
     {
         foreach (var (item, get) in _checks) item.IsChecked = get();
+        UpdateViewTabs();
     }
 
     /// <summary>Changes a display setting, saves it and redraws the grid.</summary>

@@ -43,7 +43,7 @@ public sealed partial class MainWindow
         ToolTip.SetTip(close, "Back to the log (Esc)");
         close.Click += (_, _) => ShowAnalytics(false);
         var right = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _analyticsState, _analyticsProgress, _analyticsPause, rerun, close } };
-        var head = new DockPanel { Margin = new Thickness(10, 4), Children = { right, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { title, sub } } } };
+        var head = new DockPanel { Margin = new Thickness(10, 4), Children = { right, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, ClipToBounds = true, Children = { title, sub } } } };
         DockPanel.SetDock(right, Dock.Right);
         var headBorder = new Border { Child = head, BorderThickness = new Thickness(0, 0, 0, 1), BorderBrush = new SolidColorBrush(Color.Parse("#808080"), 0.25) };
         _analyticsScroll = new ScrollViewer { Content = _analytics, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
@@ -82,6 +82,77 @@ public sealed partial class MainWindow
         ToolTip.SetTip(_statusAnalytics, "Background analysis of the whole log: open Analytics (Ctrl+Shift+Y)");
         return _analyticsPane;
     }
+
+    private readonly StackPanel _viewTabs = new() { Orientation = Orientation.Horizontal, Spacing = 2, Margin = new Thickness(8, 0, 6, 0), IsVisible = false };
+    private readonly List<(Border Cell, TextBlock Label, Func<bool> On, Action Click)> _viewCells = [];
+    private TextBlock? _analyticsTabLabel;
+
+    /// <summary>
+    /// The tab bar: the open files on the left, and the views of the active one (Log, Patterns, Analytics) on the
+    /// right, so the views are always one click away and never pushed off a narrow toolbar.
+    /// </summary>
+    private Control BuildTabBar(Control files)
+    {
+        ViewTab("Log", "The log entries (Esc)", () => !_patternsShown && !_analyticsShown, () =>
+        {
+            if (_analyticsShown) ShowAnalytics(false);
+            if (_patternsShown) ShowPatterns(false);
+        });
+        ViewTab("Patterns", "Group messages by pattern (Ctrl+Shift+A)", () => _patternsShown, () =>
+        {
+            if (!_patternsShown) ShowPatterns(true);
+        });
+        _analyticsTabLabel = ViewTab("Analytics", "Charts and insights over the whole log, worked out in the background (Ctrl+Shift+Y)", () => _analyticsShown, () =>
+        {
+            if (!_analyticsShown) ShowAnalytics(true);
+        });
+        var bar = new DockPanel { Children = { _viewTabs, files } };
+        DockPanel.SetDock(_viewTabs, Dock.Right);
+        return bar;
+    }
+
+    private TextBlock ViewTab(string title, string tip, Func<bool> on, Action click)
+    {
+        var label = new TextBlock { Text = title, VerticalAlignment = VerticalAlignment.Center };
+        var cell = new Border
+        {
+            Padding = new Thickness(12, 4),
+            BorderThickness = new Thickness(0, 0, 0, 2),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Child = label,
+        };
+        ToolTip.SetTip(cell, tip);
+        cell.PointerPressed += (_, e) =>
+        {
+            if (!e.GetCurrentPoint(cell).Properties.IsLeftButtonPressed) return;
+            e.Handled = true;
+            click();
+        };
+        _viewCells.Add((cell, label, on, click));
+        _viewTabs.Children.Add(cell);
+        return label;
+    }
+
+    /// <summary>Shows which view is open, and the analysis progress on the Analytics tab.</summary>
+    private void UpdateViewTabs()
+    {
+        var p = Palette.Current;
+        _viewTabs.IsVisible = _active is not null;
+        foreach (var (cell, label, on, _) in _viewCells)
+        {
+            var sel = on();
+            cell.BorderBrush = sel ? p.Accent : Brushes.Transparent;
+            cell.Background = sel ? p.Bg : Brushes.Transparent;
+            label.FontWeight = sel ? FontWeight.SemiBold : FontWeight.Normal;
+        }
+        if (_analyticsTabLabel is null) return;
+        var r = AnalyticsOwner()?.AnalyticsResult;
+        _analyticsTabLabel.Text = r?.State is AnalyticsState.Running or AnalyticsState.Waiting ? $"Analytics {Math.Floor(r.Progress * 100)}%" : "Analytics";
+    }
+
+    /// <summary>The view tabs as shown ("*" marks the open one); empty while they are hidden.</summary>
+    internal IReadOnlyList<string> ViewTabsForTest => _viewTabs.IsVisible ? _viewCells.Select(c => c.Label.Text + (c.On() ? " *" : "")).ToList() : [];
+    internal void ClickViewTabForTest(string title) => _viewCells.First(c => c.Label.Text!.StartsWith(title, StringComparison.Ordinal)).Click();
 
     /// <summary>The tab the dashboard is about: the left pane's tab in a split.</summary>
     private DocumentTab? AnalyticsOwner() => OwnerOf(_active);
@@ -158,6 +229,7 @@ public sealed partial class MainWindow
     /// <summary>The status bar shows the analysis while it runs.</summary>
     private void UpdateAnalyticsStatus()
     {
+        UpdateViewTabs();
         var r = AnalyticsOwner()?.AnalyticsResult;
         var on = r is { State: AnalyticsState.Running or AnalyticsState.Waiting or AnalyticsState.Paused } && _active?.BusyProgress is null;
         _statusAnalytics.IsVisible = _statusAnalyticsBar.IsVisible = on;

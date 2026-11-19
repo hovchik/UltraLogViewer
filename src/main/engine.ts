@@ -40,6 +40,9 @@ export type EngineEvent =
 const POLL_MS = 500;
 const PROGRESS_MS = 50;
 
+/** How long background analysis keeps waiting after the last load, filter or search. */
+const QUIET_MS = 1000;
+
 export class Engine {
   private docs = new Map<number, LogDocument>();
   private nextId = 1;
@@ -51,6 +54,8 @@ export class Engine {
   private analytics = new Map<number, AnalyticsJob>();
   /** Scans the user waits for (filter, search, stats…) running now: background analysis pauses meanwhile. */
   private interactive = 0;
+  /** When the last foreground scan or indexing ended: the analysis waits a moment, as the user is likely to start the next. */
+  private quietSince = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private progressAt = new Map<string, number>();
@@ -199,14 +204,19 @@ export class Engine {
       return await run();
     } finally {
       this.interactive--;
+      this.quietSince = Date.now();
     }
   }
 
-  /** True while a file is being indexed or a scan the user waits for runs. */
+  /** True while a file is being indexed or a scan the user waits for runs, and for a second after. */
   private busy(): boolean {
     if (this.interactive > 0) return true;
-    for (const d of this.docs.values()) if (d.indexing) return true;
-    return false;
+    for (const d of this.docs.values())
+      if (d.indexing) {
+        this.quietSince = Date.now();
+        return true;
+      }
+    return Date.now() - this.quietSince < QUIET_MS;
   }
 
   private analyticsJob(docId: number): AnalyticsJob {
