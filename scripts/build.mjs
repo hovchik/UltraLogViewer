@@ -11,7 +11,12 @@ for (const f of ['index.html', 'styles.css']) fs.copyFileSync(`src/renderer/${f}
 // the logo shown in Help › About (the same one the .NET app uses)
 fs.copyFileSync('dotnet/src/UltraLogViewer.Desktop/Assets/app.png', 'dist/renderer/app.png');
 // Help › About shows the date the app was built
-const define = { __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)) };
+// and the copyright, which electron-builder strips from the packaged package.json (it drops the whole `build` key)
+const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+const define = {
+  __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)),
+  __COPYRIGHT__: JSON.stringify(pkg.build?.copyright ?? ''),
+};
 
 const builds = [
   { ...common, define, platform: 'node', format: 'cjs', external: ['electron'], entryPoints: ['src/main/main.ts'], outfile: 'dist/main/main.js' },

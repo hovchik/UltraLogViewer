@@ -177,10 +177,12 @@ async function openSource(ref: SourceRef, opts: { roots?: unknown; editor?: unkn
 
 /** Set by scripts/build.mjs to the build date (yyyy-mm-dd). */
 declare const __BUILD_DATE__: string;
+/** Set by scripts/build.mjs from package.json build.copyright (that key is not in the packaged package.json). */
+declare const __COPYRIGHT__: string;
 
 /** Name, version, copyright and description for Help › About, read from package.json rather than repeated here. */
 function appInfo() {
-  let pkg: { productName?: string; description?: string; homepage?: string; build?: { copyright?: string } } = {};
+  let pkg: { productName?: string; description?: string; homepage?: string } = {};
   try {
     pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf-8'));
   } catch {
@@ -189,7 +191,7 @@ function appInfo() {
   return {
     name: pkg.productName ?? app.getName(),
     version: app.getVersion(),
-    copyright: pkg.build?.copyright ?? '',
+    copyright: typeof __COPYRIGHT__ === 'string' ? __COPYRIGHT__ : '',
     description: pkg.description ?? '',
     homepage: pkg.homepage ?? 'https://github.com/hovchik/UltraLogViewer',
     buildDate: typeof __BUILD_DATE__ === 'string' ? __BUILD_DATE__ : '',
